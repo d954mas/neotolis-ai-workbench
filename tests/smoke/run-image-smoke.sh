@@ -244,9 +244,11 @@ docker exec "$container" sh -c 'tail -1 /io/.naiw/events.jsonl' \
     | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); assert d["kind"]=="done", d; assert d["schema_version"]==1, d; assert d["payload"]=={"summary":"smoke ok"}, d' \
     || fail "SIG-03: last events.jsonl line malformed"
 
-# Step 13: GIT-03 — credential helper reads /run/secrets/github_token. We pre-populate a
-# fake token in a named volume, then re-launch the container with the volume mounted at
-# /run/secrets, then invoke `git credential fill` and assert the helper output.
+# Step 13: GIT-03 — git credential fill resolves /run/secrets/github_token through
+# git's standard credential.helper protocol via the in-image /etc/gitconfig. We
+# pre-populate a fake token in a named volume, re-launch the container with the
+# volume mounted at /run/secrets, then run `git credential fill` and assert the
+# resolved username + password came from the helper.
 fake_token="ghp_TESTTOKEN1234567890123456789012345"
 docker volume create "$vol_secret" >/dev/null
 docker run --rm \
@@ -262,18 +264,23 @@ docker run -d -t --name "$container" \
     -v "$vol_secret:/run/secrets:ro" \
     "$image" >/dev/null
 sleep 2
-# GIT-03 contract: the credential helper reads /run/secrets/github_token and
-# emits `username=x-access-token` + `password=<token>` in git credential helper
-# protocol. We invoke the helper DIRECTLY rather than via `git credential fill`
-# because the image's /etc/gitconfig registers the helper as
-# `helper = naiw-git-credential-helper` (no leading `!`, no absolute path),
-# which makes git look for `git-credential-naiw-git-credential-helper` — a
-# binary that doesn't exist. That's a Plan 01 image config issue (deferred);
-# the helper script ITSELF works correctly. The contract under test is that
-# the helper reads the secret and produces the right protocol output, which
-# is what we verify here.
-cred_out="$(docker exec -u pi "$container" naiw-git-credential-helper get 2>/dev/null)"
-[[ "$cred_out" == *"username=x-access-token"* ]] || fail "GIT-03: helper output missing 'username=x-access-token': $cred_out"
-[[ "$cred_out" == *"password=$fake_token"* ]] || fail "GIT-03: helper output missing fake token password: $cred_out"
+
+# GIT-03 contract: invoking `git credential fill` for an https://github.com URL
+# resolves through /etc/gitconfig's [credential "https://github.com"] helper
+# entry (now `helper = !naiw-git-credential-helper`, fixed in Plan 01-07), which
+# in turn reads /run/secrets/github_token and emits username=x-access-token +
+# password=<token>. This exercises git's STANDARD credential resolution path
+# end-to-end — no direct helper-script invocation, no bypass.
+cred_out="$(printf 'protocol=https\nhost=github.com\n\n' \
+    | docker exec -i -u pi "$container" git credential fill 2>/dev/null)"
+[[ "$cred_out" == *"username=x-access-token"* ]] || fail "GIT-03: 'git credential fill' output missing 'username=x-access-token': $cred_out"
+[[ "$cred_out" == *"password=$fake_token"* ]] || fail "GIT-03: 'git credential fill' output missing fake token password: $cred_out"
+
+# Belt-and-braces: assert the gitconfig wiring itself is in shell-exec form.
+# A regression in Plan 01-07's gitconfig fix would resurface as a failure here
+# even if `git credential fill` somehow short-circuited the helper.
+gitconfig_helper="$(docker exec "$container" sh -c 'grep -E "^\s*helper" /etc/gitconfig' | tr -d '\r\n')"
+[[ "$gitconfig_helper" == *"helper = !naiw-git-credential-helper"* ]] \
+    || fail "GIT-03: /etc/gitconfig helper line is '$gitconfig_helper'; expected 'helper = !naiw-git-credential-helper' (Plan 01-07 fix)"
 
 echo "[smoke] ok"
