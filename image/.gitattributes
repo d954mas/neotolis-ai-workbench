@@ -1,0 +1,9 @@
+# Enforce LF line endings for all image files.
+# Windows CRLF would break the bash shebang (`#!/usr/bin/env bash\r`),
+# `set -euo pipefail`, and any sed pattern in /etc/naiw/redact.sed.
+# Image is built on Linux (or in a Linux container builder); these files
+# MUST have LF regardless of host autocrlf setting.
+* text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+entrypoint.sh text eol=lf

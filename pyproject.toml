@@ -1,0 +1,20 @@
+# Repo-root tooling config. Each Python package has its own pyproject.toml under src/.
+#
+# Python version split (intentional):
+#   target-version = "py312"  → ruff lint/syntax target. Matches the host
+#                               controller floor; do not lower to py311.
+#   requires-python = ">=3.11" in src/naiw_*/pyproject.toml → wheel compatibility.
+#                               The image's internal Python is 3.11 (Debian 12).
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src/naiw_common", "src/naiw_signal"]
+addopts = "-ra"
