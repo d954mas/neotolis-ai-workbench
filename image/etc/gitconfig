@@ -1,5 +1,5 @@
 # /etc/gitconfig — baked into image; applies to all users (per D-15)
 [credential "https://github.com"]
-    helper = naiw-git-credential-helper
+    helper = !naiw-git-credential-helper
 [init]
     defaultBranch = main
