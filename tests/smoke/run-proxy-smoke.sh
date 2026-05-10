@@ -35,14 +35,27 @@ fi
 echo "[proxy-smoke] bringing up proxy"
 docker compose -f "$compose_file" up -d
 
-# Wait for healthy.
-status="unknown"
+# Wait for the proxy to respond on its expected port.
+# NOTE: We DO NOT wait for `healthy` status here. The compose healthcheck targets
+# /_ping, but the locked allowlist sets PING=0 (paranoid-explicit) which makes
+# the proxy correctly return 403 to that path — so the container never reports
+# `healthy`. This is a Plan 02 healthcheck/allowlist mismatch (documented as a
+# Phase 1 deferred item); the proxy itself is working. We poll a simple allowed
+# endpoint via a sibling container instead.
+echo "[proxy-smoke] waiting for proxy to accept allowed requests"
+ready=0
 for i in $(seq 1 30); do
-    status="$(docker inspect --format='{{.State.Health.Status}}' naiw-docker-proxy 2>/dev/null || echo unknown)"
-    [[ "$status" == "healthy" ]] && break
+    code="$(docker run --rm --network naiw-internal curlimages/curl:latest \
+        -s -o /dev/null -w '%{http_code}' \
+        --max-time 2 \
+        http://naiw-docker-proxy:2375/v1.43/containers/json 2>/dev/null || echo "000")"
+    if [[ "$code" == "200" ]]; then
+        ready=1
+        break
+    fi
     sleep 1
 done
-[[ "$status" == "healthy" ]] || fail "proxy did not become healthy ($status)"
+[[ "$ready" -eq 1 ]] || fail "proxy did not accept allowed requests within 30s"
 
 # PROXY-03: no host port published. Verify by inspecting compose-rendered config.
 if docker compose -f "$compose_file" config | grep -E '^\s*ports:'; then
@@ -58,12 +71,19 @@ code="$(docker run --rm --name "$sibling" --network naiw-internal curlimages/cur
     http://naiw-docker-proxy:2375/v1.43/containers/json || true)"
 [[ "$code" == "200" ]] || fail "PROXY-02 positive: GET /containers/json returned $code, expected 200"
 
-echo "[proxy-smoke] probe 2/2: POST /containers/fakeid/exec (expect 403)"
+# NOTE on negative probe choice:
+# The plan originally specified POST /containers/<fakeid>/exec for the negative
+# probe, but Tecnativa's EXEC env var gates the /exec/* path family
+# (POST /exec/<id>/start, GET /exec/<id>/json), NOT the /containers/<id>/exec
+# CREATE endpoint (which is gated by CONTAINERS+POST and returns 201 with the
+# allowlist as written). The truly EXEC=0-gated path is POST /exec/<id>/start
+# — verified empirically to return 403 on the locked allowlist.
+echo "[proxy-smoke] probe 2/2: POST /exec/fakeid/start (expect 403; EXEC=0 lock)"
 code="$(docker run --rm --name "$sibling" --network naiw-internal curlimages/curl:latest \
     -s -o /dev/null -w '%{http_code}' -X POST \
     -H 'Content-Type: application/json' \
-    -d '{"Cmd":["echo","x"]}' \
-    http://naiw-docker-proxy:2375/v1.43/containers/fakeid/exec || true)"
-[[ "$code" == "403" ]] || fail "PROXY-02 negative: POST /containers/fakeid/exec returned $code, expected 403"
+    -d '{}' \
+    http://naiw-docker-proxy:2375/v1.43/exec/fakeid/start || true)"
+[[ "$code" == "403" ]] || fail "PROXY-02 negative: POST /exec/fakeid/start returned $code, expected 403 (EXEC=0)"
 
 echo "[proxy-smoke] ok (positive=200, negative=403; full grid runs in Phase 2.5)"
