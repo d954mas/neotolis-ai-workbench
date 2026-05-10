@@ -1,0 +1,11 @@
+# ~/naiw-data/projects.yaml — example
+# Top-level `projects:` map of <alias>: { path: <absolute-path> }.
+# Per PROJ-02, paths MUST resolve under ~/naiw-data/workspace/repos/ (Phase 3 controller enforces).
+# Per PROJ-03, this file is alias map only — NO per-project instructions.
+# Per-project instructions live in each repo's AGENTS.md.
+
+projects:
+  # Example: a project whose source repo lives at ~/naiw-data/workspace/repos/example-app.
+  # Replace `example-app` with your real alias and path before using.
+  example-app:
+    path: ~/naiw-data/workspace/repos/example-app
