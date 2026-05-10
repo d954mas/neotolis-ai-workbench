@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naiw_signal"
+version = "0.1.0"
+description = "NAIW signal CLI — append done/fail/wait events to /io/.naiw/events.jsonl."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+readme = "../../README.md"
+dependencies = [
+    "click>=8.2,<9",
+    "naiw_common>=0.1.0",
+]
+
+[project.scripts]
+naiw-signal = "naiw_signal.cli:cli"
+
+[tool.setuptools]
+packages = ["naiw_signal"]
