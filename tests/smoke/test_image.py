@@ -10,7 +10,10 @@ import sys
 
 def test_image_smoke():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    script = os.path.join(repo_root, "tests", "smoke", "run-image-smoke.sh")
+    # Use forward-slash relative path so bash on Windows (Git Bash / WSL) can
+    # find the script regardless of the host pytest's path style. cwd is the
+    # repo root, so a relative POSIX path resolves correctly in either env.
+    script = "tests/smoke/run-image-smoke.sh"
     result = subprocess.run(
         ["bash", script],
         cwd=repo_root,
