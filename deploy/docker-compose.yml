@@ -1,0 +1,72 @@
+# deploy/docker-compose.yml — naiw-docker-proxy (Phase 1)
+# Authoritative source for the locked Docker socket proxy allowlist (PROXY-02 / D-26).
+# Every Tecnativa env var below is verified as real upstream (RESEARCH Tecnativa Allowlist table).
+# Five vars set to "1" — the locked allowlist; every other documented var explicitly "0"
+# (paranoid-explicit pattern). Adding a new env var to "1" requires updating this comment
+# and the README rationale in deploy/proxy/README.md.
+
+version: "3.9"
+
+networks:
+  naiw-internal:
+    name: naiw-internal
+    driver: bridge
+
+services:
+  naiw-docker-proxy:
+    # IMPORTANT (D-25, PROXY-01): pin by sha256, NOT by tag.
+    # Executor MUST run before commit:
+    #     docker pull tecnativa/docker-socket-proxy:v0.4.2
+    #     docker inspect --format='{{index .RepoDigests 0}}' tecnativa/docker-socket-proxy:v0.4.2
+    # and replace the digest below with the resolved 64-hex digest.
+    # Resolved 2026-05-10 by Phase 1 Plan 02 executor against linux/amd64 manifest.
+    image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    container_name: naiw-docker-proxy
+    restart: unless-stopped
+    networks: [naiw-internal]
+    # D-23 / PROXY-03: expose on private network only — NO host-published port.
+    # Adding a `ports:` block here is a security regression and MUST be rejected in code review.
+    expose:
+      - "2375"
+    # D-27: socket mounted READ-ONLY.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # ── Locked allowlist (D-26 / PROXY-02). All five MUST stay "1". ──
+      CONTAINERS: "1"            # GET /containers/* (list, inspect, logs)
+      POST: "1"                  # gates ANY POST/PUT/DELETE; required for stop/start
+      ALLOW_START: "1"           # POST /containers/<id>/start
+      ALLOW_STOP: "1"            # POST /containers/<id>/stop
+      ALLOW_RESTARTS: "1"        # stop/restart/kill (controller naiw-tasks finish path)
+      # ── Everything else explicit "0" (paranoid-explicit). Alphabetical. ──
+      ALLOW_PAUSE: "0"
+      ALLOW_UNPAUSE: "0"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      EVENTS: "0"                # upstream default 1; we override.
+      EXEC: "0"                  # D3 lock — closed permanently. docker attach does NOT need EXEC.
+      GRPC: "0"
+      IMAGES: "0"
+      INFO: "0"                  # CLAUDE.md once mentioned INFO=1; CONTEXT.md correctly forces "0".
+      NETWORKS: "0"
+      NODES: "0"
+      PING: "0"                  # gates daemon /_ping passthrough; healthcheck below targets HAProxy own /_ping which is unaffected (RESEARCH Pitfall 6).
+      PLUGINS: "0"
+      SECRETS: "0"               # Swarm /secrets/* — unrelated to BuildKit secrets.
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"                 # Swarm tasks — unrelated to NAIW task containers.
+      VERSION: "0"               # Phase 3 may flip to "1" if docker-py 7.1 negotiation fails.
+      VOLUMES: "0"
+    # D-24 healthcheck — targets HAProxy own /_ping (NOT daemon; see RESEARCH Pitfall 6).
+    # Verifies proxy container is alive; does NOT verify daemon reachability (intentional).
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:2375/_ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
