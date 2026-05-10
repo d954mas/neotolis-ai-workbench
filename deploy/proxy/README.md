@@ -24,7 +24,7 @@ Five env vars are set to `"1"`. Everything else (every documented Tecnativa env 
 
 Flipping any of these to `"1"` is a security regression and MUST go through a documented PROJECT-level decision change:
 
-`EXEC` (D3 — permanent close), `IMAGES`, `VOLUMES`, `NETWORKS`, `BUILD`, `INFO`, `EVENTS`, `PING` (proxy own /_ping still answers — this is HAProxy local), `VERSION`, `AUTH`, `SECRETS` (Swarm), `SERVICES`, `SESSION`, `SWARM`, `SYSTEM`, `TASKS` (Swarm), `PLUGINS`, `NODES`, `CONFIGS`, `DISTRIBUTION`, `COMMIT`, `GRPC`, `ALLOW_PAUSE`, `ALLOW_UNPAUSE`.
+`EXEC` (D3 — permanent close), `IMAGES`, `VOLUMES`, `NETWORKS`, `BUILD`, `INFO`, `EVENTS`, `PING`, `VERSION`, `AUTH`, `SECRETS` (Swarm), `SERVICES`, `SESSION`, `SWARM`, `SYSTEM`, `TASKS` (Swarm), `PLUGINS`, `NODES`, `CONFIGS`, `DISTRIBUTION`, `COMMIT`, `GRPC`, `ALLOW_PAUSE`, `ALLOW_UNPAUSE`.
 
 ## Network model
 
@@ -35,9 +35,17 @@ Flipping any of these to `"1"` is a security regression and MUST go through a do
 
 ## Healthcheck
 
-`wget --quiet --tries=1 --spider http://localhost:2375/_ping || exit 1` runs every 30s.
+No compose healthcheck is configured. The locked allowlist sets `PING=0` (paranoid-explicit), which makes the proxy correctly return 403 to the `/_ping` path — empirically verified by Plan 06's proxy smoke harness. There is no allowed HTTP endpoint that a healthcheck could probe without weakening the security boundary, so we rely on `restart: unless-stopped` and the operator's `docker compose ps` for liveness.
 
-Important: the proxy is HAProxy. HAProxy answers `/_ping` itself, even with our `PING=0` (which gates only daemon-`/_ping` passthrough). The healthcheck verifies the proxy container is alive; it does NOT verify the host Docker daemon is reachable. This is intentional — daemon health is a host concern, not a proxy concern.
+If a future phase needs a probe (e.g., a downstream service uses `depends_on: { condition: service_healthy }`), use a TCP-level check that does not traverse the allowlist:
+
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/2375 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+This opens a TCP connection to port 2375 and exits 0 if haproxy accepts it. It does NOT issue any HTTP request and therefore does NOT touch the allowlist.
 
 ## Digest update procedure
 

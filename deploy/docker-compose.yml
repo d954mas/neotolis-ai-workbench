@@ -53,7 +53,7 @@ services:
       INFO: "0"                  # CLAUDE.md once mentioned INFO=1; CONTEXT.md correctly forces "0".
       NETWORKS: "0"
       NODES: "0"
-      PING: "0"                  # gates daemon /_ping passthrough; healthcheck below targets HAProxy own /_ping which is unaffected (RESEARCH Pitfall 6).
+      PING: "0"                  # paranoid-explicit deny of the daemon ping passthrough.
       PLUGINS: "0"
       SECRETS: "0"               # Swarm /secrets/* — unrelated to BuildKit secrets.
       SERVICES: "0"
@@ -63,10 +63,8 @@ services:
       TASKS: "0"                 # Swarm tasks — unrelated to NAIW task containers.
       VERSION: "0"               # Phase 3 may flip to "1" if docker-py 7.1 negotiation fails.
       VOLUMES: "0"
-    # D-24 healthcheck — targets HAProxy own /_ping (NOT daemon; see RESEARCH Pitfall 6).
-    # Verifies proxy container is alive; does NOT verify daemon reachability (intentional).
-    healthcheck:
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:2375/_ping || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    # No healthcheck. The locked allowlist sets PING=0 (paranoid-explicit), so any
+    # ping probe returns 403. The proxy is single-process haproxy with
+    # `restart: unless-stopped` — that is the recovery mechanism. Downstream services
+    # do not use `depends_on: { condition: service_healthy }` in Phase 1. If a future
+    # phase needs a probe, use a TCP-level liveness check (see deploy/proxy/README.md).
