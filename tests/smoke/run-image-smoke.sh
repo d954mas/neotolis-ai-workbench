@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# tests/smoke/run-image-smoke.sh — Phase 1 image smoke harness (D-33).
-# Covers: IMG-01, IMG-02, IMG-03, IMG-04, IMG-05, IMG-06, IMG-07, IMG-08, IMG-09, IMG-10, SIG-01, SIG-03, SIG-04, GIT-02, GIT-03.
-# Phase 2.5 runs the full hardened lifecycle (cap-drop, read-only, etc.); this only validates the static image artifacts.
+# Image smoke harness. Validates the static image artifacts:
+# CMD/labels/init compatibility, hot-package install fail-fast, tool presence,
+# pi-user identity, UTF-8 round-trip, redaction filter, naiw-signal end-to-end,
+# git credential helper resolution. Hardened-lifecycle flags
+# (cap-drop, read-only, etc.) belong in a separate suite.
 #
 # Mount strategy: we use Docker NAMED VOLUMES (not host bind-mounts). Two reasons:
 #   1. Bind-mounts of host tmpdirs do NOT register as proper kernel mountpoints on
@@ -36,6 +38,7 @@ vol_io="naiw-smoke-io-$$"
 vol_pkg="naiw-smoke-pkg-$$"
 vol_pkg_bad="naiw-smoke-pkgbad-$$"
 vol_secret="naiw-smoke-secret-$$"
+vol_stub_bin="naiw-smoke-stubbin-$$"
 
 fail() {
     echo "[smoke] FAIL: $*" >&2
@@ -47,8 +50,7 @@ cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker rm -f "$fail_container" >/dev/null 2>&1 || true
     docker rm -f "$populate_container" >/dev/null 2>&1 || true
-    docker volume rm "$vol_work" "$vol_io" "$vol_pkg" "$vol_pkg_bad" "$vol_secret" >/dev/null 2>&1 || true
-    docker volume rm "naiw-smoke-stubbin-$$" >/dev/null 2>&1 || true
+    docker volume rm "$vol_work" "$vol_io" "$vol_pkg" "$vol_pkg_bad" "$vol_secret" "$vol_stub_bin" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -65,33 +67,32 @@ fi
 
 # Step 2: docker inspect probes (no run needed).
 cmd="$(docker inspect --format='{{json .Config.Cmd}}' "$image")"
-[[ "$cmd" == '["tmux","new-session","-A","-s","main"]' ]] || fail "IMG-04: CMD is $cmd"
+[[ "$cmd" == '["tmux","new-session","-A","-s","main"]' ]] || fail "CMD: expected tmux new-session, got $cmd"
 
 labels="$(docker inspect --format='{{json .Config.Labels}}' "$image")"
 for label in 'naiw.managed":"1"' 'naiw.role":"task-image"' 'naiw.version' 'naiw.git-sha' 'naiw.pi-version' 'naiw.signal-schema":"1"' 'org.opencontainers.image.source'; do
-    [[ "$labels" == *"$label"* ]] || fail "IMG-10: missing label fragment '$label' in $labels"
+    [[ "$labels" == *"$label"* ]] || fail "labels: missing fragment '$label' in $labels"
 done
 
-# Step 3: --init compatibility (IMG-03). PID 1 should be the init wrapper (tini
-# or Docker's tini-equivalent `docker-init` on Docker Desktop). The image deliberately
-# does NOT bake procps (ps), so we read /proc/1/comm directly. We use --entrypoint sh
-# to bypass the normal naiw-entrypoint (which requires /work /io /pi-packages mounts);
-# we are only verifying that --init injects an init wrapper at PID 1, not the full
-# bootstrap path.
+# Step 3: --init compatibility. PID 1 should be the init wrapper (tini or
+# Docker's `docker-init` equivalent on Docker Desktop). The image deliberately
+# does NOT bake procps (ps), so we read /proc/1/comm directly. We use
+# --entrypoint sh to bypass naiw-entrypoint (which requires /work /io
+# /pi-packages mounts); we only need to verify --init injects an init wrapper.
 pid1="$(docker run --init --rm --entrypoint sh "$image" -c 'cat /proc/1/comm' 2>/dev/null | tr -d '\r\n')"
 case "$pid1" in
     tini|docker-init)
         ;;
     *)
-        fail "IMG-03: PID 1 with --init is '$pid1', expected 'tini' or 'docker-init'"
+        fail "PID 1 under --init is '$pid1', expected 'tini' or 'docker-init'"
         ;;
 esac
 
 # Create empty named volumes for /work, /io, /pi-packages, and the broken /pi-packages.
 # Volumes default to root-owned mode 0755; the image runs as USER pi (uid 1000), so
 # the entrypoint cannot mkdir under /io. On a real Linux VPS, the controller creates
-# host directories with `chown 1000:1000` per D-19 — we replicate that here by
-# chowning the volume mountpoints to uid 1000 via a --user 0 helper container.
+# host directories with `chown 1000:1000` — we replicate that here by chowning the
+# volume mountpoints to uid 1000 via a --user 0 helper container.
 docker volume create "$vol_work" >/dev/null
 docker volume create "$vol_io" >/dev/null
 docker volume create "$vol_pkg" >/dev/null
@@ -103,34 +104,33 @@ docker run --rm --user 0 \
     --entrypoint sh "$image" -c 'chown 1000:1000 /work /io' >/dev/null
 
 # ──────────────────────────────────────────────────────────────────
-# Step 4: IMG-05 fail-fast probe.
-# Run the image with a (a) populated /pi-packages mount AND (b) a forced-failing
+# Step 4: hot-package install fail-fast probe.
+# Run the image with (a) a populated /pi-packages mount AND (b) a forced-failing
 # `pi` binary on PATH; assert:
-#   (a) docker run exits non-zero (entrypoint fail-fast per D-11)
+#   (a) docker run exits non-zero (entrypoint fails fast)
 #   (b) docker logs contain `naiw: package install failed:`
 # We do this BEFORE the happy-path run so a regression here trips early.
 #
 # Why a stub `pi` and not a "broken package directory"?
-# Empirically, Pi's `install <path>` command (`@earendil-works/pi-coding-agent`)
-# is lenient: it succeeds for ANY existing directory regardless of contents
-# (no `setup.py`/`pyproject.toml` validation). We cannot trigger Pi's installer
-# itself to fail via package contents. What IMG-05 is contractually testing is
-# the entrypoint's `|| { echo 'naiw: package install failed: $d' >&2; exit 1; }`
-# WRAPPER — i.e., does the entrypoint correctly fail fast when `pi install`
-# returns non-zero, for ANY reason. We assert that contract by overriding
-# `pi` on PATH with a stub that exits 1.
+# Empirically, Pi's `install <path>` command is lenient: it succeeds for ANY
+# existing directory regardless of contents (no `setup.py`/`pyproject.toml`
+# validation). We cannot trigger Pi's installer itself to fail via package
+# contents. What this probe is contractually testing is the entrypoint's
+# `|| { echo 'naiw: package install failed: $d' >&2; exit 1; }` wrapper —
+# i.e., does the entrypoint correctly fail fast when `pi install` returns
+# non-zero, for ANY reason. We assert that contract by overriding `pi` on
+# PATH with a stub that exits 1.
 # ──────────────────────────────────────────────────────────────────
-echo "[smoke] IMG-05 fail-fast probe (stub pi forces install failure)"
+echo "[smoke] hot-package fail-fast probe (stub pi forces install failure)"
 # Pre-populate $vol_pkg_bad with one (any) broken-pkg directory so the entrypoint's
 # `for d in /pi-packages/*/` loop has a directory to iterate.
 # Pre-populate a stub-bin volume with a `pi` that exits 1 on `install`.
-docker volume create "$vol_pkg_bad" >/dev/null 2>&1 || true
-stub_bin_vol="naiw-smoke-stubbin-$$"
-docker volume create "$stub_bin_vol" >/dev/null
+# (vol_pkg_bad was already created above with the rest of the volumes.)
+docker volume create "$vol_stub_bin" >/dev/null
 docker run --rm --name "$populate_container" \
     --user 0 \
     -v "$vol_pkg_bad:/pkg" \
-    -v "$stub_bin_vol:/stubbin" \
+    -v "$vol_stub_bin:/stubbin" \
     --entrypoint sh "$image" -c '
         mkdir -p /pkg/broken-pkg
         echo "broken" > /pkg/broken-pkg/marker
@@ -151,24 +151,24 @@ docker run --name "$fail_container" \
     -v "$vol_work:/work" \
     -v "$vol_io:/io" \
     -v "$vol_pkg_bad:/pi-packages:ro" \
-    -v "$stub_bin_vol:/stubbin:ro" \
+    -v "$vol_stub_bin:/stubbin:ro" \
     "$image" >/dev/null 2>&1
 fail_rc=$?
 set -e
 
 if [[ "$fail_rc" -eq 0 ]]; then
     docker logs "$fail_container" 2>&1 | sed 's/^/[fail-container] /' >&2 || true
-    echo "[smoke] FAIL: IMG-05: docker run with broken /pi-packages exited 0; expected non-zero (fail-fast)" >&2
+    echo "[smoke] FAIL: docker run with broken /pi-packages exited 0; expected non-zero (fail-fast)" >&2
     exit 1
 fi
 
 if ! docker logs "$fail_container" 2>&1 | grep -q 'naiw: package install failed:'; then
     docker logs "$fail_container" 2>&1 | sed 's/^/[fail-container] /' >&2 || true
-    echo "[smoke] FAIL: IMG-05: docker logs missing 'naiw: package install failed:' message" >&2
+    echo "[smoke] FAIL: docker logs missing 'naiw: package install failed:' message" >&2
     exit 1
 fi
 docker rm -f "$fail_container" >/dev/null 2>&1 || true
-echo "[smoke] IMG-05 fail-fast probe ok (rc=$fail_rc, log contains 'package install failed:')"
+echo "[smoke] fail-fast probe ok (rc=$fail_rc, log contains 'package install failed:')"
 
 # Reset /work and /io for the happy-path run by removing and re-creating the volumes.
 # (The fail-fast container left /io/.naiw/events.jsonl from entrypoint Step 2; clean state for happy path.)
@@ -198,55 +198,56 @@ for i in $(seq 1 30); do
     fi
     sleep 0.5
 done
-docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ]' || fail "D-07: /io/.naiw/events.jsonl missing"
+docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ]' || fail "/io/.naiw/events.jsonl missing"
 
-# Step 7: tool presence (IMG-02).
+# Step 7: tool presence.
 for tool in pi tmux git gh node npm python3 ffmpeg rg; do
     docker exec -u pi "$container" sh -c "command -v $tool >/dev/null" \
-        || fail "IMG-02: $tool not on PATH"
+        || fail "tool not on PATH: $tool"
 done
 
-# Step 8: SIG-04 — no docker CLI in image.
+# Step 8: docker CLI MUST NOT be inside the image. Pi never gets Docker access.
 if docker exec -u pi "$container" sh -c "command -v docker" 2>/dev/null; then
-    fail "SIG-04: docker CLI is on PATH inside image (must NOT be)"
+    fail "docker CLI is on PATH inside image (must NOT be)"
 fi
 
-# Step 9: IMG-09 / GIT-02 — pi user runs the workload; ~/.gitconfig is empty.
+# Step 9: pi user runs the workload; ~/.gitconfig is empty
+# (system gitconfig is the only credential source).
 user="$(docker exec -u pi "$container" id -un | tr -d '\r\n')"
-[[ "$user" == "pi" ]] || fail "IMG-09: user is '$user', expected 'pi'"
+[[ "$user" == "pi" ]] || fail "user is '$user', expected 'pi'"
 size="$(docker exec -u pi "$container" sh -c 'wc -c < /home/pi/.gitconfig' | tr -d '\r\n ')"
-[[ "$size" == "0" ]] || fail "GIT-02: /home/pi/.gitconfig size=$size, expected 0"
+[[ "$size" == "0" ]] || fail "/home/pi/.gitconfig size=$size, expected 0"
 
-# Step 10: IMG-08 — UTF-8 locale; non-ASCII echo survives pipe-pane.
+# Step 10: UTF-8 locale; non-ASCII echo survives pipe-pane.
 docker exec "$container" tmux send-keys -t main 'printf "%s\n" "héllo-utf8"' Enter
 sleep 1
 docker exec "$container" sh -c 'grep -q "héllo-utf8" /io/terminal.log' \
-    || fail "IMG-08: UTF-8 round-trip failed (héllo-utf8 not in terminal.log)"
+    || fail "UTF-8 round-trip failed (héllo-utf8 not in terminal.log)"
 
-# Step 11: IMG-06 — pipe-pane redaction filter active.
-fake_token="ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 36 a's = matches ghp_[A-Za-z0-9]{30,}
+# Step 11: pipe-pane redaction filter is active.
+fake_token="ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 36 a's matches ghp_[A-Za-z0-9]{30,}
 docker exec "$container" tmux send-keys -t main "printf '%s\n' '$fake_token'" Enter
 sleep 1
 docker exec "$container" sh -c 'grep -q "\[REDACTED\]" /io/terminal.log' \
-    || fail "IMG-06: [REDACTED] not in /io/terminal.log after synthetic ghp_ token"
+    || fail "[REDACTED] not in /io/terminal.log after synthetic ghp_ token"
 if docker exec "$container" sh -c "grep -q '$fake_token' /io/terminal.log"; then
-    fail "IMG-06: raw token '$fake_token' leaked into /io/terminal.log (redaction filter not active)"
+    fail "raw token '$fake_token' leaked into /io/terminal.log (redaction filter not active)"
 fi
 
-# Step 12: SIG-01 + SIG-03 — naiw-signal works as pi and writes a valid event.
+# Step 12: naiw-signal works as pi and writes a valid event.
 docker exec -u pi "$container" naiw-signal --help >/dev/null \
-    || fail "SIG-01: naiw-signal --help failed"
+    || fail "naiw-signal --help failed"
 docker exec -u pi "$container" naiw-signal done --summary "smoke ok" \
-    || fail "SIG-02: naiw-signal done failed"
+    || fail "naiw-signal done failed"
 line_count="$(docker exec "$container" sh -c 'wc -l < /io/.naiw/events.jsonl' | tr -d '\r\n ')"
-[[ "$line_count" -ge 1 ]] || fail "SIG-03: events.jsonl has $line_count lines, expected >= 1"
+[[ "$line_count" -ge 1 ]] || fail "events.jsonl has $line_count lines, expected >= 1"
 docker exec "$container" sh -c 'tail -1 /io/.naiw/events.jsonl' \
     | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); assert d["kind"]=="done", d; assert d["schema_version"]==1, d; assert d["payload"]=={"summary":"smoke ok"}, d' \
-    || fail "SIG-03: last events.jsonl line malformed"
+    || fail "last events.jsonl line malformed"
 
-# Step 13: GIT-03 — git credential fill resolves /run/secrets/github_token through
-# git's standard credential.helper protocol via the in-image /etc/gitconfig. We
-# pre-populate a fake token in a named volume, re-launch the container with the
+# Step 13: `git credential fill` resolves /run/secrets/github_token through
+# git's standard credential.helper protocol via the in-image /etc/gitconfig.
+# Pre-populate a fake token in a named volume, re-launch the container with the
 # volume mounted at /run/secrets, then run `git credential fill` and assert the
 # resolved username + password came from the helper.
 fake_token="ghp_TESTTOKEN1234567890123456789012345"
@@ -263,24 +264,35 @@ docker run -d -t --name "$container" \
     -v "$vol_pkg:/pi-packages:ro" \
     -v "$vol_secret:/run/secrets:ro" \
     "$image" >/dev/null
-sleep 2
 
-# GIT-03 contract: invoking `git credential fill` for an https://github.com URL
-# resolves through /etc/gitconfig's [credential "https://github.com"] helper
-# entry (now `helper = !naiw-git-credential-helper`, fixed in Plan 01-07), which
-# in turn reads /run/secrets/github_token and emits username=x-access-token +
+# Wait for entrypoint to finish (same pattern as Step 6). `sleep 2` was flaky on
+# slower hosts (Docker Desktop, busy CI) — the container needs to complete
+# mountpoint checks, hot-package install, and tmux session bring-up before
+# `docker exec` can reach a usable shell.
+for i in $(seq 1 30); do
+    if docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' \
+    || fail "container not ready after re-launch with secret volume"
+
+# Invoking `git credential fill` for an https://github.com URL must resolve
+# through /etc/gitconfig's [credential "https://github.com"] helper entry,
+# which reads /run/secrets/github_token and emits username=x-access-token +
 # password=<token>. This exercises git's STANDARD credential resolution path
 # end-to-end — no direct helper-script invocation, no bypass.
 cred_out="$(printf 'protocol=https\nhost=github.com\n\n' \
     | docker exec -i -u pi "$container" git credential fill 2>/dev/null)"
-[[ "$cred_out" == *"username=x-access-token"* ]] || fail "GIT-03: 'git credential fill' output missing 'username=x-access-token': $cred_out"
-[[ "$cred_out" == *"password=$fake_token"* ]] || fail "GIT-03: 'git credential fill' output missing fake token password: $cred_out"
+[[ "$cred_out" == *"username=x-access-token"* ]] || fail "'git credential fill' output missing 'username=x-access-token': $cred_out"
+[[ "$cred_out" == *"password=$fake_token"* ]] || fail "'git credential fill' output missing fake token password: $cred_out"
 
 # Belt-and-braces: assert the gitconfig wiring itself is in shell-exec form.
-# A regression in Plan 01-07's gitconfig fix would resurface as a failure here
-# even if `git credential fill` somehow short-circuited the helper.
+# A regression in the gitconfig would resurface as a failure here even if
+# `git credential fill` somehow short-circuited the helper.
 gitconfig_helper="$(docker exec "$container" sh -c 'grep -E "^\s*helper" /etc/gitconfig' | tr -d '\r\n')"
 [[ "$gitconfig_helper" == *"helper = !naiw-git-credential-helper"* ]] \
-    || fail "GIT-03: /etc/gitconfig helper line is '$gitconfig_helper'; expected 'helper = !naiw-git-credential-helper' (Plan 01-07 fix)"
+    || fail "/etc/gitconfig helper line is '$gitconfig_helper'; expected 'helper = !naiw-git-credential-helper'"
 
 echo "[smoke] ok"

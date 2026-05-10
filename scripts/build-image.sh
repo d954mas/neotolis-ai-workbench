@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# scripts/build-image.sh — reproducible naiw-task-image build (D-28, D-29).
+# Reproducible naiw-task-image build helper.
+# Reads PI_VERSION from image/PI_VERSION (overridable), stamps git SHA into LABEL.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

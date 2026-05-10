@@ -1,4 +1,4 @@
-# /etc/gitconfig — baked into image; applies to all users (per D-15)
+# /etc/gitconfig — baked into image; applies to all users.
 [credential "https://github.com"]
     helper = !naiw-git-credential-helper
 [init]

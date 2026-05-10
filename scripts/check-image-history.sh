@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# scripts/check-image-history.sh — IMG-11 audit.
-# Verifies `docker history --no-trunc <image>` contains NO secret-shape strings
-# (D-31: Phase 1 uses no build-time secrets, so this is clean by construction;
-# this script catches accidental regressions).
+# Audit `docker history --no-trunc <image>` for secret-shape strings.
+# The build pipeline uses no build-time secrets so the history is clean by
+# construction; this script exists to catch accidental regressions
+# (e.g., someone embedding a token via ARG by mistake).
 set -euo pipefail
 
 if [[ "${1:-}" == "--help" ]]; then
@@ -28,9 +28,8 @@ if ! docker image inspect "$image" >/dev/null 2>&1; then
     exit 2
 fi
 
-# The regex set matches D-14's redaction patterns AND the "Bearer" prefix that the
-# redactor catches. If anything in `docker history --no-trunc` matches, the build
-# leaked a secret-shaped string.
+# Regex set mirrors the redactor's patterns plus the "Bearer" prefix.
+# Any match means the build leaked a secret-shaped string into image metadata.
 pattern='ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|ghs_[A-Za-z0-9]{30,}|sk-ant-[A-Za-z0-9_-]{30,}|sk-[A-Za-z0-9]{30,}|AKIA[A-Z0-9]{16}|[Bb]earer [A-Za-z0-9._-]{20,}'
 
 if docker history --no-trunc "$image" | grep -E -- "$pattern"; then

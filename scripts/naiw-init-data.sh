@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# scripts/naiw-init-data.sh — idempotent host data-layout bootstrap (D-19 / DATA-01 / DATA-02).
+# Idempotent host data-layout bootstrap. Creates ~/naiw-data/ with the documented
+# subdirectories. Re-running is a no-op; an existing projects.yaml is never overwritten.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,10 +25,10 @@ mkdir -p \
     "$data_root/workspace/repos" \
     "$data_root/tasks"
 
-# D-19 / DATA-02: secrets/ MUST be mode 0700. mkdir -p uses umask (~0755), so explicit chmod.
+# secrets/ MUST be mode 0700. `mkdir -p` honours umask (typically 0755), so explicit chmod.
 chmod 0700 "$data_root/secrets"
 
-# D-19 / Pitfall 9: copy example projects.yaml ONLY if destination does not exist.
+# Copy example projects.yaml ONLY if destination does not exist (preserve operator edits).
 example_src="$here/projects.yaml.example"
 projects_dst="$data_root/projects.yaml"
 if [[ ! -e "$projects_dst" ]]; then

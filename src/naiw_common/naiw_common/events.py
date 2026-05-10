@@ -1,8 +1,9 @@
-"""Event schema for /io/.naiw/events.jsonl (D-04, SIG-03)."""
+"""Event schema for /io/.naiw/events.jsonl."""
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from typing import Any, Literal, Mapping, Optional
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 SCHEMA_VERSION: int = 1
 
@@ -11,7 +12,7 @@ Kind = Literal["done", "fail", "wait"]
 
 @dataclass(frozen=True)
 class Event:
-    """One event line in /io/.naiw/events.jsonl. D-04 wire format."""
+    """One event line in /io/.naiw/events.jsonl."""
 
     ts: str
     kind: Kind
@@ -20,14 +21,14 @@ class Event:
 
     @staticmethod
     def now_iso() -> str:
-        """ISO-8601 UTC with millisecond precision and Z suffix (D-04)."""
-        now = datetime.now(timezone.utc)
+        """ISO-8601 UTC with millisecond precision and Z suffix."""
+        now = datetime.now(UTC)
         ms = now.microsecond // 1000
         return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
     @classmethod
-    def done(cls, summary: Optional[str] = None) -> "Event":
-        """`done` event. D-04: omit `summary` field if not provided."""
+    def done(cls, summary: str | None = None) -> "Event":
+        """`done` event. `summary` field is omitted when not provided."""
         payload: dict[str, Any] = {}
         if summary is not None:
             payload["summary"] = summary
@@ -35,14 +36,14 @@ class Event:
 
     @classmethod
     def fail(cls, reason: str) -> "Event":
-        """`fail` event. D-04: `reason` is required and non-empty."""
+        """`fail` event. `reason` is required and non-empty."""
         if not reason:
             raise ValueError("fail: reason is required")
         return cls(ts=cls.now_iso(), kind="fail", payload={"reason": reason})
 
     @classmethod
     def wait(cls, reason: str) -> "Event":
-        """`wait` event. D-04: `reason` is required and non-empty."""
+        """`wait` event. `reason` is required and non-empty."""
         if not reason:
             raise ValueError("wait: reason is required")
         return cls(ts=cls.now_iso(), kind="wait", payload={"reason": reason})

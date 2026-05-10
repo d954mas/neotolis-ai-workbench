@@ -1,14 +1,16 @@
-"""Atomic JSONL append (D-05, SIG-03).
+"""Atomic JSONL append.
 
-Writer uses POSIX os.open(O_WRONLY|O_APPEND|O_CREAT) + os.write + os.fsync.
-No Python text-mode open() — Pitfall 2 (buffering can split a write into multiple
-syscalls, breaking the < PIPE_BUF atomicity guarantee).
+Uses POSIX os.open(O_WRONLY|O_APPEND|O_CREAT) + a single os.write + os.fsync.
+Python text-mode open() is deliberately avoided — its buffering can split a
+single logical write into multiple syscalls, defeating the atomic-append
+guarantee that O_APPEND provides for writes within a kernel page.
 """
 
 import json
 import os
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from naiw_common.paths import EVENTS_PATH
 
@@ -23,8 +25,10 @@ def _serialise(event: Mapping[str, Any]) -> bytes:
 def append_event(event: Mapping[str, Any]) -> None:
     """Append one JSON event line to EVENTS_PATH atomically.
 
-    D-05: O_WRONLY|O_APPEND|O_CREAT, single os.write, os.fsync before os.close.
-    D-06: any I/O error -> stderr line + sys.exit(1), no retry loop.
+    Open with O_WRONLY|O_APPEND|O_CREAT, do a single os.write, fsync before close.
+    Any I/O error prints a `naiw-signal: ...` line to stderr and exits 1.
+    There is no retry loop — the controller is the only consumer and re-issues
+    on its own schedule if the journal is briefly unavailable.
     """
     encoded = _serialise(event)
     if len(encoded) >= PIPE_BUF_LIMIT:

@@ -1,4 +1,4 @@
-# /etc/naiw/redact.sed — Phase 1 redaction patterns (D-14)
+# /etc/naiw/redact.sed — secret-shape patterns redacted from terminal.log
 s/ghp_[A-Za-z0-9]{30,}/[REDACTED]/g
 s/gho_[A-Za-z0-9]{30,}/[REDACTED]/g
 s/ghs_[A-Za-z0-9]{30,}/[REDACTED]/g

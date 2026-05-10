@@ -1,7 +1,6 @@
-"""naiw-signal CLI (D-32 / SIG-02)."""
+"""naiw-signal CLI: append done/fail/wait events to /io/.naiw/events.jsonl."""
 
 import click
-
 from naiw_common.events import Event
 
 from .writer import append_event

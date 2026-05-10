@@ -1,11 +1,14 @@
-"""Pytest wrapper around tests/smoke/run-image-smoke.sh (D-33).
+"""Pytest wrapper around tests/smoke/run-image-smoke.sh.
 
-Bash for the actual interaction (visible in plain text), pytest for the assertion frame.
+Bash does the actual interaction (visible in plain text); pytest provides the
+assertion frame so a single `pytest -q` covers smoke + unit tests together.
 """
 
 import os
 import subprocess
 import sys
+
+import pytest
 
 
 def test_image_smoke():
@@ -20,6 +23,15 @@ def test_image_smoke():
         capture_output=True,
         text=True,
     )
+    # Don't let environmental skips (no docker, no compose v2) masquerade as PASS:
+    # the smoke script exits 0 with a `[smoke] SKIP:` marker on stdout when its
+    # preconditions aren't met. Translate that into a real pytest skip.
+    if "[smoke] SKIP" in result.stdout:
+        skip_line = next(
+            (line for line in result.stdout.splitlines() if "[smoke] SKIP" in line),
+            "[smoke] SKIP",
+        )
+        pytest.skip(skip_line.strip())
     # Print on failure for debuggability.
     if result.returncode != 0:
         sys.stderr.write("\n=== run-image-smoke.sh stdout ===\n" + result.stdout)

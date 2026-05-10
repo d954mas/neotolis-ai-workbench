@@ -1,12 +1,12 @@
-"""Tests for naiw_signal.writer (D-32, SIG-03 atomicity)."""
+"""Tests for naiw_signal.writer (atomic append behaviour)."""
 
 import json
 import os
 
 import pytest
+from naiw_common.events import Event
 
 from naiw_signal import writer as writer_mod
-from naiw_common.events import Event
 
 
 @pytest.fixture
@@ -84,7 +84,7 @@ def test_single_write_per_event(journal, monkeypatch):
     monkeypatch.setattr(os, "write", spy_write)
     writer_mod.append_event(Event.done(summary="x").as_dict())
 
-    # Exactly one os.write call for this fd; the writer MUST NOT split into multiple syscalls (D-05).
+    # Exactly one os.write call for this fd; the writer MUST NOT split into multiple syscalls.
     assert len(writes) == 1, f"expected 1 write, got {len(writes)}"
 
 

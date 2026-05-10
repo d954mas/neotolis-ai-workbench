@@ -1,11 +1,10 @@
-"""Tests for naiw_common.events (D-32, SIG-03 schema)."""
+"""Tests for naiw_common.events."""
 
 import json
 import re
 
 import pytest
-
-from naiw_common.events import Event, SCHEMA_VERSION
+from naiw_common.events import SCHEMA_VERSION, Event
 
 PIPE_BUF_LIMIT = 4096
 ISO_MS_Z_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
@@ -18,7 +17,9 @@ def test_schema_version_constant():
 
 def test_now_iso_format():
     ts = Event.now_iso()
-    assert ISO_MS_Z_PATTERN.match(ts), f"timestamp {ts!r} does not match D-04 format"
+    assert ISO_MS_Z_PATTERN.match(ts), (
+        f"timestamp {ts!r} is not ISO-8601 UTC with ms precision and Z suffix"
+    )
 
 
 def test_done_without_summary_omits_field():
@@ -26,7 +27,7 @@ def test_done_without_summary_omits_field():
     d = ev.as_dict()
     assert d["kind"] == "done"
     assert d["schema_version"] == 1
-    assert d["payload"] == {}, "summary field MUST be omitted when not provided (D-04)"
+    assert d["payload"] == {}, "summary field MUST be omitted when not provided"
 
 
 def test_done_with_summary_sets_field():
@@ -64,7 +65,7 @@ def test_round_trip_through_json():
 
 
 def test_line_under_pipe_buf_for_typical_events():
-    # PIPE_BUF atomicity invariant (D-05).
+    # Single-line size must stay within the writer's atomic-append budget.
     for ev in [
         Event.done(),
         Event.done(summary="x" * 256),
@@ -72,7 +73,8 @@ def test_line_under_pipe_buf_for_typical_events():
         Event.wait(reason="z" * 256),
     ]:
         line = json.dumps(ev.as_dict(), separators=(",", ":"), ensure_ascii=False) + "\n"
-        assert len(line.encode("utf-8")) < PIPE_BUF_LIMIT, f"line too large for atomic append: {len(line)}"
+        encoded_len = len(line.encode("utf-8"))
+        assert encoded_len < PIPE_BUF_LIMIT, f"line too large for atomic append: {encoded_len}"
 
 
 def test_kind_discriminator_round_trips():

@@ -1,12 +1,12 @@
-"""Tests for naiw_signal.cli (D-32, SIG-02)."""
+"""Tests for naiw_signal.cli."""
 
 import json
 
 import pytest
 from click.testing import CliRunner
+from naiw_signal.cli import cli
 
 from naiw_signal import writer as writer_mod
-from naiw_signal.cli import cli
 
 
 @pytest.fixture

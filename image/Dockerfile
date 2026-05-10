@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-# image/Dockerfile — naiw-task-image (Phase 1, multi-stage; D-03)
+# naiw-task-image — multi-stage build.
+# Stage 1 builds wheels for naiw_common and naiw_signal; final image installs
+# them and bakes everything Pi needs (tmux, git, gh, node, python, ffmpeg, ripgrep).
 
 ARG PI_VERSION
 ARG NAIW_VERSION=0.1.0
@@ -14,11 +16,10 @@ COPY src/naiw_signal/ ./naiw_signal/
 RUN python -m build --wheel --outdir /wheels ./naiw_common && \
     python -m build --wheel --outdir /wheels ./naiw_signal
 
-# ── Stage 2: runtime — naiw-task-image (debian:12-slim digest-pinned per D-09) ──
-# Resolved at plan execution via:
+# ── Stage 2: runtime — debian:12-slim, pinned by sha256 (refresh procedure below) ──
+# To refresh:
 #   docker pull debian:12-slim
 #   docker inspect --format='{{index .RepoDigests 0}}' debian:12-slim
-# → debian@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 FROM debian@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS final
 
 ARG PI_VERSION
@@ -30,9 +31,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PI_SKIP_VERSION_CHECK=1
 
-# System packages (IMG-02): tmux, git, python3, ffmpeg, ripgrep, build-essential.
-# Node 20.x via NodeSource (Pi requires >= 20.6.0 per RESEARCH).
-# gh via official GitHub apt repo (RESEARCH §Pattern 1).
+# System packages: tmux, git, python3, ffmpeg, ripgrep, build-essential.
+# Node 20.x via NodeSource (Pi requires >= 20.6.0).
+# gh via official GitHub apt repo (signed by github keyring).
+#
+# apt packages are intentionally NOT version-pinned. The base image is
+# digest-pinned (which controls the apt source state), and floating versions
+# let Debian security patches flow through automatically on rebuild. Revisit
+# if bit-for-bit reproducibility becomes a requirement — in that case use
+# snapshot.debian.org + explicit `pkg=version` pins.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg \
         tmux git \
@@ -49,16 +56,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Pi (pi-coding-agent) — IMG-01. Pinned via PI_VERSION build arg (D-10).
+# Pi (pi-coding-agent) — version pinned via PI_VERSION build arg.
 RUN npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && command -v pi >/dev/null || { echo 'pi not on PATH' >&2; exit 1; }
 
-# Wheels from builder stage (D-03; no source files in final image).
+# Wheels from builder stage (no source files in the final image).
 COPY --from=builder /wheels/*.whl /tmp/wheels/
 RUN pip3 install --no-cache-dir --break-system-packages /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
 
-# Bake config files (D-14, D-15, D-17).
+# Bake config: redaction sed for pipe-pane, tmux config, system gitconfig with
+# the credential helper that resolves /run/secrets/github_token, and the entrypoint.
 COPY image/etc/naiw/redact.sed /etc/naiw/redact.sed
 COPY image/etc/tmux.conf /etc/tmux.conf
 COPY image/etc/gitconfig /etc/gitconfig
@@ -66,19 +74,20 @@ COPY image/etc/naiw-git-credential-helper /usr/local/bin/naiw-git-credential-hel
 COPY image/entrypoint.sh /usr/local/bin/naiw-entrypoint
 RUN chmod 0755 /usr/local/bin/naiw-entrypoint /usr/local/bin/naiw-git-credential-helper
 
-# Non-root pi user (IMG-09). UID 1000 to match common host operator UID.
-# Empty ~/.gitconfig per GIT-02 / D-16. No ~/.ssh/ created (D-15 file-mount only).
+# Non-root `pi` user. UID 1000 to match common host operator UID.
+# Empty ~/.gitconfig (system gitconfig is the only credential source).
+# No ~/.ssh/ is created — secrets arrive via /run/secrets file mounts only.
 RUN useradd -m -u 1000 -s /bin/bash pi \
     && touch /home/pi/.gitconfig \
     && chown pi:pi /home/pi/.gitconfig
 
-# Belt-and-braces SIG-04: NO docker CLI in image. Build fails if any prior layer pulled one in.
+# Belt-and-braces: NO docker CLI in image. Pi must never reach Docker.
+# Build fails if any prior layer accidentally pulled one in.
 RUN ! command -v docker
 
 USER pi
 WORKDIR /work
 
-# IMG-10 / D-30: canonical label set.
 LABEL naiw.managed="1" \
       naiw.role="task-image" \
       naiw.version="${NAIW_VERSION}" \
@@ -87,6 +96,8 @@ LABEL naiw.managed="1" \
       naiw.signal-schema="1" \
       org.opencontainers.image.source="https://github.com/d954mas/neotolis-ai-workbench"
 
-# IMG-04 / D3 attach contract: tmux is the CMD; entrypoint hands off via `exec tmux attach`.
+# tmux is the CMD; entrypoint hands off via `exec tmux attach`.
+# This keeps tmux as PID 1 (or PID 2 under `docker run --init`) so `docker attach`
+# is sufficient — no `docker exec` is needed for the operator session.
 ENTRYPOINT ["/usr/local/bin/naiw-entrypoint"]
 CMD ["tmux", "new-session", "-A", "-s", "main"]
