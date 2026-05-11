@@ -33,13 +33,24 @@ def _resolve_data_root() -> Path:
 
 
 def load() -> Config:
-    """Load controller config. Returns defaults when config.yaml is absent."""
+    """Load controller config. Returns defaults when config.yaml is absent.
+
+    Raises:
+        ValueError: yaml unparseable, schema invalid, unsupported version, or
+            unknown keys. yaml.YAMLError is normalised into ValueError so
+            callers (cli.py) do not need to depend on yaml internals.
+    """
     data_root = _resolve_data_root()
     cfg_path = data_root / "config.yaml"
     if not cfg_path.exists():
         return Config(data_root=data_root)
 
-    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"naiw-tasks: config.yaml cannot be parsed at {cfg_path} ({exc})"
+        ) from exc
     if not isinstance(raw, dict):
         raise ValueError(
             f"naiw-tasks: config.yaml must be a mapping, got {type(raw).__name__}"

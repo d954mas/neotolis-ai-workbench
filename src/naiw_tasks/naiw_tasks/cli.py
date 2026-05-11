@@ -8,8 +8,9 @@ Exit codes
 ----------
   0  success
   1  runtime error (lifecycle.StartFailed and similar; cause already on stderr)
-  2  startup-check failed (or click usage error — message tells you which)
-  3  invalid task id (TASK_ID_RE mismatch)
+  2  startup-check failed, config.yaml parse/schema error, or click usage error
+     (message tells you which)
+  3  invalid task id or project alias (DNS-label shape mismatch)
 """
 
 import sys
@@ -19,19 +20,27 @@ import click
 from naiw_tasks import attach as attach_mod
 from naiw_tasks import config, lifecycle, startup_checks
 from naiw_tasks.docker_client import make_client
-from naiw_tasks.ids import validate_task_id
+from naiw_tasks.ids import validate_project_alias, validate_task_id
 
 
 @click.group(
     help=(
         "naiw-tasks - controller for hardened per-task Docker sessions.\n\n"
-        "Exit codes: 0=success; 1=runtime error; 2=startup-check failed "
-        "(or click usage error - message tells you which); 3=invalid task id."
+        "Exit codes: 0=success; 1=runtime error; 2=startup-check failed, "
+        "config.yaml parse/schema error, or click usage error; "
+        "3=invalid task id or project alias."
     )
 )
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    cfg = config.load()
+    # config.load() raises ValueError on schema mismatch / unparseable yaml.
+    # Catch here so every subcommand gets the same clean error story instead
+    # of a Python traceback at CLI startup.
+    try:
+        cfg = config.load()
+    except ValueError as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(2)
     client = make_client(cfg.docker_proxy_url)
     startup_checks.run_all(cfg, client)
     ctx.ensure_object(dict)
@@ -68,6 +77,15 @@ def start(
     secrets: tuple[str, ...],
 ) -> None:
     """Start a project task (with PROJECT alias) or generic task (no alias)."""
+    # Validate project alias at the CLI boundary so a bad alias gives a clean
+    # operator error instead of a raw ValueError from allocate_task_id deep
+    # inside lifecycle.start.
+    if project is not None:
+        try:
+            validate_project_alias(project)
+        except ValueError as exc:
+            click.echo(f"naiw-tasks: {exc}", err=True)
+            sys.exit(3)
     try:
         lifecycle.start(
             ctx.obj["cfg"],

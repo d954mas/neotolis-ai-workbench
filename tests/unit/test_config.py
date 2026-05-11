@@ -27,6 +27,19 @@ def test_load_reads_config_yaml(tmp_naiw_data: Path) -> None:
     assert cfg.data_root == tmp_naiw_data
 
 
+def test_load_unparseable_yaml_raises_value_error(tmp_naiw_data: Path) -> None:
+    """yaml.YAMLError must be normalised to ValueError so cli.py does not need
+    to depend on yaml internals when wrapping config.load() errors."""
+    (tmp_naiw_data / "config.yaml").write_text(
+        "this is: not: valid: yaml: }}}\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError) as excinfo:
+        config_mod.load()
+    msg = str(excinfo.value)
+    assert "config.yaml" in msg
+    assert "cannot be parsed" in msg
+
+
 def test_load_rejects_unknown_key(tmp_naiw_data: Path) -> None:
     (tmp_naiw_data / "config.yaml").write_text(
         "nonsense: 1\n", encoding="utf-8"

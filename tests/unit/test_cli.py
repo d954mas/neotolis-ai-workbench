@@ -78,6 +78,62 @@ def test_cli_propagates_startup_check_failure(monkeypatch, tmp_path):
     assert "naiw-tasks: nope" in result.stderr
 
 
+def test_cli_config_load_value_error_exits_2_with_clean_message(monkeypatch):
+    """Bad config.yaml must surface as exit 2 + naiw-tasks: prefix, NOT a raw
+    Python traceback."""
+    def bad_load():
+        raise ValueError("naiw-tasks: config.yaml has unknown key ['weird']")
+
+    monkeypatch.setattr(cli_mod.config, "load", bad_load)
+    runner = CliRunner(mix_stderr=False)
+    result = runner.invoke(cli, ["start"])
+    assert result.exit_code == 2
+    assert "naiw-tasks: " in result.stderr
+    assert "unknown key" in result.stderr
+
+
+def test_start_invalid_project_alias_exits_3_with_clean_message(
+    monkeypatch, patched_env
+):
+    """Bad project alias must surface as exit 3 + naiw-tasks: prefix, NOT a
+    raw ValueError from allocate_task_id deep inside lifecycle.start."""
+    fake_lifecycle_start = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
+    runner = CliRunner(mix_stderr=False)
+
+    result = runner.invoke(cli, ["start", "Bad Project!"])
+
+    assert result.exit_code == 3
+    assert "naiw-tasks: " in result.stderr
+    assert "invalid project alias" in result.stderr
+    # lifecycle.start MUST NOT be called for an invalid alias
+    fake_lifecycle_start.assert_not_called()
+
+
+def test_start_with_uppercase_alias_rejected(monkeypatch, patched_env):
+    """DNS-label shape is lowercase-only — uppercase is rejected at CLI boundary."""
+    fake_lifecycle_start = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
+    runner = CliRunner(mix_stderr=False)
+
+    result = runner.invoke(cli, ["start", "Alpha"])
+
+    assert result.exit_code == 3
+    fake_lifecycle_start.assert_not_called()
+
+
+def test_start_with_too_long_alias_rejected(monkeypatch, patched_env):
+    """Alias capped at 60 chars (DNS-label budget for naiw-task-<id>)."""
+    fake_lifecycle_start = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
+    runner = CliRunner(mix_stderr=False)
+
+    result = runner.invoke(cli, ["start", "a" * 61])
+
+    assert result.exit_code == 3
+    fake_lifecycle_start.assert_not_called()
+
+
 # ---------- start subcommand -------------------------------------------------
 
 

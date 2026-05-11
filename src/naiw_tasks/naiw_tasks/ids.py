@@ -15,11 +15,28 @@ from pathlib import Path
 # name suffix (`naiw-task-<id>`) without further escaping.
 TASK_ID_RE: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
+# Project alias is the same shape but caps at 60 chars so `<project>-NNN` (id)
+# always fits the 64-char container-name budget after the `naiw-task-` prefix.
+PROJECT_ALIAS_RE: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}$")
+
 
 def validate_task_id(task_id: str) -> None:
     if not TASK_ID_RE.match(task_id):
         raise ValueError(
             f"invalid task id: {task_id!r} (must match {TASK_ID_RE.pattern})"
+        )
+
+
+def validate_project_alias(alias: str) -> None:
+    """Reject project aliases the controller cannot turn into a valid task id.
+
+    Called at the CLI boundary so `naiw-tasks start "Bad Name!"` produces a
+    clean error instead of a raw ValueError from allocate_task_id mid-flow.
+    """
+    if not alias or not PROJECT_ALIAS_RE.match(alias):
+        raise ValueError(
+            f"invalid project alias: {alias!r} (must be DNS-label shape, "
+            f"a-z/0-9/-, length 1-60, start with alphanumeric)"
         )
 
 
@@ -61,10 +78,7 @@ def allocate_task_id(data_root: Path, project: str) -> str:
       4. Atomically publish new counter, return id.
     """
     # Cheap shape check — full id check happens after candidate composition.
-    if not project or not re.match(r"^[a-z0-9][a-z0-9-]{0,59}$", project):
-        raise ValueError(
-            f"invalid project segment: {project!r} (must be DNS-label shape, len<=60)"
-        )
+    validate_project_alias(project)
 
     locks_dir = data_root / ".locks"
     counters_dir = data_root / ".counters"

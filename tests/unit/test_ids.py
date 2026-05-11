@@ -5,11 +5,46 @@ from pathlib import Path
 
 import pytest
 
-from naiw_tasks.ids import TASK_ID_RE, allocate_task_id, validate_task_id
+from naiw_tasks.ids import (
+    PROJECT_ALIAS_RE,
+    TASK_ID_RE,
+    allocate_task_id,
+    validate_project_alias,
+    validate_task_id,
+)
 
 
 def test_task_id_regex_literal() -> None:
     assert TASK_ID_RE.pattern == r"^[a-z0-9][a-z0-9-]{0,63}$"
+
+
+def test_project_alias_regex_literal() -> None:
+    """Project alias is capped at 60 chars so `<alias>-NNN` fits the 64-char
+    container-name budget after the `naiw-task-` prefix."""
+    assert PROJECT_ALIAS_RE.pattern == r"^[a-z0-9][a-z0-9-]{0,59}$"
+
+
+def test_validate_project_alias_accepts_dns_label_shape() -> None:
+    validate_project_alias("alpha")
+    validate_project_alias("a")
+    validate_project_alias("a0-9b-3")
+    validate_project_alias("neotolis-engine")
+    # 60 chars — boundary
+    validate_project_alias("a" + "0" * 59)
+
+
+def test_validate_project_alias_rejects_bad_shapes() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        validate_project_alias("Alpha")  # uppercase
+    assert "invalid project alias" in str(excinfo.value)
+    with pytest.raises(ValueError):
+        validate_project_alias("-alpha")  # leading dash
+    with pytest.raises(ValueError):
+        validate_project_alias("")  # empty
+    with pytest.raises(ValueError):
+        validate_project_alias("a" + "0" * 60)  # 61 chars — over budget
+    with pytest.raises(ValueError):
+        validate_project_alias("bad name!")  # space + punctuation
 
 
 def test_validate_task_id_accepts_dns_label_shape() -> None:
