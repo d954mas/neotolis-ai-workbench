@@ -16,5 +16,5 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src/naiw_common", "src/naiw_signal"]
+pythonpath = ["src/naiw_common", "src/naiw_signal", "src/naiw_tasks"]
 addopts = "-ra"
