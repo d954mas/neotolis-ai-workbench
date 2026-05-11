@@ -60,6 +60,30 @@ HARDENED_HOST_CONFIG_KWARGS = MappingProxyType({
 PINNED_DOCKER_API_VERSION: str = "1.43"
 
 
+def hardened_kwargs() -> dict:
+    """SDK-compatible deep copy of HARDENED_HOST_CONFIG_KWARGS for ``**`` unpack.
+
+    docker-py 7.1's ``HostConfig.__init__`` runs strict isinstance checks:
+    ``restart_policy`` MUST be a ``dict`` (not a Mapping subtype),
+    ``security_opt`` MUST be a ``list`` (not a tuple/Sequence). The canonical
+    constant is intentionally wrapped in ``MappingProxyType`` + ``tuple`` for
+    immutability invariants — but those types fail HostConfig validation
+    with TypeError *before Docker is even contacted*.
+
+    This function builds a fresh, SDK-typed shallow copy each call so:
+      - the SDK gets the exact types it requires;
+      - the canonical constant stays immutable (no in-place mutation by
+        docker-py can leak back into other callers);
+      - every ``client.containers.run(**hardened_kwargs())`` is independent.
+    """
+    raw = dict(HARDENED_HOST_CONFIG_KWARGS)
+    raw["cap_drop"] = list(raw["cap_drop"])
+    raw["security_opt"] = list(raw["security_opt"])
+    raw["tmpfs"] = dict(raw["tmpfs"])
+    raw["restart_policy"] = dict(raw["restart_policy"])
+    return raw
+
+
 def make_client(proxy_url: str) -> docker.DockerClient:
     """Construct the only DockerClient used by the controller.
 

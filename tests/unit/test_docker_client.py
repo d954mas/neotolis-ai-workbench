@@ -157,6 +157,102 @@ def test_hardened_kwargs_unpacks_via_double_star() -> None:
     assert unpacked["tmpfs"]["/tmp"] == "rw,size=512m,mode=1777"
 
 
+def test_hardened_kwargs_function_returns_sdk_compatible_types() -> None:
+    """docker-py 7.1's HostConfig.__init__ runs strict isinstance checks:
+        restart_policy MUST be `dict` (not Mapping/MappingProxyType)
+        security_opt   MUST be `list` (not tuple/Sequence)
+    The canonical constant uses MappingProxyType + tuple for immutability;
+    hardened_kwargs() must return a fresh dict with SDK-compatible types
+    so `containers.run(**hardened_kwargs())` does not TypeError before
+    Docker is contacted."""
+    from naiw_tasks.docker_client import hardened_kwargs
+
+    k = hardened_kwargs()
+    assert isinstance(k, dict)
+    assert type(k["restart_policy"]) is dict, (
+        f"restart_policy must be `dict` (HostConfig strict isinstance), "
+        f"got {type(k['restart_policy']).__name__}"
+    )
+    assert type(k["security_opt"]) is list, (
+        f"security_opt must be `list` (HostConfig strict isinstance), "
+        f"got {type(k['security_opt']).__name__}"
+    )
+    assert type(k["cap_drop"]) is list
+    assert type(k["tmpfs"]) is dict
+
+
+def test_hardened_kwargs_function_passes_real_hostconfig_validation() -> None:
+    """End-to-end guard: feed the function's output through docker-py's
+    actual HostConfig constructor. This catches any future incompatibility
+    with docker-py upgrades (e.g., new isinstance checks) without waiting
+    for the live operator gate to surface a TypeError."""
+    from docker.types import HostConfig
+    from naiw_tasks.docker_client import (
+        PINNED_DOCKER_API_VERSION,
+        hardened_kwargs,
+    )
+
+    # containers.run() splits its kwargs between HostConfig (cap_drop,
+    # security_opt, restart_policy, tmpfs, mem_limit, …) and ContainerConfig /
+    # NetworkSettings (network, tty, stdin_open). Strip the non-HostConfig
+    # fields so we can feed the rest directly into HostConfig() and verify
+    # the strict isinstance checks pass on OUR types specifically.
+    NOT_HOST_CONFIG = {"network", "tty", "stdin_open"}
+    k = hardened_kwargs()
+    hc_kwargs = {key: v for key, v in k.items() if key not in NOT_HOST_CONFIG}
+    hc = HostConfig(version=PINNED_DOCKER_API_VERSION, **hc_kwargs)
+    # The strict-isinstance checks are what bit the previous design — assert
+    # the post-validation HostConfig produced the expected canonical values.
+    assert hc["RestartPolicy"] == {"Name": "no"}
+    assert hc["SecurityOpt"] == ["no-new-privileges"]
+    assert hc["CapDrop"] == ["ALL"]
+    assert hc["ReadonlyRootfs"] is True
+
+
+def test_hardened_kwargs_function_returns_fresh_copy_each_call() -> None:
+    """Each call returns an independent dict — mutating one MUST NOT leak
+    into the next call or the canonical constant. Defends against docker-py
+    or other consumers mutating the values they receive."""
+    from naiw_tasks.docker_client import (
+        HARDENED_HOST_CONFIG_KWARGS,
+        hardened_kwargs,
+    )
+
+    k1 = hardened_kwargs()
+    k1["restart_policy"]["Name"] = "always"
+    k1["security_opt"].append("seccomp=unconfined")
+    k1["cap_drop"].clear()
+
+    k2 = hardened_kwargs()
+    assert k2["restart_policy"] == {"Name": "no"}
+    assert k2["security_opt"] == ["no-new-privileges"]
+    assert k2["cap_drop"] == ["ALL"]
+
+    # And the constant itself stays unchanged.
+    assert HARDENED_HOST_CONFIG_KWARGS["restart_policy"] == {"Name": "no"}
+    assert HARDENED_HOST_CONFIG_KWARGS["security_opt"] == ("no-new-privileges",)
+    assert HARDENED_HOST_CONFIG_KWARGS["cap_drop"] == ("ALL",)
+
+
+def test_hardened_kwargs_function_value_parity_with_constant() -> None:
+    """Every field in hardened_kwargs() must match the canonical constant
+    (just with mutable container types)."""
+    from naiw_tasks.docker_client import (
+        HARDENED_HOST_CONFIG_KWARGS,
+        hardened_kwargs,
+    )
+
+    k = hardened_kwargs()
+    assert set(k.keys()) == set(HARDENED_HOST_CONFIG_KWARGS.keys())
+    for key, v in HARDENED_HOST_CONFIG_KWARGS.items():
+        # Equality regardless of container type (dict == MappingProxyType,
+        # list == tuple at value level).
+        if hasattr(v, "__iter__") and not isinstance(v, str):
+            assert list(v) == list(k[key])
+        else:
+            assert v == k[key]
+
+
 def test_hardened_kwargs_disallow_ambiguous_and_escalation_keys() -> None:
     from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
 

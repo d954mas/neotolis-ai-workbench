@@ -29,8 +29,8 @@ from naiw_common.events import Event
 from naiw_tasks import git_ops, projects, store
 from naiw_tasks.config import Config
 from naiw_tasks.docker_client import (
-    HARDENED_HOST_CONFIG_KWARGS,
     PINNED_DOCKER_API_VERSION,
+    hardened_kwargs,
 )
 from naiw_tasks.ids import allocate_task_id, validate_task_id
 from naiw_tasks.model import (
@@ -255,7 +255,7 @@ def start(
             labels=labels,
             volumes=volumes,
             detach=True,
-            **HARDENED_HOST_CONFIG_KWARGS,
+            **hardened_kwargs(),
         )
         # Read the image digest from inspect attrs, NOT from any property
         # that would resolve to GET /images/* — the locked proxy blocks that
