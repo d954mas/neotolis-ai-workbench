@@ -821,6 +821,119 @@ def test_start_generic_does_not_set_project_repo_path(tmp_naiw_data):
     assert on_disk["project_repo_path"] is None
 
 
+def test_finish_legacy_task_falls_back_to_projects_yaml(
+    tmp_naiw_data, mock_subprocess_run, capsys
+):
+    """task.json without project_repo_path (created on old code) must still
+    teardown worktree via projects.yaml fallback. Preserves CLAUDE.md's
+    'updates must not break in-flight task.json state' invariant."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    # Pre-create task WITHOUT project_repo_path (legacy schema)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=None,
+    )
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+
+    # Worktree remove was called via fallback
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_remove_calls = [
+        c for c in cmds if c and c[0] == "git" and "worktree" in c and "remove" in c
+    ]
+    assert len(git_remove_calls) == 1, f"expected fallback to remove worktree: {cmds}"
+
+    captured = capsys.readouterr()
+    assert "legacy task.json" in captured.err
+    assert "projects.yaml fallback" in captured.err
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_legacy_task_without_fallback_warns_and_completes(
+    tmp_naiw_data, mock_subprocess_run, capsys
+):
+    """Legacy task.json + projects.yaml gone: finish prints a clear leak warning,
+    skips git_ops, but still marks completed. Operator can clean manually."""
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=None,
+    )
+    # No projects.yaml at all — fallback fails.
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+
+    # NO git worktree remove call
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_remove_calls = [
+        c for c in cmds if c and c[0] == "git" and "worktree" in c and "remove" in c
+    ]
+    assert git_remove_calls == [], f"unexpected remove call: {cmds}"
+
+    captured = capsys.readouterr()
+    assert "NOT removed" in captured.err
+    assert "clean up manually" in captured.err
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_legacy_task_alias_removed_warns(
+    tmp_naiw_data, mock_subprocess_run, capsys
+):
+    """Legacy task + projects.yaml present but alias removed: same leak warning."""
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=None,
+    )
+    # projects.yaml exists but no longer lists 'alpha'
+    (tmp_naiw_data / "projects.yaml").write_text(
+        "projects:\n  beta:\n    path: /tmp/other\n", encoding="utf-8"
+    )
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    # The projects.load call will raise BindMountEscapeError on /tmp/other since
+    # it's not under workspace/repos/. Our fallback catches ValueError (which
+    # BindMountEscapeError subclasses), so we still get the leak-warning path.
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+
+    captured = capsys.readouterr()
+    assert "NOT removed" in captured.err
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
 def test_finish_never_uses_rm_rf():
     src = (
         Path(__file__).resolve().parent.parent.parent

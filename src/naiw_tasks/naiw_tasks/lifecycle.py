@@ -412,8 +412,44 @@ def finish(
             if policy is FinishPolicy.DELETE_WORKTREE:
                 repo_path = data.get("project_repo_path")
                 worktree_path = data.get("worktree_path")
+
+                # Compat-fallback for legacy task.json (task started before
+                # project_repo_path was added to the schema): if the field is
+                # absent but project alias + worktree are set, attempt a one-time
+                # projects.yaml lookup. This preserves the "updates must not
+                # break in-flight task.json state" invariant from CLAUDE.md.
+                if not repo_path and worktree_path and data.get("project"):
+                    project_alias = data["project"]
+                    try:
+                        pmap = projects.load(
+                            cfg.data_root / "projects.yaml", cfg.data_root
+                        )
+                        if project_alias in pmap:
+                            repo_path = pmap[project_alias]["path"]
+                            print(
+                                f"naiw-tasks: task {task_id}: legacy task.json "
+                                f"missing project_repo_path; resolved "
+                                f"{project_alias!r} via projects.yaml fallback",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                    except (FileNotFoundError, ValueError):
+                        # Fall through to leak-warning below.
+                        pass
+
                 if repo_path and worktree_path:
-                    git_ops.worktree_remove(Path(repo_path), Path(worktree_path))
+                    git_ops.worktree_remove(
+                        Path(repo_path), Path(worktree_path)
+                    )
+                elif worktree_path:
+                    print(
+                        f"naiw-tasks: task {task_id}: worktree at "
+                        f"{worktree_path} NOT removed (no project_repo_path "
+                        f"in task.json, projects.yaml fallback unavailable); "
+                        f"clean up manually",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
         ts_now = Event.now_iso()
 
