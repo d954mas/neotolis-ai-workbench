@@ -14,12 +14,17 @@ Docker daemon install via `docker info --format '{{.LiveRestoreEnabled}}'`.
 """
 
 import platform
+import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import docker
+
+# Any /mnt/<letter>/ path on WSL2 is a Windows-FS mount (Docker Desktop
+# virtiofs/9P). Original /mnt/c/-only check was a false-negative on /mnt/d/ etc.
+_WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[a-z]/")
 
 
 class StartupCheckFailed(SystemExit):
@@ -43,13 +48,13 @@ def check_naiw_data_not_symlink(data_root: Path) -> None:
         )
 
 
-def check_not_on_mnt_c_on_linux(data_root: Path) -> None:
+def check_not_on_windows_fs_on_linux(data_root: Path) -> None:
     if platform.system() != "Linux":
         return
     resolved = str(data_root.resolve())
-    if resolved.startswith("/mnt/c/"):
+    if _WINDOWS_FS_ON_LINUX_RE.match(resolved):
         raise StartupCheckFailed(
-            f"~/naiw-data/ on /mnt/c/ is not supported "
+            f"~/naiw-data/ on Windows-FS path {resolved!r} is not supported "
             f"(Docker Desktop virtiofs/9P semantics); "
             f"move to a Linux-FS path on WSL2"
         )
@@ -100,6 +105,6 @@ def run_all(cfg, client) -> None:
     """Run every fatal probe in order. Raises StartupCheckFailed on any failure."""
     data_root = Path(cfg.data_root)
     check_naiw_data_not_symlink(data_root)
-    check_not_on_mnt_c_on_linux(data_root)
+    check_not_on_windows_fs_on_linux(data_root)
     check_docker_reachable(client, cfg.docker_proxy_url)
     check_proxy_allowlist_drift(cfg.docker_proxy_url)

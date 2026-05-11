@@ -15,7 +15,7 @@ from naiw_tasks.startup_checks import (
     StartupCheckFailed,
     check_docker_reachable,
     check_naiw_data_not_symlink,
-    check_not_on_mnt_c_on_linux,
+    check_not_on_windows_fs_on_linux,
     check_proxy_allowlist_drift,
     run_all,
 )
@@ -63,27 +63,38 @@ def test_check_naiw_data_not_symlink_rejects_symlink(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# check_not_on_mnt_c_on_linux
+# check_not_on_windows_fs_on_linux
 # ---------------------------------------------------------------------------
 
 
-def test_check_not_on_mnt_c_skips_on_non_linux(tmp_naiw_data, monkeypatch):
+def test_check_not_on_windows_fs_skips_on_non_linux(tmp_naiw_data, monkeypatch):
     monkeypatch.setattr(
         "naiw_tasks.startup_checks.platform.system", lambda: "Darwin"
     )
     # Even though resolved path may include /mnt/c/, non-Linux returns immediately.
-    assert check_not_on_mnt_c_on_linux(tmp_naiw_data) is None
+    assert check_not_on_windows_fs_on_linux(tmp_naiw_data) is None
 
 
-def test_check_not_on_mnt_c_passes_for_normal_linux_path(tmp_naiw_data, monkeypatch):
+def test_check_not_on_windows_fs_passes_for_normal_linux_path(tmp_naiw_data, monkeypatch):
     monkeypatch.setattr(
         "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
     )
-    # tmp_naiw_data is under tmp_path, not /mnt/c/
-    assert check_not_on_mnt_c_on_linux(tmp_naiw_data) is None
+    # tmp_naiw_data is under tmp_path, not /mnt/<letter>/
+    assert check_not_on_windows_fs_on_linux(tmp_naiw_data) is None
 
 
-def test_check_not_on_mnt_c_rejects_mnt_c_on_linux(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "windows_fs_path",
+    [
+        "/mnt/c/Users/foo/naiw-data",
+        "/mnt/d/data/naiw-data",
+        "/mnt/e/foo",
+        "/mnt/z/share/x",
+    ],
+)
+def test_check_not_on_windows_fs_rejects_all_mnt_letter_paths_on_linux(
+    windows_fs_path, monkeypatch, capsys
+):
     monkeypatch.setattr(
         "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
     )
@@ -93,15 +104,43 @@ def test_check_not_on_mnt_c_rejects_mnt_c_on_linux(monkeypatch, capsys):
             return False
 
         def resolve(self) -> Path:
-            return Path("/mnt/c/Users/foo/naiw-data")
+            return Path(windows_fs_path)
 
     with pytest.raises(SystemExit) as excinfo:
-        check_not_on_mnt_c_on_linux(FakeDataRoot())
+        check_not_on_windows_fs_on_linux(FakeDataRoot())
 
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
-    assert "/mnt/c/" in captured.err
+    assert windows_fs_path in captured.err
     assert "is not supported" in captured.err
+
+
+@pytest.mark.parametrize(
+    "linux_fs_path",
+    [
+        "/home/user/naiw-data",
+        "/opt/naiw-data",
+        # /mntfoo/ — different parent, not WSL mount.
+        "/mntfoo/x",
+        # /mnt/multi-letter — not a single drive letter, not WSL mount.
+        "/mnt/ab/x",
+    ],
+)
+def test_check_not_on_windows_fs_passes_for_lookalike_paths(
+    linux_fs_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+
+    class FakeDataRoot:
+        def is_symlink(self) -> bool:
+            return False
+
+        def resolve(self) -> Path:
+            return Path(linux_fs_path)
+
+    assert check_not_on_windows_fs_on_linux(FakeDataRoot()) is None
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +246,8 @@ def test_run_all_runs_in_documented_order(tmp_naiw_data, monkeypatch):
     )
     monkeypatch.setattr(
         startup_checks,
-        "check_not_on_mnt_c_on_linux",
-        lambda d: order.append("mnt_c"),
+        "check_not_on_windows_fs_on_linux",
+        lambda d: order.append("windows_fs"),
     )
     monkeypatch.setattr(
         startup_checks,
@@ -227,4 +266,4 @@ def test_run_all_runs_in_documented_order(tmp_naiw_data, monkeypatch):
     client = SimpleNamespace()
     run_all(cfg, client)
 
-    assert order == ["symlink", "mnt_c", "docker_reachable", "allowlist_drift"]
+    assert order == ["symlink", "windows_fs", "docker_reachable", "allowlist_drift"]
