@@ -27,16 +27,16 @@ On a non-Linux host (Windows-native, `/mnt/c/`-backed `$HOME`), the gate prints
 
 | ID       | Requirement summary                                                                      | Verification (gate step) | Status note |
 |----------|------------------------------------------------------------------------------------------|--------------------------|-------------|
-| HARD-01  | `--cap-drop=ALL` applied (or smallest verified allow set; never less restrictive)        | step 03                  |             |
-| HARD-02  | `--security-opt=no-new-privileges` applied                                               | step 04                  |             |
-| HARD-03  | `--read-only` rootfs + tmpfs `/tmp` (512m), `/run` (64m), `/home/pi` (128m) writable     | steps 05, 06, 07, 08     |             |
+| HARD-01  | `--cap-drop=ALL` applied (or smallest verified allow set; never less restrictive)        | step 04                  |             |
+| HARD-02  | `--security-opt=no-new-privileges` applied                                               | step 05                  |             |
+| HARD-03  | `--read-only` rootfs + tmpfs `/tmp` (512m), `/run` (64m), `/home/pi` (128m) writable     | steps 03, 06, 07, 08     |             |
 | HARD-04  | `--pids-limit=512` baseline                                                              | step 09                  |             |
 | HARD-05  | `--memory=4g --memory-swap=4g --cpus=2` limits applied                                   | step 10                  |             |
 | HARD-06  | `--network naiw-task-net` (private bridge; no host networking, no docker socket)         | step 11                  |             |
 | HARD-07  | `tasks/<id>/meta/` is NEVER bind-mounted into the container                              | step 12                  |             |
 | HARD-08  | only writable bind-mounts are `/work` and `/io`; only read-only bind-mounts are `/pi-packages` and `/run/secrets/<name>` | step 13 |             |
-| HARD-10  | `--restart=no` (recovery is operator-driven)                                             | step 15                  |             |
-| PROXY-05 | All non-allowlisted operations return 403 from naiw-docker-proxy                         | steps 20-41              | Covers 20 denied verb probes + 2 allowed probes (GET `/containers/json`, POST `/containers/<id>/start`). Denied verb grid: EXEC, IMAGES, VOLUMES, NETWORKS, BUILD, INFO, AUTH, SECRETS, SERVICES, SESSION, SWARM, SYSTEM, TASKS, PLUGINS, NODES, CONFIGS, DISTRIBUTION, EVENTS, PING, VERSION. |
+| HARD-10  | `--restart=no` (recovery is operator-driven)                                             | step 14                  |             |
+| PROXY-05 | All non-allowlisted operations return 403 from naiw-docker-proxy                         | steps 19-40              | Covers 20 denied verb probes + 2 allowed probes (GET `/containers/json`, POST `/containers/<id>/start`). Denied verb grid: EXEC, IMAGES, VOLUMES, NETWORKS, BUILD, INFO, AUTH, SECRETS, SERVICES, SESSION, SWARM, SYSTEM, TASKS, PLUGINS, NODES, CONFIGS, DISTRIBUTION, EVENTS, PING, VERSION. |
 
 ## Lifecycle Cross-Cutting Validations
 
@@ -44,11 +44,11 @@ Not requirement-bound, but required by the gate for end-to-end confidence:
 
 | Validation               | Description                                                                                                                            | Gate step |
 |--------------------------|----------------------------------------------------------------------------------------------------------------------------------------|-----------|
-| PID-1 wrapper            | `/proc/1/comm` in {`tmux`, `tini`, `docker-init`} under `docker run --init`                                                            | step 16   |
-| Secret content + scrub   | `/run/secrets/test_token` readable; not in `docker inspect Config.Env`; raw token NOT in `terminal.log`; `[REDACTED]` IS in `terminal.log` | step 17 |
-| Stop+start log survival  | `terminal.log` size before stop <= size after start AND post-restart marker appears                                                    | step 18   |
-| Signal cycle             | `naiw-signal done --summary "hardened-smoke ok"` appends a valid JSON line to `events.jsonl` with `kind=done`, `schema_version=1`, expected payload | step 19 |
-| cgroup peak evidence     | `pids.peak` and `memory.peak` logged; WARN-only on 60%-of-limit breach; `n/a` on cgroup v1 hosts                                       | step 42   |
+| PID-1 wrapper            | `/proc/1/comm` in {`tmux`, `tini`, `docker-init`} under `docker run --init`                                                            | step 15   |
+| Secret content + scrub   | `/run/secrets/test_token` readable; not in `docker inspect Config.Env`; raw token NOT in `terminal.log`; `[REDACTED]` IS in `terminal.log` | step 16 |
+| Stop+start log survival  | `terminal.log` size before stop <= size after start AND post-restart marker appears                                                    | step 17   |
+| Signal cycle             | `naiw-signal done --summary "hardened-smoke ok"` appends a valid JSON line to `events.jsonl` with `kind=done`, `schema_version=1`, expected payload | step 18 |
+| cgroup peak evidence     | `pids.peak` and `memory.peak` logged; WARN-only on 60%-of-limit breach; `n/a` on cgroup v1 hosts                                       | step 41   |
 
 ## Failure Mode
 

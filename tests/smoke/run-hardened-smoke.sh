@@ -145,10 +145,10 @@ fi
 
 step_ok "" "Step 02: setup complete (TMP=$TMP)"
 
-# ─── Step 08: HARD-03 pip install --user pyyaml two-pass probe ─────────
+# ─── Step 03: HARD-03 pip install --user pyyaml two-pass probe ─────────
 # Run BEFORE the main hardened container to establish the empirical contract.
 # Pass 1 = no /home/pi tmpfs (must fail with EROFS); Pass 2 = with tmpfs (must succeed).
-step_check "HARD-03" "Step 08: pip install --user pyyaml two-pass probe (writable-home contract)"
+step_check "HARD-03" "Step 03: pip install --user pyyaml two-pass probe (writable-home contract)"
 
 docker run -d --init --name "$pass1_container" \
     --cap-drop=ALL --security-opt=no-new-privileges --read-only \
@@ -236,13 +236,13 @@ log_path="$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
 events_path="$TMP/naiw-data/tasks/smoke-test/io/.naiw/events.jsonl"
 step_ok "" "Main hardened container ready"
 
-# ─── Step 03: HARD-01 CapDrop == ["ALL"] ───────────────────────────────
-step_check "HARD-01" "Step 03: CapDrop == [ALL]"
+# ─── Step 04: HARD-01 CapDrop == ["ALL"] ───────────────────────────────
+step_check "HARD-01" "Step 04: CapDrop == [ALL]"
 expect_inspect_eq "$container" "HARD-01" ".HostConfig.CapDrop" '["ALL"]' \
     || fail "HARD-01 CapDrop mismatch"
 
-# ─── Step 04: HARD-02 SecurityOpt contains no-new-privileges ───────────
-step_check "HARD-02" "Step 04: SecurityOpt contains no-new-privileges"
+# ─── Step 05: HARD-02 SecurityOpt contains no-new-privileges ───────────
+step_check "HARD-02" "Step 05: SecurityOpt contains no-new-privileges"
 sec_opt="$(inspect_json "$container" ".HostConfig.SecurityOpt")"
 if [[ "$sec_opt" == *"no-new-privileges"* ]]; then
     step_ok "HARD-02" "SecurityOpt=$sec_opt"
@@ -251,24 +251,22 @@ else
     fail "HARD-02 SecurityOpt missing"
 fi
 
-# ─── Step 05: HARD-03 ReadonlyRootfs == true ───────────────────────────
-step_check "HARD-03" "Step 05: ReadonlyRootfs == true"
+# ─── Step 06: HARD-03 ReadonlyRootfs == true ───────────────────────────
+step_check "HARD-03" "Step 06: ReadonlyRootfs == true"
 expect_inspect_eq "$container" "HARD-03" ".HostConfig.ReadonlyRootfs" 'true' \
     || fail "HARD-03 ReadonlyRootfs mismatch"
 
-# ─── Step 06: HARD-03 /tmp writable ────────────────────────────────────
-step_check "HARD-03" "Step 06: /tmp writable (tmpfs probe)"
+# ─── Step 07: HARD-03 /tmp writable ────────────────────────────────────
+step_check "HARD-03" "Step 07: /tmp writable (tmpfs probe)"
 docker exec "$container" sh -c 'touch /tmp/probe && rm /tmp/probe' \
     || fail "HARD-03 /tmp not writable"
 step_ok "HARD-03" "/tmp writable"
 
-# ─── Step 07: HARD-03 /run writable ────────────────────────────────────
-step_check "HARD-03" "Step 07: /run writable (tmpfs probe)"
+# ─── Step 08: HARD-03 /run writable ────────────────────────────────────
+step_check "HARD-03" "Step 08: /run writable (tmpfs probe)"
 docker exec "$container" sh -c 'touch /run/probe && rm /run/probe' \
     || fail "HARD-03 /run not writable"
 step_ok "HARD-03" "/run writable"
-
-# Step 08 already ran above (pip two-pass).
 
 # ─── Step 09: HARD-04 PidsLimit == 512 ─────────────────────────────────
 step_check "HARD-04" "Step 09: PidsLimit == 512"
@@ -350,13 +348,13 @@ else
     fail "HARD-08 /run/secrets not ro"
 fi
 
-# ─── Step 15: HARD-10 RestartPolicy == no ──────────────────────────────
-step_check "HARD-10" "Step 15: RestartPolicy.Name == no"
+# ─── Step 14: HARD-10 RestartPolicy == no ──────────────────────────────
+step_check "HARD-10" "Step 14: RestartPolicy.Name == no"
 expect_inspect_eq "$container" "HARD-10" ".HostConfig.RestartPolicy.Name" '"no"' \
     || fail "HARD-10 RestartPolicy mismatch"
 
-# ─── Step 16: PID-1 wrapper ────────────────────────────────────────────
-step_check "PID-1" "Step 16: /proc/1/comm in {tmux, tini, docker-init}"
+# ─── Step 15: PID-1 wrapper ────────────────────────────────────────────
+step_check "PID-1" "Step 15: /proc/1/comm in {tmux, tini, docker-init}"
 pid1="$(docker exec "$container" cat /proc/1/comm | tr -d '\r\n')"
 case "$pid1" in
     tmux|tini|docker-init)
@@ -368,8 +366,8 @@ case "$pid1" in
         ;;
 esac
 
-# ─── Step 17: secret content + Config.Env scrub + redaction filter ─────
-step_check "secret" "Step 17: /run/secrets/test_token content + Config.Env scrub + redaction"
+# ─── Step 16: secret content + Config.Env scrub + redaction filter ─────
+step_check "secret" "Step 16: /run/secrets/test_token content + Config.Env scrub + redaction"
 
 in_container="$(docker exec "$container" cat /run/secrets/test_token | tr -d '\r\n')"
 if [[ "$in_container" != "$fake_token" ]]; then
@@ -395,8 +393,8 @@ if grep -q "$fake_token" "$log_path"; then
 fi
 step_ok "secret" "content match + env scrub + terminal.log redaction confirmed"
 
-# ─── Step 18: stop+start terminal.log survival + POST_RESTART_MARKER ───
-step_check "HARD-restart" "Step 18: terminal.log survives stop+start; POST_RESTART_MARKER appears"
+# ─── Step 17: stop+start terminal.log survival + POST_RESTART_MARKER ───
+step_check "HARD-restart" "Step 17: terminal.log survives stop+start; POST_RESTART_MARKER appears"
 size_before="$(stat -c %s "$log_path")"
 docker stop --time 10 "$container" >/dev/null
 docker start "$container" >/dev/null
@@ -416,8 +414,8 @@ if (( size_after < size_before )); then
 fi
 step_ok "HARD-restart" "terminal.log appended through stop+start (before=$size_before after=$size_after)"
 
-# ─── Step 19: signal cycle — naiw-signal done → events.jsonl ───────────
-step_check "SIG-cycle" "Step 19: naiw-signal done appends valid event to events.jsonl"
+# ─── Step 18: signal cycle — naiw-signal done → events.jsonl ───────────
+step_check "SIG-cycle" "Step 18: naiw-signal done appends valid event to events.jsonl"
 docker exec -u pi "$container" naiw-signal done --summary "hardened-smoke ok" \
     || fail "naiw-signal done failed"
 tail -1 "$events_path" | python3 -c '
@@ -429,8 +427,8 @@ assert d["payload"] == {"summary": "hardened-smoke ok"}, d
 ' || fail "events.jsonl tail did not match expected schema"
 step_ok "SIG-cycle" "events.jsonl tail kind=done schema_version=1 payload={summary:hardened-smoke ok}"
 
-# ─── Steps 20-39: PROXY-05 20 denied verb probes ───────────────────────
-step_check "PROXY-05" "Steps 20-39: 20 denied verb probes (each must return 403)"
+# ─── Steps 19-38: PROXY-05 20 denied verb probes ───────────────────────
+step_check "PROXY-05" "Steps 19-38: 20 denied verb probes (each must return 403)"
 probe_proxy_endpoint POST /exec/fakeid/start         403 "EXEC"          || fail "PROXY-05 EXEC"
 probe_proxy_endpoint GET  /images/json               403 "IMAGES"        || fail "PROXY-05 IMAGES"
 probe_proxy_endpoint GET  /volumes                   403 "VOLUMES"       || fail "PROXY-05 VOLUMES"
@@ -453,21 +451,21 @@ probe_proxy_endpoint GET  /_ping                     403 "PING"          || fail
 probe_proxy_endpoint GET  /version                   403 "VERSION"       || fail "PROXY-05 VERSION"
 step_ok "PROXY-05" "all 20 denied verb probes returned 403"
 
-# ─── Step 40: PROXY-05 allowed GET /containers/json -> 200 ─────────────
-step_check "PROXY-05" "Step 40: allowed GET /containers/json -> 200"
+# ─── Step 39: PROXY-05 allowed GET /containers/json -> 200 ─────────────
+step_check "PROXY-05" "Step 39: allowed GET /containers/json -> 200"
 probe_proxy_endpoint GET /containers/json 200 "CONTAINERS-json" \
     || fail "PROXY-05 allowed GET /containers/json"
 
-# ─── Step 41: PROXY-05 allowed POST /containers/<id>/start -> 204|304 ──
-step_check "PROXY-05" "Step 41: allowed POST /containers/<target>/start -> 204 or 304 (throwaway sidecar)"
+# ─── Step 40: PROXY-05 allowed POST /containers/<id>/start -> 204|304 ──
+step_check "PROXY-05" "Step 40: allowed POST /containers/<target>/start -> 204 or 304 (throwaway sidecar)"
 target_id="$(docker create --name "$probe_target" --network naiw-internal alpine sleep 1)"
 probe_proxy_endpoint POST "/containers/${target_id}/start" 204 "POST start" \
     || probe_proxy_endpoint POST "/containers/${target_id}/start" 304 "POST start (already running)" \
     || fail "PROXY-05 POST start probe failed (expected 204 or 304)"
 docker rm -f "$probe_target" >/dev/null 2>&1 || true
 
-# ─── Step 42: cgroup peak evidence (WARN-only) ─────────────────────────
-step_check "cgroup-peak" "Step 42: log cgroup pids.peak + memory.peak (WARN-only)"
+# ─── Step 41: cgroup peak evidence (WARN-only) ─────────────────────────
+step_check "cgroup-peak" "Step 41: log cgroup pids.peak + memory.peak (WARN-only)"
 container_id="$(docker inspect --format='{{.Id}}' "$container")"
 cg_v2_path="/sys/fs/cgroup/system.slice/docker-${container_id}.scope"
 if [[ -d "$cg_v2_path" ]]; then
@@ -486,11 +484,11 @@ if [[ "$mem_peak" =~ ^[0-9]+$ ]] && (( mem_peak > 2576980378 )); then
 fi
 step_ok "cgroup-peak" "peak evidence recorded (pids=$pids_peak mem=$mem_peak)"
 
-# ─── Step 43: drift gate (checklist ↔ script ID set must align) ────────
+# ─── Step 42: drift gate (checklist ↔ script ID set must align) ────────
 # Only count IDs that are actually claimed (checklist table rows) or actually
 # probed (step_check "ID" in script). Narrative mentions in headers/comments
 # don't count — that's what makes this an honest coverage check.
-step_check "" "Step 43: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
+step_check "" "Step 42: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
 checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+)' tests/smoke/HARDENED-CHECKLIST.md \
     | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
 script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+)"' tests/smoke/run-hardened-smoke.sh \
@@ -503,6 +501,6 @@ if [[ -n "$drift" ]]; then
     echo "$drift" >&2
     fail "drift gate"
 fi
-step_ok "" "Step 43: drift gate ok — IDs aligned"
+step_ok "" "Step 42: drift gate ok — IDs aligned"
 
 # Final PASS line is printed by the cleanup trap's success branch on exit 0.
