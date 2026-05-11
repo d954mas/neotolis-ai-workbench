@@ -254,6 +254,16 @@ def start(
             **HARDENED_HOST_CONFIG_KWARGS,
         )
         image_digest = getattr(container.image, "id", None)
+        # task.json must carry the resolved image digest as audit trail —
+        # without it we cannot answer "which image actually ran task X" once
+        # the tag is repointed (e.g., naiw-task-image:latest moves to a new
+        # build), and the Phase 4 recovery flow cannot verify image identity.
+        # Fail fast — the leftover container is cleaned via `naiw-tasks finish`.
+        if not image_digest:
+            raise StartFailed(
+                f"could not resolve image digest for {cfg.task_image} after "
+                f"containers.run; refusing to record task without audit digest"
+            )
 
         ts_started = Event.now_iso()
 

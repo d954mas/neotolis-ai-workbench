@@ -457,6 +457,47 @@ def test_start_failed_before_projects_load_keeps_finish_recoverable(tmp_naiw_dat
 # ---------- start — failure rollback -----------------------------------------
 
 
+def test_start_aborts_when_image_digest_unresolvable(tmp_naiw_data, capsys):
+    """If container.image.id is None (or empty), start must raise StartFailed —
+    a task without resolved image digest cannot be audited or recovered later."""
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    container.image.id = None  # docker-py rarely yields this but it is possible
+
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert "audit digest" in on_disk["failure_reason"]
+
+    # Container was already created — operator-driven cleanup hint visible
+    captured = capsys.readouterr()
+    assert "naiw-tasks finish task-001 --delete-worktree" in captured.err
+
+
+def test_start_aborts_when_container_image_attribute_is_none(tmp_naiw_data):
+    """Same guard fires when container.image itself is None — getattr returns
+    the default None and the digest check triggers."""
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    container.image = None  # docker-py edge case (no image record at run-time)
+
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+
+
 def test_start_writes_failed_status_on_containers_run_error(
     tmp_naiw_data, mock_subprocess_run, capsys
 ):
