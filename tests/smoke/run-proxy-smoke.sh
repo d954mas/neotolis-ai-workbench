@@ -9,6 +9,10 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$here/../.." && pwd)"
 cd "$repo_root"
 
+_lib_log_prefix="[proxy-smoke]"
+# shellcheck source=_lib.sh
+source "$here/_lib.sh"
+
 compose_file="deploy/docker-compose.yml"
 sibling="naiw-proxy-smoke-probe-$$"
 
@@ -64,20 +68,14 @@ fi
 # curlimages/curl is tiny and on Docker Hub. One positive + one negative.
 
 echo "[proxy-smoke] probe 1/2: GET /containers/json (expect 200)"
-code="$(docker run --rm --name "$sibling" --network naiw-internal curlimages/curl:latest \
-    -s -o /dev/null -w '%{http_code}' \
-    http://naiw-docker-proxy:2375/v1.43/containers/json || true)"
-[[ "$code" == "200" ]] || fail "GET /containers/json returned $code, expected 200"
+probe_proxy_endpoint GET /containers/json 200 "GET /containers/json" \
+    || fail "GET /containers/json positive probe failed"
 
 # Negative probe: POST /exec/<id>/start. Tecnativa's EXEC env var gates the
 # /exec/* path family — NOT /containers/<id>/exec (which is the CREATE endpoint
 # gated by CONTAINERS+POST and returns 201 with the allowlist as written).
 echo "[proxy-smoke] probe 2/2: POST /exec/fakeid/start (expect 403; EXEC=0 lock)"
-code="$(docker run --rm --name "$sibling" --network naiw-internal curlimages/curl:latest \
-    -s -o /dev/null -w '%{http_code}' -X POST \
-    -H 'Content-Type: application/json' \
-    -d '{}' \
-    http://naiw-docker-proxy:2375/v1.43/exec/fakeid/start || true)"
-[[ "$code" == "403" ]] || fail "POST /exec/fakeid/start returned $code, expected 403 (EXEC=0)"
+probe_proxy_endpoint POST /exec/fakeid/start 403 "POST /exec/fakeid/start" \
+    || fail "POST /exec/fakeid/start negative probe failed"
 
 echo "[proxy-smoke] ok (positive=200, negative=403)"

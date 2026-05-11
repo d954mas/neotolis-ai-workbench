@@ -26,6 +26,9 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$here/../.." && pwd)"
 cd "$repo_root"
 
+# shellcheck source=_lib.sh
+source "$here/_lib.sh"
+
 NAIW_VERSION="${NAIW_VERSION:-0.1.0}"
 image="naiw-task-image:${NAIW_VERSION}"
 container="naiw-task-smoke-$$"
@@ -60,10 +63,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # Step 1: build (or reuse existing tag).
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-    echo "[smoke] building $image"
-    bash scripts/build-image.sh
-fi
+build_image_if_missing "$image"
 
 # Step 2: docker inspect probes (no run needed).
 cmd="$(docker inspect --format='{{json .Config.Cmd}}' "$image")"
@@ -192,13 +192,8 @@ docker run -d -t --name "$container" \
     "$image" >/dev/null
 
 # Wait for entrypoint to finish (tmux session exists, terminal.log appears).
-for i in $(seq 1 30); do
-    if docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 2>/dev/null; then
-        break
-    fi
-    sleep 0.5
-done
-docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ]' || fail "/io/.naiw/events.jsonl missing"
+wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 15 \
+    || fail "/io/.naiw/events.jsonl missing"
 
 # Step 7: tool presence.
 for tool in pi tmux git gh node npm python3 ffmpeg rg; do
@@ -269,13 +264,7 @@ docker run -d -t --name "$container" \
 # slower hosts (Docker Desktop, busy CI) — the container needs to complete
 # mountpoint checks, hot-package install, and tmux session bring-up before
 # `docker exec` can reach a usable shell.
-for i in $(seq 1 30); do
-    if docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 2>/dev/null; then
-        break
-    fi
-    sleep 0.5
-done
-docker exec "$container" sh -c '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' \
+wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 15 \
     || fail "container not ready after re-launch with secret volume"
 
 # Invoking `git credential fill` for an https://github.com URL must resolve

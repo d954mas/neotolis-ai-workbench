@@ -54,7 +54,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED \
     && rm -rf /var/lib/apt/lists/*
+
+# PEP 668: Debian 12's python3 ships an EXTERNALLY-MANAGED marker that makes
+# `pip install --user` refuse to run. Pi-tasks install their dependencies via
+# pip --user at runtime — that's part of the Pi-runtime contract — so the
+# marker is removed above. Safe inside a container: the env is isolated, there
+# is no APT-managed Python to protect from breakage.
 
 # Pi (pi-coding-agent) — version pinned via PI_VERSION build arg.
 RUN npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VERSION}" \
@@ -62,7 +69,7 @@ RUN npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VE
 
 # Wheels from builder stage (no source files in the final image).
 COPY --from=builder /wheels/*.whl /tmp/wheels/
-RUN pip3 install --no-cache-dir --break-system-packages /tmp/wheels/*.whl \
+RUN pip3 install --no-cache-dir /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
 
 # Bake config: redaction sed for pipe-pane, tmux config, system gitconfig with
