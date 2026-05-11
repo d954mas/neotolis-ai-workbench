@@ -15,6 +15,8 @@ import os
 import sys
 from contextlib import suppress
 
+from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+
 
 def attach_to_task(client, proxy_url: str, task_id: str) -> None:
     """Attach the operator to the running task container, or refuse with a hint.
@@ -66,10 +68,21 @@ def attach_to_task(client, proxy_url: str, task_id: str) -> None:
         raise SystemExit(1)
 
     # POSIX argv[0] convention: the program name appears as the first element
-    # of argv; execvp uses argv[1:] as the actual command arguments docker sees.
+    # of argv; execvpe uses argv[1:] as the actual command arguments docker sees.
     # -H routes the CLI through the locked proxy (matches the SDK path).
-    os.execvp(
-        "docker", ["docker", "-H", proxy_url, "attach", container.name]
+    #
+    # DOCKER_API_VERSION pins the API version the docker CLI uses in URL paths
+    # (e.g. /v1.43/containers/<id>/attach). Without it, modern docker CLI
+    # binaries (26+) negotiate via /_ping — blocked by the proxy (PING=0) —
+    # and fall back to their bundled-client version (often 1.45+), which may
+    # mismatch the daemon's max supported API. execvpe (NOT execvp) is used
+    # so we can inject this single env var while preserving the operator's
+    # PATH/HOME/TZ/locale environment.
+    env = {**os.environ, "DOCKER_API_VERSION": PINNED_DOCKER_API_VERSION}
+    os.execvpe(
+        "docker",
+        ["docker", "-H", proxy_url, "attach", container.name],
+        env,
     )
-    # execvp does not return on success.
+    # execvpe does not return on success.
     raise SystemExit(1)

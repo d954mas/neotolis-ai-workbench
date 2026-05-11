@@ -28,7 +28,10 @@ from naiw_common.events import Event
 
 from naiw_tasks import git_ops, projects, store
 from naiw_tasks.config import Config
-from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS
+from naiw_tasks.docker_client import (
+    HARDENED_HOST_CONFIG_KWARGS,
+    PINNED_DOCKER_API_VERSION,
+)
 from naiw_tasks.ids import allocate_task_id, validate_task_id
 from naiw_tasks.model import (
     FinishPolicy,
@@ -335,14 +338,22 @@ def start(
             # crashed mid-start and left an orphan, or `tasks/<id>/` was deleted
             # by hand but `docker rm` was forgotten. Swap the raw HTTP-409 text
             # for a clean reason with a ready-to-run cleanup command.
-            # The hint includes `-H <proxy_url>` so the suggested command stays
-            # within the locked-proxy boundary — a plain `docker rm -f` would
-            # hit /var/run/docker.sock directly, bypassing the same proxy that
-            # attach.py explicitly routes through.
+            #
+            # The hint embeds BOTH:
+            #   - `-H <proxy_url>` so the command stays within the locked-proxy
+            #     boundary (a plain `docker rm -f` would hit /var/run/docker.sock
+            #     and bypass the same proxy that attach.py routes through).
+            #   - `DOCKER_API_VERSION=<pinned>` so the docker CLI does NOT
+            #     negotiate via /_ping (blocked, PING=0) and does NOT default
+            #     to its bundled-client version (often 1.45+ on docker CLI 26)
+            #     which may mismatch the daemon. Both attach and this cleanup
+            #     hint take the same pin path.
             cname = _container_name(task_id)
             reason = (
                 f"container name {cname!r} already in use by an orphan; "
-                f"clean up with: docker -H {cfg.docker_proxy_url} rm -f {cname}"
+                f"clean up with: "
+                f"DOCKER_API_VERSION={PINNED_DOCKER_API_VERSION} "
+                f"docker -H {cfg.docker_proxy_url} rm -f {cname}"
             )
 
         def _to_failed(d: dict) -> dict:

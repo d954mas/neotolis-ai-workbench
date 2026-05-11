@@ -45,9 +45,9 @@ def mock_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 @pytest.fixture
-def mock_execvp(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+def mock_execvpe(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     import naiw_tasks.attach as attach_mod
 
     mock = MagicMock()
-    monkeypatch.setattr(attach_mod.os, "execvp", mock)
+    monkeypatch.setattr(attach_mod.os, "execvpe", mock)
     return mock

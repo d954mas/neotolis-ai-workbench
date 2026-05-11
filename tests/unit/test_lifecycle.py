@@ -497,30 +497,40 @@ def test_start_409_conflict_produces_clean_reason_with_docker_rm_hint(
     assert on_disk["status"] == "failed"
     reason = on_disk["failure_reason"]
 
+    from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+
     # Clean reason: includes the orphan name + cleanup command, NOT raw HTTP text.
     assert "naiw-task-task-001" in reason
     assert "already in use" in reason
-    # The cleanup command MUST include -H <proxy_url> so it stays inside the
-    # locked-proxy boundary (a plain `docker rm -f` would bypass the proxy).
-    assert (
-        f"docker -H {cfg.docker_proxy_url} rm -f naiw-task-task-001" in reason
+    # The cleanup command MUST include BOTH:
+    #   - -H <proxy_url> so the command stays inside the locked-proxy boundary
+    #   - DOCKER_API_VERSION=<pinned> so docker CLI does not negotiate via
+    #     /_ping (blocked) and does not default to its bundled-client version
+    #     (which on docker CLI 26 is 1.45+, may mismatch our 1.43 pin).
+    expected_cmd = (
+        f"DOCKER_API_VERSION={PINNED_DOCKER_API_VERSION} "
+        f"docker -H {cfg.docker_proxy_url} rm -f naiw-task-task-001"
     )
+    assert expected_cmd in reason
     assert "409 Client Error" not in reason  # raw HTTP text stripped
 
     # Same hint surfaces on stderr.
     captured = capsys.readouterr()
-    assert (
-        f"docker -H {cfg.docker_proxy_url} rm -f naiw-task-task-001"
-        in captured.err
-    )
+    assert expected_cmd in captured.err
 
 
 def test_start_409_cleanup_hint_never_omits_proxy_h_flag(tmp_naiw_data, capsys):
     """Regression guard: the 409-conflict cleanup hint MUST always include
-    `-H <proxy_url>` so the suggested docker CLI command stays on the locked
-    proxy. A bare `docker rm -f ...` would silently route through
-    /var/run/docker.sock, bypassing the same boundary that attach.py and the
-    SDK respect."""
+    BOTH `DOCKER_API_VERSION=<pinned>` env prefix AND `-H <proxy_url>` flag.
+
+    Without -H, docker CLI bypasses the proxy (uses /var/run/docker.sock).
+    Without DOCKER_API_VERSION, modern docker CLI (26+) negotiates via /_ping
+    (blocked by proxy) and defaults to v1.45 paths — may mismatch daemon.
+    Both must stay together; this test catches drift in either direction."""
+    import re
+
+    from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+
     client, _ = _fake_client(container_name="naiw-task-task-001")
     fake_response = MagicMock()
     fake_response.status_code = 409
@@ -539,16 +549,16 @@ def test_start_409_cleanup_hint_never_omits_proxy_h_flag(tmp_naiw_data, capsys):
     reason = json.loads(tj.read_text(encoding="utf-8"))["failure_reason"]
     captured = capsys.readouterr()
 
-    # Both the on-disk reason AND the stderr hint must include the -H flag.
-    # A bare "docker rm -f naiw-task-task-001" (without -H) is forbidden.
-    import re
-    bare_rm_pattern = re.compile(r"(?<!-H )docker rm -f naiw-task-task-001")
-    assert not bare_rm_pattern.search(reason), (
-        f"bare `docker rm -f` (no -H) in failure_reason: {reason}"
-    )
-    assert not bare_rm_pattern.search(captured.err), (
-        f"bare `docker rm -f` (no -H) in stderr: {captured.err}"
-    )
+    for surface_name, surface in [("failure_reason", reason), ("stderr", captured.err)]:
+        # A bare "docker rm -f naiw-task-task-001" (without -H prefix) forbidden.
+        bare_rm_pattern = re.compile(r"(?<!-H )docker rm -f naiw-task-task-001")
+        assert not bare_rm_pattern.search(surface), (
+            f"bare `docker rm -f` (no -H) in {surface_name}: {surface}"
+        )
+        # Pinned API version must appear next to the docker invocation.
+        assert f"DOCKER_API_VERSION={PINNED_DOCKER_API_VERSION}" in surface, (
+            f"DOCKER_API_VERSION=<pinned> missing from {surface_name}: {surface}"
+        )
 
 
 def test_start_other_api_errors_keep_raw_message(tmp_naiw_data):
