@@ -121,7 +121,7 @@ NAIW is a minimal personal self-hosted task/session manager that runs Pi (pi.dev
 | Package | Compatible With | Notes |
 |---------|-----------------|-------|
 | `click 8.3.x` | Python 3.10+ | We target 3.12; safe. |
-| `docker 7.1.x` | Docker Engine API ≥1.43 (Docker 25+) | Verify host Docker is recent. The SDK negotiates API version automatically; pin `client.api.version` only if you hit incompatibilities. |
+| `docker 7.1.x` | Docker Engine API ≥1.43 (Docker 25+) | Verify host Docker is recent. The controller MUST pin the API version (`docker.DockerClient(..., version="1.43")`) — auto-negotiation issues `GET /version`, which the locked proxy blocks (`VERSION=0`). See `naiw_tasks.docker_client.PINNED_DOCKER_API_VERSION`. |
 | `tecnativa/docker-socket-proxy` | Docker Engine 20.10+ | Pin by `sha256:...` digest, not `:latest`, in production. |
 | `PyYAML 6.0.3` | Python 3.8+ (we use 3.12) | Wheels include libyaml C bindings on glibc Linux — confirm with `yaml.__with_libyaml__` if perf matters. |
 | Python 3.12 ↔ docker SDK 7.1 | OK | docker-py 7.x dropped Python 3.7; 3.12 is fully supported. |
