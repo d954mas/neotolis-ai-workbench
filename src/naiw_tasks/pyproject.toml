@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "NAIW controller — start/attach/finish hardened per-task Docker sessions."
 requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }
-readme = "../../README.md"
 dependencies = [
     "click>=8.2,<9",
     "docker>=7.1,<8",
