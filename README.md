@@ -4,15 +4,17 @@ Self-hosted, single-user task and session manager. Each task runs in its own dis
 
 ## Current scope
 
-Five static artifacts that the controller will build on top of. The controller itself is not implemented yet.
+The Phase 3 controller (`naiw-tasks` CLI) is implemented and ships in this repo. Operator workflow: start a per-task hardened container, attach a terminal, finish with a worktree-cleanup policy.
 
 | Artifact | Path |
 |---|---|
 | `naiw-task-image` Dockerfile + entrypoint | `image/` |
 | `naiw-docker-proxy` compose file | `deploy/docker-compose.yml` |
 | Host data-layout bootstrap scripts | `scripts/naiw-init-data.sh`, `scripts/naiw-new-task.sh` |
-| `naiw_common` + `naiw_signal` Python packages | `src/` |
+| `naiw_common` + `naiw_signal` Python packages | `src/naiw_common/`, `src/naiw_signal/` |
+| `naiw_tasks` controller (`naiw-tasks` CLI) | `src/naiw_tasks/` |
 | Image build helper | `scripts/build-image.sh` |
+| Controller install helper | `scripts/install-controller.sh` |
 
 ## Architecture
 
@@ -51,6 +53,7 @@ The controller (`naiw-tasks` CLI) communicates with the Docker engine via the pr
   - `GET /containers/*` (list, inspect, logs)
   - `POST /containers/create` — creates ANY container with operator-supplied image, mounts, and host-config kwargs. Controller pins this to `naiw-task-image` + the hardened HostConfig kwargs, but the proxy itself does not restrict the image or mounts. A direct HTTP caller can pick anything.
   - `POST /containers/<id>/start`, `/stop`, `/attach`, restart/kill paths
+  - `DELETE /containers/<id>?force=true` — `POST=1` is a global write-method gate (POST + PUT + DELETE), so DELETE on `/containers/*` is allowed. The controller uses this for `container.remove(force=True)` in `finish`. A direct HTTP caller can remove (force-kill + delete) any container, including the operator's other NAIW tasks.
   - `POST /containers/<id>/exec` (the exec CREATE endpoint) — **not blocked**: it lives under `/containers/*` and goes through `CONTAINERS=1+POST=1`. Creates an exec instance but does NOT start it.
 - **Denied:** `POST /exec/<id>/start`, `/exec/<id>/resize`, `GET /exec/<id>/json` (so the created exec instance cannot actually run), `images/*`, `volumes/*`, `networks/*`, `build/*`, every Swarm endpoint. See `deploy/proxy/README.md` for the full deny list.
 
@@ -67,7 +70,7 @@ The proxy is bound to `127.0.0.1:2375`. On Linux TCP localhost is **not user-sco
 What such a caller can do via the allowlist above:
 
 - Create a container with `Image: alpine`, `HostConfig.Binds: ["/:/host"]`, `HostConfig.Privileged: true` and start it → root-on-host via a side-loaded container, **bypassing every NAIW hardening setting** because those settings only constrain containers the controller itself creates.
-- List, inspect, and stop any container — including the operator's other NAIW tasks.
+- List, inspect, stop, **and force-remove** any container — including the operator's other NAIW tasks. `DELETE /containers/<id>?force=true` is allowed by the `POST=1` global write-gate.
 
 **This is the same threat model as having the operator's user in the `docker` group** with a local Docker daemon: trusted code runs as the operator with broad container-control authority. NAIW is single-user, single-host (per `CLAUDE.md`) and assumes the operator audits the code they install. If that assumption does not hold for your deployment, you need a stricter proxy (e.g., `wollomatic/socket-proxy` with per-name/per-image/per-mount regex allowlist) — see "Alternatives Considered" in `CLAUDE.md`. The current proxy is **not** "attach/start/stop only"; it is "containers/* + POST + start/stop", which is substantial Docker control surface.
 

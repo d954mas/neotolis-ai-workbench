@@ -14,8 +14,8 @@ Five env vars are set to `"1"`. Everything else (every documented Tecnativa env 
 
 | Env var | Gates | Why allowed |
 |---|---|---|
-| `CONTAINERS=1` | `GET /containers/*` (list, inspect, logs) | `list` and `output` (host-side reads); `inspect` for status reconciliation |
-| `POST=1` | ANY `POST`/`PUT`/`DELETE` (global gate) | Required for `start`/`stop`. Without this, even allow-listed actions fail. |
+| `CONTAINERS=1` | `GET` AND (via `POST=1`) any write method on `/containers/*` (list, inspect, logs, create, **delete**, exec-create) | `list` and `output` (host-side reads); `inspect` for status reconciliation; `create`/`delete` for task lifecycle |
+| `POST=1` | ANY `POST`/`PUT`/`DELETE` on every `*=1` endpoint group above (global gate) | Required for `start`/`stop`/`remove`. Combined with `CONTAINERS=1` it permits `DELETE /containers/<id>?force=true` (used by `container.remove(force=True)` in `finish`). Without this, even allow-listed actions fail. |
 | `ALLOW_START=1` | `POST /containers/<id>/start` | Task `start` |
 | `ALLOW_STOP=1` | `POST /containers/<id>/stop` | Task `finish` |
 | `ALLOW_RESTARTS=1` | stop/restart/kill paths | Task `finish` (graceful stop fallthrough) |
@@ -40,6 +40,7 @@ TCP localhost on Linux is **not user-scoped** — any process running as **any u
 What a same-host caller can do via this proxy:
 
 - `POST /containers/create` with arbitrary `Image`, `HostConfig.Binds`, `HostConfig.Privileged: true` — the proxy enforces the endpoint allowlist but NOT the contents of the create request. A side-loaded `--privileged` container with `/:/host` mount is a complete bypass of NAIW's container isolation (which only applies to containers the controller itself builds).
+- `DELETE /containers/<id>?force=true` — `POST=1` is the global write-method gate (POST + PUT + DELETE). Combined with `CONTAINERS=1`, force-remove on any container is allowed. The controller uses this for `container.remove(force=True)` in `finish`; a same-host caller can use it to nuke arbitrary containers, including the operator's other NAIW tasks.
 - `POST /containers/<id>/exec` (CREATE) is under `/containers/*` and **allowed** — an exec instance can be created. Only `/exec/<id>/start` (and resize/json) is blocked by `EXEC=0`, so the instance never actually runs; this still does NOT make the exec surface "fully closed" as a simplified mental model would suggest.
 
 This is the same trust assumption as having the operator's user in the `docker` group: NAIW assumes the operator audits the code they run on this host (npm packages, IDE plugins, browser extensions with native messaging, etc.). The current proxy is **not** "attach/start/stop only" — it is "containers/* + POST + start/stop", which is substantial Docker control surface.
