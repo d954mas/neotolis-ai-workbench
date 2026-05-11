@@ -7,6 +7,20 @@ import pytest
 from naiw_tasks import config as config_mod
 
 
+def test_naiw_data_env_expands_tilde(monkeypatch, tmp_path) -> None:
+    """`export NAIW_DATA=~/somewhere` should resolve to the operator's home,
+    same as shell semantics. `Path("~/...")` alone does NOT expand the tilde
+    — expanduser() is required."""
+    fake_home = tmp_path
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    # ~/data is a literal NAIW_DATA value the operator might export.
+    monkeypatch.setenv("NAIW_DATA", "~/data")
+
+    cfg = config_mod.load()
+    assert cfg.data_root == fake_home / "data"
+
+
 def test_load_defaults_when_no_config_file(tmp_naiw_data: Path) -> None:
     cfg = config_mod.load()
     assert cfg.data_root == tmp_naiw_data

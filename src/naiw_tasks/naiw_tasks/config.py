@@ -25,10 +25,12 @@ class Config:
 
 def _resolve_data_root() -> Path:
     # NAIW_DATA env override mirrors the bootstrap-script contract — single env knob
-    # configures both bash scripts and the controller.
+    # configures both bash scripts and the controller. Expand `~` so
+    # `export NAIW_DATA=~/somewhere` works the same as it would in shell —
+    # `Path("~/...")` does NOT auto-expand the tilde the way `Path.home()` does.
     env = os.environ.get("NAIW_DATA")
     if env:
-        return Path(env)
+        return Path(env).expanduser()
     return Path.home() / "naiw-data"
 
 

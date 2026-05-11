@@ -20,6 +20,14 @@ TASK_ID_RE: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # always fits the 64-char container-name budget after the `naiw-task-` prefix.
 PROJECT_ALIAS_RE: re.Pattern[str] = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}$")
 
+# Secret names are basenames under ~/naiw-data/secrets/<name>, bound into the
+# container as /run/secrets/<name>. The regex permits alphanumerics, dot,
+# underscore, dash — wide enough for `aws_credentials.json`, `Stripe_Key`,
+# `.env`-style names — but forbids path separators and the special "." / ".."
+# components. Leading dot is allowed for hidden-file conventions; ".." is
+# rejected separately so embedded `foo..bar` cannot traverse either.
+SECRET_NAME_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
 
 def validate_task_id(task_id: str) -> None:
     if not TASK_ID_RE.match(task_id):
@@ -38,6 +46,30 @@ def validate_project_alias(alias: str) -> None:
         raise ValueError(
             f"invalid project alias: {alias!r} (must be DNS-label shape, "
             f"a-z/0-9/-, length 1-60, start with alphanumeric)"
+        )
+
+
+def validate_secret_name(name: str) -> None:
+    """Reject secret names that could escape ~/naiw-data/secrets/.
+
+    Called at the CLI boundary so `naiw-tasks start --secret ../config.yaml`
+    fails immediately with a clean message instead of letting a path-shaped
+    name flow into _build_volumes where it could (with prior code) mount an
+    arbitrary file under ~/naiw-data into /run/secrets/<traversed>.
+
+    Defense-in-depth — _build_volumes also narrows the bind-source prefix to
+    secrets_dir so even a programmatic bypass of this check is contained.
+    """
+    if (
+        not name
+        or not SECRET_NAME_RE.match(name)
+        or ".." in name
+        or name == "."
+    ):
+        raise ValueError(
+            f"invalid secret name: {name!r} (must be a basename under "
+            f"~/naiw-data/secrets/: a-z/A-Z/0-9/dot/underscore/dash, "
+            f"no path separators, no '..')"
         )
 
 

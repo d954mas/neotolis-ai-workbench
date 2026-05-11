@@ -140,6 +140,36 @@ def test_path_inside_workspace_repos_accepted(tmp_naiw_data):
     assert "alpha" in result
 
 
+def test_tilde_path_is_expanded_before_validation(tmp_naiw_data, monkeypatch):
+    """The shipped `scripts/projects.yaml.example` uses
+    `path: ~/naiw-data/workspace/repos/<alias>`. Path.resolve() does NOT
+    expand `~` (it treats it as a literal component), so without expanduser
+    the documented example would always be rejected with
+    `bind mount source does not exist`. projects.load() must expand the
+    tilde to the operator's home before the prefix check."""
+    # Point HOME at tmp_naiw_data's parent so `~/naiw-data/...` resolves into
+    # our test data root. tmp_naiw_data is `<tmp_path>/naiw-data`, so HOME =
+    # tmp_path makes `~/naiw-data` == tmp_naiw_data.
+    fake_home = tmp_naiw_data.parent
+    monkeypatch.setenv("HOME", str(fake_home))
+    # On Windows expanduser uses USERPROFILE; set it too for cross-platform
+    # safety in case tests run on win32 (most do skip but be defensive).
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+    repo_under_home = tmp_naiw_data / "workspace" / "repos" / "alpha"
+    repo_under_home.mkdir()
+
+    yaml_path = _write_yaml(
+        tmp_naiw_data,
+        "projects:\n  alpha:\n    path: ~/naiw-data/workspace/repos/alpha\n",
+    )
+
+    result = load(yaml_path, tmp_naiw_data)
+    assert "alpha" in result
+    # The resolved path is the absolute, tilde-expanded one.
+    assert Path(result["alpha"]["path"]).resolve() == repo_under_home.resolve()
+
+
 def test_nonexistent_path_rejected(tmp_naiw_data):
     missing = tmp_naiw_data / "workspace" / "repos" / "never-cloned"
     # Deliberately NOT created

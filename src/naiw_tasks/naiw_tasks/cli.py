@@ -20,7 +20,11 @@ import click
 from naiw_tasks import attach as attach_mod
 from naiw_tasks import config, lifecycle, startup_checks
 from naiw_tasks.docker_client import make_client
-from naiw_tasks.ids import validate_project_alias, validate_task_id
+from naiw_tasks.ids import (
+    validate_project_alias,
+    validate_secret_name,
+    validate_task_id,
+)
 
 
 @click.group(
@@ -83,6 +87,16 @@ def start(
     if project is not None:
         try:
             validate_project_alias(project)
+        except ValueError as exc:
+            click.echo(f"naiw-tasks: {exc}", err=True)
+            sys.exit(3)
+    # Same boundary for --secret. Path-shaped names (`../foo`, `foo/bar`) would
+    # otherwise escape the secrets/ directory via traversal once they reach
+    # _build_volumes. Reject here for a clean message; _build_volumes also
+    # enforces a narrower bind-source prefix as defense-in-depth.
+    for secret_name in secrets:
+        try:
+            validate_secret_name(secret_name)
         except ValueError as exc:
             click.echo(f"naiw-tasks: {exc}", err=True)
             sys.exit(3)

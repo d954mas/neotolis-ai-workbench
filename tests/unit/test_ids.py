@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 from naiw_tasks.ids import (
     PROJECT_ALIAS_RE,
+    SECRET_NAME_RE,
     TASK_ID_RE,
     allocate_task_id,
     validate_project_alias,
+    validate_secret_name,
     validate_task_id,
 )
 
@@ -44,6 +46,59 @@ def test_validate_project_alias_rejects_bad_shapes() -> None:
         validate_project_alias("a" + "0" * 60)  # 61 chars — over budget
     with pytest.raises(ValueError):
         validate_project_alias("bad name!")  # space + punctuation
+
+
+def test_secret_name_regex_literal() -> None:
+    """Regex permits alphanumerics + dot/underscore/dash; rejects path
+    separators and the standalone `.` / `..` components are filtered out
+    explicitly by the validator (not the regex alone)."""
+    assert SECRET_NAME_RE.pattern == r"^[a-zA-Z0-9_.-]+$"
+
+
+def test_validate_secret_name_accepts_basenames() -> None:
+    """Conventional secret naming patterns: alphanumeric + dot/underscore/dash."""
+    validate_secret_name("github_token")
+    validate_secret_name("aws_credentials.json")
+    validate_secret_name("oauth-client-id")
+    validate_secret_name("Stripe_Secret_Key")  # uppercase allowed
+    validate_secret_name("key.pem")
+    validate_secret_name(".env")  # leading dot OK (hidden-file convention)
+    validate_secret_name("_internal")
+    validate_secret_name("a")  # single char
+
+
+def test_validate_secret_name_rejects_path_traversal() -> None:
+    """The whole point of this validator: a path-shaped name MUST NOT slip
+    through into _build_volumes, where with the older code it would resolve
+    to ~/naiw-data/<arbitrary> via the secrets/../ collapse."""
+    for bad in [
+        "../config.yaml",
+        "../../etc/passwd",
+        "..",
+        "foo/bar",  # forward slash
+        "foo\\bar",  # backslash
+        "foo..bar",  # embedded `..`
+        ".",  # current dir
+        "",  # empty
+    ]:
+        with pytest.raises(ValueError) as excinfo:
+            validate_secret_name(bad)
+        assert "invalid secret name" in str(excinfo.value), bad
+
+
+def test_validate_secret_name_rejects_special_chars() -> None:
+    """Anything outside [a-zA-Z0-9._-] is rejected — defense against shell-
+    metacharacter shenanigans even though we don't shell-out secret names."""
+    for bad in [
+        "secret name",  # space
+        "secret;rm -rf /",
+        "secret\nname",
+        "$VAR",
+        "name@host",
+        "secret#1",
+    ]:
+        with pytest.raises(ValueError):
+            validate_secret_name(bad)
 
 
 def test_validate_task_id_accepts_dns_label_shape() -> None:

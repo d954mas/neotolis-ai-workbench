@@ -107,9 +107,16 @@ def _build_volumes(
     volumes[str(work_src)] = {"bind": "/work", "mode": "rw"}
     volumes[str(io_src)] = {"bind": "/io", "mode": "rw"}
     volumes[str(pi_pkgs_src)] = {"bind": "/pi-packages", "mode": "ro"}
+    # Secrets MUST resolve under data_root/secrets/, NOT just under data_root.
+    # Without narrowing the prefix, a name like "../config.yaml" passes the
+    # broader data_root check (after `..` collapses) and the controller would
+    # mount ~/naiw-data/<arbitrary> into /run/secrets/<traversed> — an
+    # isolation escape. CLI also pre-validates via ids.validate_secret_name;
+    # this prefix narrowing is defense-in-depth for programmatic callers.
+    secrets_dir = data_root / "secrets"
     for name in secrets:
         secret_src = validate_bind_source(
-            data_root / "secrets" / name, data_root
+            secrets_dir / name, data_root, prefix=secrets_dir
         )
         volumes[str(secret_src)] = {
             "bind": f"/run/secrets/{name}",

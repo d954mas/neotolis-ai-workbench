@@ -17,6 +17,7 @@ import naiw_tasks.lifecycle as lifecycle
 import pytest
 from naiw_tasks.config import Config
 from naiw_tasks.model import FinishPolicy, Status, TaskKind
+from naiw_tasks.path_validation import BindMountEscapeError
 
 # ---------- helpers ----------------------------------------------------------
 
@@ -321,6 +322,51 @@ def test_start_with_secret_validates_and_mounts(tmp_naiw_data):
             assert spec["mode"] == "ro"
             found = True
     assert found, "secret bind mount missing"
+
+
+def test_build_volumes_rejects_secret_traversal_via_narrow_prefix(tmp_naiw_data):
+    """Defense-in-depth: even if a path-shaped secret name bypasses the CLI
+    validator (programmatic caller), _build_volumes narrows the bind-source
+    prefix to data_root/secrets/ so any `..` escape past the secrets dir is
+    rejected by validate_bind_source before docker is touched. The pre-fix
+    code used data_root as the prefix and let secrets/../<file> through."""
+    # Set up the standard task skeleton + sibling files that traversal could target
+    task_dir = tmp_naiw_data / "tasks" / "task-001"
+    (task_dir / "work").mkdir(parents=True)
+    (task_dir / "io").mkdir()
+    # Create a file under data_root that traversal would point at via
+    # secrets/../projects.yaml — older code mounted exactly this.
+    (tmp_naiw_data / "projects.yaml").write_text("projects: {}\n", encoding="utf-8")
+
+    with pytest.raises(BindMountEscapeError) as excinfo:
+        lifecycle._build_volumes(
+            tmp_naiw_data,
+            task_dir,
+            ["../projects.yaml"],
+        )
+    msg = str(excinfo.value)
+    # The error must name the (narrower) secrets dir as the violated prefix —
+    # NOT data_root, which would be the old broken behavior.
+    assert "secrets" in msg
+
+
+def test_build_volumes_accepts_real_secret_under_secrets_dir(tmp_naiw_data):
+    """Sanity counterpart: a real secret file under data_root/secrets/ does
+    pass validation (so the narrowed prefix did not break the happy path)."""
+    task_dir = tmp_naiw_data / "tasks" / "task-001"
+    (task_dir / "work").mkdir(parents=True)
+    (task_dir / "io").mkdir()
+    (tmp_naiw_data / "secrets" / "github_token").write_text(
+        "tok", encoding="utf-8"
+    )
+
+    volumes = lifecycle._build_volumes(
+        tmp_naiw_data, task_dir, ["github_token"]
+    )
+    secret_bind = next(
+        spec for spec in volumes.values() if spec["bind"] == "/run/secrets/github_token"
+    )
+    assert secret_bind["mode"] == "ro"
 
 
 def test_start_with_unknown_secret_aborts(tmp_naiw_data):

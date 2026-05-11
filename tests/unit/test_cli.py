@@ -132,6 +132,60 @@ def test_start_with_too_long_alias_rejected(monkeypatch, patched_env):
     fake_lifecycle_start.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "bad_secret",
+    [
+        "../config.yaml",
+        "../../etc/passwd",
+        "..",
+        "foo/bar",
+        "foo\\bar",
+        "secret;rm -rf /",
+        "name@host",
+    ],
+)
+def test_start_with_path_shaped_secret_name_rejected(
+    bad_secret, monkeypatch, patched_env
+):
+    """Path-shaped --secret names would (in the older code) collapse via
+    secrets/../ traversal and let the controller mount arbitrary files
+    under ~/naiw-data into /run/secrets/<traversed>. CLI validates BEFORE
+    lifecycle.start gets the values."""
+    fake_lifecycle_start = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["start", "alpha", "--secret", bad_secret])
+
+    assert result.exit_code == 3
+    assert "invalid secret name" in result.stderr
+    fake_lifecycle_start.assert_not_called()
+
+
+def test_start_accepts_valid_secret_names(monkeypatch, patched_env):
+    """Conventional secret names (alphanumeric + dot/underscore/dash) flow
+    through to lifecycle.start as a list."""
+    fake_lifecycle_start = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        [
+            "start",
+            "alpha",
+            "--secret",
+            "github_token",
+            "--secret",
+            "aws_creds.json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake_lifecycle_start.call_args
+    assert kwargs["secrets"] == ["github_token", "aws_creds.json"]
+
+
 # ---------- start subcommand -------------------------------------------------
 
 

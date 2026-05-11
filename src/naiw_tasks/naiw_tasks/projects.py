@@ -61,8 +61,14 @@ def load(yaml_path: Path, data_root: Path) -> dict[str, dict]:
             raise ValueError(
                 f"projects.yaml: project {alias!r} missing required 'path'"
             )
+        # Expand `~` BEFORE validate_bind_source. `Path.resolve(strict=True)`
+        # treats `~` as a literal directory component, so the shipped
+        # `scripts/projects.yaml.example` (which uses `~/naiw-data/...`)
+        # would otherwise be rejected even though it points at the right
+        # location after shell-style tilde expansion.
+        configured_path = Path(spec["path"]).expanduser()
         # Stricter prefix than ordinary bind mounts: project paths must live
         # under workspace/repos/, not just under the data root.
-        resolved = validate_bind_source(spec["path"], data_root, prefix=prefix)
+        resolved = validate_bind_source(configured_path, data_root, prefix=prefix)
         out[alias] = {"path": str(resolved)}
     return out
