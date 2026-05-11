@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 
 import pytest
-
-from naiw_tasks import store as store_mod
 from naiw_tasks.model import FinishPolicy, Status, Task, TaskKind
 from naiw_tasks.store import (
     UnsupportedSchemaError,
@@ -15,6 +13,8 @@ from naiw_tasks.store import (
     update_task,
     write_task,
 )
+
+from naiw_tasks import store as store_mod
 
 
 def _sample_task() -> Task:
@@ -142,7 +142,15 @@ def test_lock_file_lives_in_meta_under_naiw_dot_task_lock(tmp_naiw_data: Path) -
 
 def test_update_task_increments_value(tmp_naiw_data: Path) -> None:
     task_dir = tmp_naiw_data / "tasks" / "myproj-009"
-    update_task(task_dir, lambda d: {**d, "n": d.get("n", 0) + 1, "schema_version": 1, "id": "myproj-009"})
+    update_task(
+        task_dir,
+        lambda d: {
+            **d,
+            "n": d.get("n", 0) + 1,
+            "schema_version": 1,
+            "id": "myproj-009",
+        },
+    )
     update_task(task_dir, lambda d: {**d, "n": d["n"] + 1})
     data = read_task(task_dir)
     assert data["n"] == 2

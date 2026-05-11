@@ -8,14 +8,12 @@ so the CliRunner exercises wiring only — no real filesystem, no real Docker.
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import naiw_tasks.cli as cli_mod
 import pytest
 from click.testing import CliRunner
-
-import naiw_tasks.cli as cli_mod
 from naiw_tasks.cli import cli
 from naiw_tasks.config import Config
 from naiw_tasks.startup_checks import StartupCheckFailed
-
 
 # ---------- shared fixtures --------------------------------------------------
 

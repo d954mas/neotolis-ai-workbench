@@ -4,9 +4,8 @@ workspace/repos/ prefix enforcement.
 
 from pathlib import Path
 
-import pytest
-
 import naiw_tasks.projects as projects_mod
+import pytest
 from naiw_tasks.path_validation import BindMountEscapeError
 from naiw_tasks.projects import load
 

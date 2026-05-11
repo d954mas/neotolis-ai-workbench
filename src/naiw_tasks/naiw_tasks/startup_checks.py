@@ -96,8 +96,8 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
         ) from exc
     else:
         raise StartupCheckFailed(
-            f"proxy allowlist drift — POST /exec/.../start returned 2xx; "
-            f"expected 403 (EXEC=0); cf. deploy/docker-compose.yml"
+            "proxy allowlist drift — POST /exec/.../start returned 2xx; "
+            "expected 403 (EXEC=0); cf. deploy/docker-compose.yml"
         )
 
 

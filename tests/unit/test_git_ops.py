@@ -7,9 +7,8 @@ is invoked. The only filesystem read is the no-rm-rf source-scan test.
 import subprocess
 from pathlib import Path
 
-import pytest
-
 import naiw_tasks.git_ops as git_ops
+import pytest
 from naiw_tasks.git_ops import (
     DEFAULT_BASE_CANDIDATES,
     GitWorktreeError,
@@ -17,7 +16,6 @@ from naiw_tasks.git_ops import (
     worktree_add,
     worktree_remove,
 )
-
 
 # ---------------------------------------------------------------------------
 # resolve_base

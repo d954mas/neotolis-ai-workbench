@@ -4,7 +4,6 @@ import multiprocessing
 from pathlib import Path
 
 import pytest
-
 from naiw_tasks.ids import (
     PROJECT_ALIAS_RE,
     TASK_ID_RE,

@@ -8,9 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 import naiw_tasks.startup_checks as startup_checks
+import pytest
 from naiw_tasks.startup_checks import (
     StartupCheckFailed,
     check_docker_reachable,
@@ -19,7 +18,6 @@ from naiw_tasks.startup_checks import (
     check_proxy_allowlist_drift,
     run_all,
 )
-
 
 # ---------------------------------------------------------------------------
 # StartupCheckFailed

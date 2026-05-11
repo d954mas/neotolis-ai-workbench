@@ -12,14 +12,11 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 import docker.errors
-
 import naiw_tasks.lifecycle as lifecycle
+import pytest
 from naiw_tasks.config import Config
 from naiw_tasks.model import FinishPolicy, Status, TaskKind
-
 
 # ---------- helpers ----------------------------------------------------------
 
@@ -694,7 +691,7 @@ def test_project_work_is_worktree(tmp_naiw_data, mock_subprocess_run):
     # subprocess called with worktree add
     cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
     assert any(
-        "worktree" in c and "add" in c and f"agent/alpha-001" in c for c in cmds
+        "worktree" in c and "add" in c and "agent/alpha-001" in c for c in cmds
     )
 
 
@@ -1004,7 +1001,9 @@ def test_finish_legacy_task_falls_back_to_projects_yaml(
     """task.json without project_repo_path (created on old code) must still
     teardown worktree via projects.yaml fallback. Preserves CLAUDE.md's
     'updates must not break in-flight task.json state' invariant."""
-    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    # Repo path is read from projects.yaml (the fallback) — _make_fake_repo
+    # creates BOTH the repo dir and the yaml entry, both needed.
+    _make_fake_repo(tmp_naiw_data, "alpha")
     work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
     work.mkdir(parents=True)
     # Pre-create task WITHOUT project_repo_path (legacy schema)
@@ -1211,7 +1210,12 @@ def test_finish_marks_failed_for_dead_and_created_states(tmp_naiw_data):
         )
         container.attrs = {"State": {"Status": state}}
         container.remove.side_effect = docker.errors.APIError("blocked")
-        client.containers.get.side_effect = lambda name: container
+        # Bind `container` explicitly to avoid Python's late-binding closure
+        # capture: the lambda fires synchronously inside finish() during this
+        # same loop iteration, but ruff B023 still flags lazy capture.
+        client.containers.get.side_effect = (
+            lambda name, container=container: container
+        )
 
         cfg = _make_cfg(tmp_naiw_data)
         with pytest.raises(SystemExit) as excinfo:
@@ -1512,10 +1516,11 @@ def test_finish_never_uses_rm_rf():
 def _finish_worker(data_root_str: str, task_id: str) -> int:
     """Spawn-process worker calling lifecycle.finish."""
     # Re-import inside spawn child — module globals are fresh per process.
+    from unittest.mock import MagicMock as _MM
+
+    import docker.errors as _de
     import naiw_tasks.lifecycle as _lifecycle
     from naiw_tasks.config import Config as _Config
-    from unittest.mock import MagicMock as _MM
-    import docker.errors as _de
 
     data_root = Path(data_root_str)
     cfg = _Config(data_root=data_root)

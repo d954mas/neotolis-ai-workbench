@@ -13,6 +13,7 @@ shares STDIO with the container's pid 1 (tmux), which is exactly what we want.
 
 import os
 import sys
+from contextlib import suppress
 
 
 def attach_to_task(client, proxy_url: str, task_id: str) -> None:
@@ -48,10 +49,8 @@ def attach_to_task(client, proxy_url: str, task_id: str) -> None:
     # Refresh attrs in case the list cache is stale; a NotFound/APIError between
     # list and reload is benign — fall through to the state check which will
     # report the last known status (or <unknown>) and refuse cleanly.
-    try:
+    with suppress(Exception):
         container.reload()
-    except Exception:
-        pass
 
     state = container.attrs.get("State", {}).get("Status", "<unknown>")
     if state != "running":

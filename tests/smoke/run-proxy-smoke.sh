@@ -69,10 +69,19 @@ host_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
 
 # Negative: any `ports:` entry that publishes to a non-localhost address is a
 # security regression. Accepts only 127.0.0.1 / [::1] prefixes.
-suspicious_ports="$(grep -A 10 '^\s*ports:' "$compose_file" \
-    | grep -E '^\s*-\s' \
-    | grep -vE '^\s*-\s*"?(127\.0\.0\.1|\[::1\]):' \
-    || true)"
+# awk scopes the scan to the actual ports: block — a previous grep -A approach
+# ran past the block boundary and false-flagged the volumes mount entry.
+suspicious_ports="$(awk '
+    in_ports && /^[[:space:]]+-[[:space:]]/ {
+        line=$0
+        sub(/^[[:space:]]+-[[:space:]]*"?/, "", line)
+        sub(/"?[[:space:]]*$/, "", line)
+        if (line !~ /^127\.0\.0\.1:/ && line !~ /^\[::1\]:/) print line
+        next
+    }
+    in_ports { in_ports=0 }
+    /^[[:space:]]+ports:[[:space:]]*$/ { in_ports=1 }
+' "$compose_file" || true)"
 if [[ -n "$suspicious_ports" ]]; then
     fail "compose has non-localhost port mapping (LAN leak): $suspicious_ports"
 fi

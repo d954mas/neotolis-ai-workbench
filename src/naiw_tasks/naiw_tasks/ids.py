@@ -9,6 +9,7 @@ import fcntl
 import os
 import re
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 # Container-friendly DNS label shape — usable as both task id and the container
@@ -43,7 +44,11 @@ def validate_project_alias(alias: str) -> None:
 def _atomic_write_counter(counter_path: Path, value: int) -> None:
     counters_dir = counter_path.parent
     project_stem = counter_path.stem
-    tmp = tempfile.NamedTemporaryFile(
+    # `delete=False` + explicit close + os.replace is the atomic-write recipe.
+    # A `with NamedTemporaryFile(...)` context manager would auto-close (and on
+    # some platforms also delete) at scope exit, racing with the os.replace
+    # publication step. Manual lifecycle here is intentional and correct.
+    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
         mode="w",
         dir=str(counters_dir),
         delete=False,
@@ -60,10 +65,8 @@ def _atomic_write_counter(counter_path: Path, value: int) -> None:
         os.replace(tmp.name, str(counter_path))
     except Exception:
         tmp.close()
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(tmp.name)
-        except FileNotFoundError:
-            pass
         raise
 
 

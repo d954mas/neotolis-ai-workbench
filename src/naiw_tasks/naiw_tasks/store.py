@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -77,14 +78,15 @@ def update_task(
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-        if tj.exists():
-            data = json.loads(tj.read_text(encoding="utf-8"))
-        else:
-            data = {}
+        data = json.loads(tj.read_text(encoding="utf-8")) if tj.exists() else {}
 
         new_data = mutator(data)
 
-        tmp = tempfile.NamedTemporaryFile(
+        # `delete=False` + explicit close + os.replace is the atomic-write recipe.
+        # A `with NamedTemporaryFile(...)` context manager would auto-close at
+        # the wrong moment and race with the os.replace publication step.
+        # Manual lifecycle here is intentional and correct.
+        tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
             mode="w",
             # Same FS as final — os.replace is atomic only intra-FS.
             dir=str(meta),
@@ -103,10 +105,8 @@ def update_task(
             os.replace(tmp.name, str(tj))
         except Exception:
             tmp.close()
-            try:
+            with suppress(FileNotFoundError):
                 os.unlink(tmp.name)
-            except FileNotFoundError:
-                pass
             raise
 
         return new_data

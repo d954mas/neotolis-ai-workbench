@@ -19,6 +19,7 @@ reclaims disk via `naiw-tasks finish <id> --delete-worktree`.
 import logging
 import logging.handlers
 import sys
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -471,14 +472,10 @@ def finish(
             container = None
 
         if container is not None:
-            try:
+            with suppress(docker.errors.NotFound, docker.errors.APIError):
                 container.stop(timeout=10)
-            except (docker.errors.NotFound, docker.errors.APIError):
-                pass
-            try:
+            with suppress(docker.errors.NotFound, docker.errors.APIError):
                 container.remove(force=True)
-            except (docker.errors.NotFound, docker.errors.APIError):
-                pass
 
         # Verify teardown actually happened. ONLY NotFound counts as completed
         # — even an exited/dead/created container leaves a record in

@@ -2,8 +2,9 @@
 
 import json
 
-from naiw_tasks import model as model_mod
 from naiw_tasks.model import FinishPolicy, Status, Task, TaskKind
+
+from naiw_tasks import model as model_mod
 
 
 def test_status_enum_has_exactly_four_values() -> None:

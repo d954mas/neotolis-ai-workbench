@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from naiw_tasks.path_validation import BindMountEscapeError, validate_bind_source
 
 
