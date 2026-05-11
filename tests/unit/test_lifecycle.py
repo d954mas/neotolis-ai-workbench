@@ -40,14 +40,28 @@ def _make_fake_repo(data_root: Path, alias: str) -> Path:
 
 
 def _fake_client(container_name: str = "naiw-task-alpha-001"):
+    """Fake Docker client that mirrors real semantics for finish's verify step:
+    after container.remove() is called, subsequent client.containers.get(name)
+    raises NotFound — same as a real daemon.
+
+    Override `client.containers.get.side_effect` in individual tests to model
+    APIError / persistent-running-container scenarios.
+    """
     client = MagicMock()
     container = MagicMock()
     container.name = container_name
     container.image.id = (
         "sha256:deadbeef0000000000000000000000000000000000000000000000000000000000"
     )
+    container.attrs = {"State": {"Status": "running"}}
+
+    def _get(name):
+        if container.remove.called:
+            raise docker.errors.NotFound(f"{name} removed")
+        return container
+
     client.containers.run = MagicMock(return_value=container)
-    client.containers.get = MagicMock(return_value=container)
+    client.containers.get = MagicMock(side_effect=_get)
     return client, container
 
 
@@ -934,6 +948,151 @@ def test_finish_legacy_task_alias_removed_warns(
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
 
+def test_finish_marks_failed_when_container_still_running_after_remove(
+    tmp_naiw_data, capsys
+):
+    """If stop+remove silently fail and verify shows the container still
+    running, finish must NOT mark completed — it marks FAILED so the operator
+    can retry (since finish short-circuits only on completed)."""
+    _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    # Force the "remove" call to be a no-op so get keeps returning the running container.
+    container.remove.side_effect = docker.errors.APIError("daemon busy")
+    # Also override get's side_effect to always return the container (defeats _fake_client's
+    # remove-aware get).
+    client.containers.get.side_effect = lambda name: container
+
+    cfg = _make_cfg(tmp_naiw_data)
+    with pytest.raises(SystemExit) as excinfo:
+        lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    assert excinfo.value.code == 1
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert "still 'running'" in on_disk["failure_reason"]
+
+    captured = capsys.readouterr()
+    assert "retry: naiw-tasks finish task-001" in captured.err
+
+
+def test_finish_marks_failed_when_verify_call_itself_errors(
+    tmp_naiw_data, capsys
+):
+    """If verify-step's containers.get raises APIError (e.g., proxy down between
+    remove and verify), refuse to mark completed."""
+    _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    # First call returns container (so stop/remove are attempted), second call
+    # (verify) raises APIError.
+    calls = {"n": 0}
+
+    def _get(name):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return container
+        raise docker.errors.APIError("connection refused")
+
+    client.containers.get.side_effect = _get
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    assert excinfo.value.code == 1
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert "cannot verify" in on_disk["failure_reason"]
+
+
+def test_finish_accepts_exited_container_as_completed(tmp_naiw_data):
+    """If the container is still in the daemon record but in a non-running
+    terminal state (exited / dead / created), finish marks completed — the
+    workload is gone, only the metadata record persists."""
+    _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    container.attrs = {"State": {"Status": "exited"}}
+    # remove silently fails, but the daemon kept the record in exited state.
+    container.remove.side_effect = docker.errors.APIError("removal blocked")
+    client.containers.get.side_effect = lambda name: container
+
+    cfg = _make_cfg(tmp_naiw_data)
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "completed"
+
+
+def test_finish_failed_by_verify_step_can_be_retried(tmp_naiw_data, capsys):
+    """After a verify-step failure leaves task in 'failed', the next finish
+    invocation must NOT short-circuit (only 'completed' short-circuits) and
+    must succeed once the container is gone."""
+    _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+
+    # First attempt: stop+remove silently fail; container stays running; finish marks failed.
+    container.remove.side_effect = docker.errors.APIError("daemon busy")
+    client.containers.get.side_effect = lambda name: container
+    cfg = _make_cfg(tmp_naiw_data)
+    with pytest.raises(SystemExit):
+        lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
+
+    # Second attempt: docker is healthy now. remove works; get raises NotFound after.
+    container.remove.side_effect = None
+    container.remove.reset_mock()
+
+    def _get_after_recovery(name):
+        if container.remove.called:
+            raise docker.errors.NotFound(f"{name} removed")
+        return container
+
+    client.containers.get.side_effect = _get_after_recovery
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_skips_worktree_teardown_when_container_still_alive(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """When verify shows container still running, finish must mark failed
+    WITHOUT touching the worktree — a live container may have files open."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+
+    client, container = _fake_client(container_name="naiw-task-alpha-001")
+    container.remove.side_effect = docker.errors.APIError("daemon busy")
+    client.containers.get.side_effect = lambda name: container
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(SystemExit):
+        lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+
+    # git worktree remove was NOT called
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_remove_calls = [
+        c for c in cmds if c and c[0] == "git" and "worktree" in c and "remove" in c
+    ]
+    assert git_remove_calls == [], (
+        f"worktree must not be torn down while container is alive: {cmds}"
+    )
+
+
 def test_finish_never_uses_rm_rf():
     src = (
         Path(__file__).resolve().parent.parent.parent
@@ -955,14 +1114,23 @@ def _finish_worker(data_root_str: str, task_id: str) -> int:
     import naiw_tasks.lifecycle as _lifecycle
     from naiw_tasks.config import Config as _Config
     from unittest.mock import MagicMock as _MM
-    import docker.errors as _de  # noqa: F401
+    import docker.errors as _de
 
     data_root = Path(data_root_str)
     cfg = _Config(data_root=data_root)
     client = _MM()
     container = _MM()
     container.name = f"naiw-task-{task_id}"
-    client.containers.get = _MM(return_value=container)
+    container.attrs = {"State": {"Status": "running"}}
+
+    # Mirror real Docker: after remove, get raises NotFound — needed by the
+    # finish() verify step.
+    def _get(name):
+        if container.remove.called:
+            raise _de.NotFound(f"{name} removed")
+        return container
+
+    client.containers.get = _MM(side_effect=_get)
     try:
         _lifecycle.finish(cfg, client, task_id, policy_override=None)
         return 0

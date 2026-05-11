@@ -336,6 +336,32 @@ def start(
         _detach_controller_log(log_handler)
 
 
+def _mark_finish_failed(task_dir: Path, task_id: str, reason: str) -> None:
+    """Write task.json.status=failed with reason, log a clear retry hint to stderr.
+
+    Used when `finish` cannot verify that the container was torn down. Leaving
+    the task in `failed` (not `completed`) means the next `naiw-tasks finish`
+    invocation will not short-circuit, so the operator can retry once the
+    Docker situation is resolved.
+    """
+    ts_now = Event.now_iso()
+
+    def _to_failed(d: dict) -> dict:
+        d = dict(d)
+        d["status"] = str(Status.FAILED)
+        d["failure_reason"] = f"finish: {reason}"
+        d["updated_at"] = ts_now
+        return d
+
+    store.update_task(task_dir, _to_failed)
+    print(
+        f"naiw-tasks: finish failed for task {task_id}: {reason}\n"
+        f"  retry: naiw-tasks finish {task_id}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _resolve_finish_policy(
     cli_override: str | None,
     task_policy: str,
@@ -381,24 +407,57 @@ def finish(
             return
 
         container_name = data.get("container_name", _container_name(task_id))
+
+        # Best-effort stop + remove. APIError is silently caught here because
+        # the verify step below is the source of truth — we mark completed
+        # only when the container is verifiably gone (or in a non-running
+        # terminal state). Silently marking completed despite docker errors
+        # would create a zombie container with no path back through the CLI
+        # (finish short-circuits on status=completed).
         try:
             container = client.containers.get(container_name)
+        except docker.errors.NotFound:
+            container = None
+        except docker.errors.APIError:
+            container = None
+
+        if container is not None:
             try:
                 container.stop(timeout=10)
-            except docker.errors.NotFound:
-                pass
-            except docker.errors.APIError:
+            except (docker.errors.NotFound, docker.errors.APIError):
                 pass
             try:
                 container.remove(force=True)
-            except docker.errors.NotFound:
+            except (docker.errors.NotFound, docker.errors.APIError):
                 pass
-            except docker.errors.APIError:
-                pass
+
+        # Verify teardown actually happened. NotFound is the success signal.
+        # Any non-running terminal state (exited/dead/created) is also OK —
+        # the workload is no longer alive even if Docker keeps the record.
+        try:
+            survivor = client.containers.get(container_name)
+            survivor_state = survivor.attrs.get("State", {}).get(
+                "Status", "<unknown>"
+            )
         except docker.errors.NotFound:
-            pass
-        except docker.errors.APIError:
-            pass
+            survivor_state = None
+        except docker.errors.APIError as exc:
+            _mark_finish_failed(
+                task_dir,
+                task_id,
+                f"cannot verify container teardown ({exc})",
+            )
+            raise SystemExit(1) from exc
+
+        _NON_RUNNING_TERMINAL = (None, "exited", "dead", "created")
+        if survivor_state not in _NON_RUNNING_TERMINAL:
+            _mark_finish_failed(
+                task_dir,
+                task_id,
+                f"container {container_name} still {survivor_state!r} "
+                f"after stop+remove",
+            )
+            raise SystemExit(1)
 
         # Worktree teardown — project tasks only. delete_worktree => git
         # worktree remove --force + prune (never raw recursive-delete).
