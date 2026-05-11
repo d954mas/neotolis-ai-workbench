@@ -29,9 +29,14 @@ def test_make_client_constructs_with_proxy_url(monkeypatch: pytest.MonkeyPatch) 
 def test_hardened_kwargs_match_phase25() -> None:
     from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
 
-    assert K["cap_drop"] == ["ALL"]
-    assert K["security_opt"] == ["no-new-privileges"]
+    # cap_drop / security_opt are tuples (not lists) so they cannot be mutated
+    # via .append() / .pop() / item-assignment.
+    assert K["cap_drop"] == ("ALL",)
+    assert K["security_opt"] == ("no-new-privileges",)
     assert K["read_only"] is True
+    # tmpfs / restart_policy are MappingProxyType wrappers; equality with a
+    # plain dict still works because MappingProxyType delegates __eq__ to the
+    # underlying mapping.
     assert K["tmpfs"] == {
         "/tmp": "rw,size=512m,mode=1777",
         "/run": "rw,size=64m,mode=755",
@@ -46,6 +51,66 @@ def test_hardened_kwargs_match_phase25() -> None:
     assert K["init"] is True
     assert K["tty"] is True
     assert K["stdin_open"] is True
+
+
+def test_hardened_kwargs_top_level_is_immutable() -> None:
+    """The security-critical hardening map must reject mutation at runtime.
+    `HARDENED_HOST_CONFIG_KWARGS["read_only"] = False` etc. is a class of
+    typo / 'temporary debug edit' that would silently disable container
+    isolation — wrapping in MappingProxyType makes those edits raise TypeError."""
+    from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
+
+    with pytest.raises(TypeError):
+        K["read_only"] = False  # type: ignore[index]
+    with pytest.raises(TypeError):
+        K["new_key"] = "danger"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        del K["cap_drop"]  # type: ignore[arg-type]
+
+
+def test_hardened_kwargs_nested_tmpfs_is_immutable() -> None:
+    """Nested tmpfs MUST also be immutable — otherwise an attacker (or careless
+    test fixture) could enlarge a tmpfs to defeat the pids/memory limits or
+    add a writable mount over a path the read-only rootfs is supposed to protect."""
+    from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
+
+    with pytest.raises(TypeError):
+        K["tmpfs"]["/tmp"] = "rw,size=999g"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        K["tmpfs"]["/etc"] = "rw,size=64m"  # type: ignore[index]
+
+
+def test_hardened_kwargs_nested_restart_policy_is_immutable() -> None:
+    from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
+
+    with pytest.raises(TypeError):
+        K["restart_policy"]["Name"] = "always"  # type: ignore[index]
+
+
+def test_hardened_kwargs_cap_drop_is_tuple_not_list() -> None:
+    """cap_drop=['ALL'] could be mutated via .append('SYS_ADMIN'). A tuple
+    forbids that path at the language level."""
+    from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
+
+    assert isinstance(K["cap_drop"], tuple)
+    assert isinstance(K["security_opt"], tuple)
+    with pytest.raises(AttributeError):
+        K["cap_drop"].append("SYS_ADMIN")  # type: ignore[attr-defined]
+
+
+def test_hardened_kwargs_unpacks_via_double_star() -> None:
+    """The whole structure is consumed via `**HARDENED_HOST_CONFIG_KWARGS` in
+    lifecycle.start — verify that double-star unpacking works through the
+    MappingProxyType wrapper (it implements the mapping protocol)."""
+    from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
+
+    def _accept(**kwargs):
+        return kwargs
+
+    unpacked = _accept(**K)
+    assert unpacked["cap_drop"] == ("ALL",)
+    assert unpacked["read_only"] is True
+    assert unpacked["tmpfs"]["/tmp"] == "rw,size=512m,mode=1777"
 
 
 def test_hardened_kwargs_disallow_ambiguous_and_escalation_keys() -> None:
