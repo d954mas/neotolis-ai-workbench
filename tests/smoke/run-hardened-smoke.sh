@@ -384,10 +384,9 @@ if [[ "$env_json" == *"ghp_"* || "$env_json" == *"test_token"* ]]; then
 fi
 
 docker exec "$container" tmux send-keys -t main "printf '%s\n' \"\$(cat /run/secrets/test_token)\"" Enter
-sleep 1
 
-if ! grep -q '\[REDACTED\]' "$log_path"; then
-    step_fail "secret" "[REDACTED] marker missing from terminal.log after token-echo"
+if ! wait_for_log_marker "$log_path" '[REDACTED]' 3; then
+    step_fail "secret" "[REDACTED] marker missing from terminal.log after token-echo (waited 3s)"
     fail "redaction filter not active"
 fi
 if grep -q "$fake_token" "$log_path"; then
@@ -406,15 +405,14 @@ wait_for_container_ready "$container" '[ -f /io/terminal.log ]' 15 \
 wait_for_tmux_session "$container" main 5 \
     || fail "tmux session 'main' did not come back online within 5s"
 docker exec "$container" tmux send-keys -t main 'echo POST_RESTART_MARKER' Enter
-sleep 1
+if ! wait_for_log_marker "$log_path" 'POST_RESTART_MARKER' 3; then
+    step_fail "HARD-restart" "POST_RESTART_MARKER missing from terminal.log after restart (waited 3s)"
+    fail "post-restart marker missing"
+fi
 size_after="$(stat -c %s "$log_path")"
 if (( size_after < size_before )); then
     step_fail "HARD-restart" "terminal.log shrunk: before=$size_before after=$size_after"
     fail "terminal.log shrunk across restart"
-fi
-if ! grep -q POST_RESTART_MARKER "$log_path"; then
-    step_fail "HARD-restart" "POST_RESTART_MARKER missing from terminal.log after restart"
-    fail "post-restart marker missing"
 fi
 step_ok "HARD-restart" "terminal.log appended through stop+start (before=$size_before after=$size_after)"
 

@@ -94,6 +94,22 @@ wait_for_tmux_session() {
     return 1
 }
 
+# Poll a host-side log file at 100ms cadence until a literal marker appears.
+# Used after `tmux send-keys` to avoid sleep-based races: terminal.log is
+# written asynchronously by the pipe-pane filter, so the marker may take
+# a few hundred ms to appear on a busy host.
+wait_for_log_marker() {
+    local log_path="$1" marker="$2" timeout_seconds="${3:-3}"
+    local i max=$(( timeout_seconds * 10 ))
+    for i in $(seq 1 "$max"); do
+        if grep -qF "$marker" "$log_path" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 # ─── Proxy probes ───────────────────────────────────────────────────
 # Generic single-shot proxy probe via a sibling curl container on naiw-internal.
 # Returns 0 on match, 1 on mismatch — caller decides whether to fail-fast
