@@ -9,7 +9,9 @@ description = "NAIW controller — start/attach/finish hardened per-task Docker 
 requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }
 dependencies = [
-    "click>=8.2,<9",
+    # 8.3 removed CliRunner(mix_stderr=...) from the public API; pin >=8.3
+    # so CI / pipx installs match the API used by tests and runtime.
+    "click>=8.3,<9",
     "docker>=7.1,<8",
     "PyYAML>=6.0,<7",
     "naiw_common>=0.1.0",

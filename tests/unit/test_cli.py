@@ -72,7 +72,7 @@ def test_cli_propagates_startup_check_failure(monkeypatch, tmp_path):
         raise StartupCheckFailed("nope")
 
     monkeypatch.setattr(cli_mod.startup_checks, "run_all", boom)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(cli, ["start"])
     assert result.exit_code == 2
     assert "naiw-tasks: nope" in result.stderr
@@ -85,7 +85,7 @@ def test_cli_config_load_value_error_exits_2_with_clean_message(monkeypatch):
         raise ValueError("naiw-tasks: config.yaml has unknown key ['weird']")
 
     monkeypatch.setattr(cli_mod.config, "load", bad_load)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(cli, ["start"])
     assert result.exit_code == 2
     assert "naiw-tasks: " in result.stderr
@@ -99,7 +99,7 @@ def test_start_invalid_project_alias_exits_3_with_clean_message(
     raw ValueError from allocate_task_id deep inside lifecycle.start."""
     fake_lifecycle_start = MagicMock()
     monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
 
     result = runner.invoke(cli, ["start", "Bad Project!"])
 
@@ -114,7 +114,7 @@ def test_start_with_uppercase_alias_rejected(monkeypatch, patched_env):
     """DNS-label shape is lowercase-only — uppercase is rejected at CLI boundary."""
     fake_lifecycle_start = MagicMock()
     monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
 
     result = runner.invoke(cli, ["start", "Alpha"])
 
@@ -126,7 +126,7 @@ def test_start_with_too_long_alias_rejected(monkeypatch, patched_env):
     """Alias capped at 60 chars (DNS-label budget for naiw-task-<id>)."""
     fake_lifecycle_start = MagicMock()
     monkeypatch.setattr(cli_mod.lifecycle, "start", fake_lifecycle_start)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
 
     result = runner.invoke(cli, ["start", "a" * 61])
 
@@ -219,7 +219,7 @@ def test_start_runtime_failure_exits_1(monkeypatch, patched_env):
 def test_attach_validates_id_and_exits_3_on_invalid(monkeypatch, patched_env):
     fake = MagicMock()
     monkeypatch.setattr(cli_mod.attach_mod, "attach_to_task", fake)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(cli, ["attach", "Foo!"])
     assert result.exit_code == 3
     assert "invalid task id" in result.stderr
@@ -252,7 +252,7 @@ def test_attach_calls_attach_to_task(monkeypatch, patched_env):
 def test_finish_validates_id_and_exits_3_on_invalid(monkeypatch, patched_env):
     fake = MagicMock()
     monkeypatch.setattr(cli_mod.lifecycle, "finish", fake)
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     result = runner.invoke(cli, ["finish", "BAD"])
     assert result.exit_code == 3
     assert fake.call_count == 0
