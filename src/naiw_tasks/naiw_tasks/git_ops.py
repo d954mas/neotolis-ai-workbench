@@ -82,10 +82,26 @@ def worktree_add(
 
 
 def worktree_remove(repo: Path, work_path: Path) -> None:
-    """Force-remove worktree + prune. Tolerant of out-of-band deletion."""
-    # remove --force first (idempotent against missing worktree); then prune
-    # drops the .git/worktrees/<id>/ admin entry left behind by --force.
-    # Never raw recursive-delete the worktree path — git's bookkeeping must
-    # stay consistent, and only the two-step git-driven teardown preserves it.
-    _git(repo, "worktree", "remove", "--force", str(work_path))
+    """Force-remove worktree + prune metadata.
+
+    Tolerant of out-of-band deletion: if `work_path` no longer exists on disk,
+    git's "is not a working tree" exit is allowed and we proceed to prune.
+    Otherwise, a non-zero exit from `git worktree remove --force` is a real
+    failure (locked branch, inaccessible repo, etc.) and is raised so
+    callers do not silently mark the task completed with a dirty disk state.
+
+    Never raw recursive-delete the worktree path — git's bookkeeping must
+    stay consistent, and only the two-step git-driven teardown preserves it.
+    """
+    if work_path.exists():
+        result = _git(repo, "worktree", "remove", "--force", str(work_path))
+        if result.returncode != 0:
+            raise GitWorktreeError(
+                f"git worktree remove --force failed "
+                f"(exit {result.returncode}) for {work_path}",
+                stderr=result.stderr,
+            )
+    # prune is best-effort metadata cleanup. If it fails the worktree-add
+    # bookkeeping might be slightly stale, but the next remove/add cycle will
+    # reconcile. Don't fail the whole operation on this.
     _git(repo, "worktree", "prune")

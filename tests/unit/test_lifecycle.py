@@ -1359,6 +1359,92 @@ def test_finish_non_tty_ask_policy_deletes_worktree_integration(
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
 
+def test_finish_marks_failed_when_git_worktree_remove_fails(
+    tmp_naiw_data, mock_subprocess_run, capsys
+):
+    """If git worktree remove --force returns non-zero on an existing worktree,
+    finish must surface as FAILED — operator asked for delete_worktree, disk
+    state is dirty, marking completed would hide the dirty state behind the
+    short-circuit-on-completed rule."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+
+    # Git worktree remove --force returns non-zero (locked branch, etc.)
+    mock_subprocess_run.return_value = subprocess.CompletedProcess(
+        args=[],
+        returncode=1,
+        stdout="",
+        stderr="fatal: worktree is locked: contains uncommitted changes\n",
+    )
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(SystemExit) as excinfo:
+        lifecycle.finish(
+            cfg, client, "alpha-001", policy_override="delete_worktree"
+        )
+    assert excinfo.value.code == 1
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert "git worktree remove failed" in on_disk["failure_reason"]
+    # First line of git stderr surfaced
+    assert "worktree is locked" in on_disk["failure_reason"]
+
+    captured = capsys.readouterr()
+    assert "retry: naiw-tasks finish alpha-001" in captured.err
+
+    # Worktree dir intentionally left on disk for operator inspection
+    assert work.exists()
+
+
+def test_finish_tolerates_already_missing_work_path(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """If the worktree was already deleted out-of-band, finish completes
+    cleanly: git_ops.worktree_remove skips the remove call (path doesn't
+    exist on disk), runs prune for metadata cleanup, task marked completed."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    # Note: NO work dir created.
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+
+    # Only prune was called (remove was skipped because work_path missing).
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_calls = [c for c in cmds if c and c[0] == "git"]
+    assert len(git_calls) == 1
+    assert "prune" in git_calls[0]
+    assert "remove" not in git_calls[0]
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
 def test_finish_never_uses_rm_rf():
     src = (
         Path(__file__).resolve().parent.parent.parent

@@ -542,9 +542,24 @@ def finish(
                         pass
 
                 if repo_path and worktree_path:
-                    git_ops.worktree_remove(
-                        Path(repo_path), Path(worktree_path)
-                    )
+                    try:
+                        git_ops.worktree_remove(
+                            Path(repo_path), Path(worktree_path)
+                        )
+                    except git_ops.GitWorktreeError as exc:
+                        # User asked for delete_worktree but git failed —
+                        # don't silently mark completed with a dirty disk.
+                        first_line = (
+                            exc.stderr.strip().splitlines()[0]
+                            if exc.stderr and exc.stderr.strip()
+                            else str(exc)
+                        )
+                        _mark_finish_failed(
+                            task_dir,
+                            task_id,
+                            f"git worktree remove failed: {first_line}",
+                        )
+                        raise SystemExit(1) from exc
                 elif worktree_path:
                     print(
                         f"naiw-tasks: task {task_id}: worktree at "

@@ -145,8 +145,14 @@ def test_worktree_add_raises_with_stderr_verbatim(mock_subprocess_run):
 # ---------------------------------------------------------------------------
 
 
-def test_worktree_remove_calls_force_then_prune(mock_subprocess_run):
-    worktree_remove(Path("/repo"), Path("/tasks/foo/work"))
+def test_worktree_remove_calls_force_then_prune_when_work_exists(
+    mock_subprocess_run, tmp_path
+):
+    """Happy path: work dir exists on disk → git remove --force, then prune."""
+    work = tmp_path / "work"
+    work.mkdir()
+
+    worktree_remove(Path("/repo"), work)
 
     assert mock_subprocess_run.call_count == 2
     first = mock_subprocess_run.call_args_list[0].args[0]
@@ -158,20 +164,63 @@ def test_worktree_remove_calls_force_then_prune(mock_subprocess_run):
         "worktree",
         "remove",
         "--force",
-        "/tasks/foo/work",
+        str(work),
     ]
     assert second == ["git", "-C", "/repo", "worktree", "prune"]
 
 
-def test_worktree_remove_tolerates_nonzero_exit(mock_subprocess_run):
+def test_worktree_remove_skips_remove_when_work_path_missing(
+    mock_subprocess_run, tmp_path
+):
+    """Out-of-band deletion tolerance: if the work dir is already gone on disk,
+    skip the remove call (git would refuse with 'is not a working tree') and
+    only run prune so the .git/worktrees admin record is cleaned up."""
+    missing = tmp_path / "already-deleted"
+    # Don't create it.
+
+    worktree_remove(Path("/repo"), missing)
+
+    # Only `git worktree prune` should have run.
+    assert mock_subprocess_run.call_count == 1
+    args = mock_subprocess_run.call_args_list[0].args[0]
+    assert args == ["git", "-C", "/repo", "worktree", "prune"]
+
+
+def test_worktree_remove_raises_when_remove_fails_on_existing_path(
+    mock_subprocess_run, tmp_path
+):
+    """If work_path exists on disk but git remove --force fails (locked branch,
+    inaccessible repo, etc.), worktree_remove must raise GitWorktreeError so
+    the caller does NOT silently mark the task completed with a dirty disk."""
+    work = tmp_path / "work"
+    work.mkdir()
+
     mock_subprocess_run.return_value = subprocess.CompletedProcess(
-        args=[], returncode=128, stdout="", stderr="not a working tree"
+        args=[],
+        returncode=1,
+        stdout="",
+        stderr="fatal: worktree is locked\n",
     )
 
-    # Must not raise — out-of-band deletion is acceptable.
-    result = worktree_remove(Path("/repo"), Path("/tasks/foo/work"))
-    assert result is None
-    assert mock_subprocess_run.call_count == 2
+    with pytest.raises(GitWorktreeError) as excinfo:
+        worktree_remove(Path("/repo"), work)
+
+    assert "git worktree remove --force failed" in str(excinfo.value)
+    assert excinfo.value.stderr == "fatal: worktree is locked\n"
+
+
+def test_worktree_remove_prune_failure_is_best_effort(
+    mock_subprocess_run, tmp_path
+):
+    """If prune itself fails, worktree_remove must not raise — prune is metadata
+    cleanup and stale entries get reconciled on the next add/remove cycle."""
+    missing = tmp_path / "already-gone"
+    mock_subprocess_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=128, stdout="", stderr="prune failed"
+    )
+
+    # Must not raise even though prune returned non-zero.
+    worktree_remove(Path("/repo"), missing)
 
 
 # ---------------------------------------------------------------------------
