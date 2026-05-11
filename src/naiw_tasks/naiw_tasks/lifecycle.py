@@ -21,10 +21,10 @@ import logging.handlers
 import sys
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 
 import docker.errors
+from naiw_common.events import Event
 
 from naiw_tasks import git_ops, projects, store
 from naiw_tasks.config import Config
@@ -42,20 +42,6 @@ from naiw_tasks.path_validation import (
 )
 
 GENERIC_PROJECT_ALIAS = "task"
-
-
-def _now_iso() -> str:
-    """ISO-8601 UTC timestamp with millisecond precision and Z suffix.
-
-    Same shape as naiw_common.events.Event.now_iso() — duplicated here
-    instead of imported so naiw_tasks does not need naiw_common as a
-    declared dependency (which would break `pipx install -e ./src/naiw_tasks`
-    since naiw_common is not published to any index). The image build still
-    uses naiw_common.events.Event for the Pi-side wire format.
-    """
-    now = datetime.now(UTC)
-    ms = now.microsecond // 1000
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
 
 class StartFailed(RuntimeError):
@@ -153,7 +139,7 @@ def _initial_task(
     cfg: Config,
     labels: dict[str, str],
 ) -> Task:
-    ts = _now_iso()
+    ts = Event.now_iso()
     return Task(
         id=task_id,
         kind=kind,
@@ -235,7 +221,7 @@ def start(
             branch = f"agent/{task_id}"
             worktree_path = str(work_path.resolve())
             project_repo_path = str(project_repo.resolve())
-            ts_meta = _now_iso()
+            ts_meta = Event.now_iso()
 
             def _attach_project_meta(d: dict) -> dict:
                 d = dict(d)
@@ -287,7 +273,7 @@ def start(
                 f"containers.run; refusing to record task without audit digest"
             )
 
-        ts_started = _now_iso()
+        ts_started = Event.now_iso()
 
         def _to_running(d: dict) -> dict:
             d = dict(d)
@@ -330,7 +316,7 @@ def start(
         FileNotFoundError,
         ValueError,
     ) as exc:
-        ts_now = _now_iso()
+        ts_now = Event.now_iso()
         reason = str(exc)
         stderr_extra = ""
         if isinstance(exc, git_ops.GitWorktreeError) and exc.stderr:
@@ -394,7 +380,7 @@ def _mark_finish_failed(task_dir: Path, task_id: str, reason: str) -> None:
     invocation will not short-circuit, so the operator can retry once the
     Docker situation is resolved.
     """
-    ts_now = _now_iso()
+    ts_now = Event.now_iso()
 
     def _to_failed(d: dict) -> dict:
         d = dict(d)
@@ -592,7 +578,7 @@ def finish(
                         flush=True,
                     )
 
-        ts_now = _now_iso()
+        ts_now = Event.now_iso()
 
         def _to_completed(d: dict) -> dict:
             d = dict(d)

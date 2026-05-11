@@ -43,7 +43,7 @@ bash tests/smoke/run-proxy-smoke.sh
 
 The controller (`naiw-tasks` CLI) communicates with the Docker engine via the proxy ONLY. No direct socket mount is permitted.
 
-- **Distribution:** host-installed CLI (`pipx install -e ./src/naiw_tasks` or `uv tool install ...`). Runs as the operator's user, not as root.
+- **Distribution:** host-installed CLI. Run `bash scripts/install-controller.sh` — it provisions both `naiw_tasks` AND its in-repo `naiw_common` wire-format dep into the same `uv tool` / `pipx` venv (with a venv fallback if neither is present). A bare `pipx install -e ./src/naiw_tasks` will fail because pipx isolates per-tool venvs and `naiw_common` is not published to any index — by design; the script enforces the correct install path. Runs as the operator's user, not as root.
 - **Endpoint:** `tcp://127.0.0.1:2375` (localhost-bound proxy port). Override via `docker_proxy_url` in `~/naiw-data/config.yaml` if needed.
 - **Why localhost binding is safe:** the proxy itself enforces the locked allowlist; localhost-only `ports:` mapping (not `0.0.0.0`) is defense-in-depth so no LAN process can hit even the allow-listed endpoints. The original concern with exposing port 2375 was about the raw Docker socket — that's a different threat model. A locked proxy bound to 127.0.0.1 is the standard pattern for host-based Docker tooling.
 - **`docker attach`:** the CLI invokes `docker -H tcp://127.0.0.1:2375 attach <name>` so the docker CLI also goes through the proxy (without `-H`, it would silently fall back to `/var/run/docker.sock`).
