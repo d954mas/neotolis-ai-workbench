@@ -26,6 +26,50 @@ def test_make_client_constructs_with_proxy_url(monkeypatch: pytest.MonkeyPatch) 
     assert kwargs["timeout"] < 120  # SDK default is much higher; we cap small.
 
 
+def test_make_client_pins_api_version_to_skip_negotiation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docker-py with version=None (default) calls GET /version at construction
+    time. The locked proxy has VERSION=0 → 403 → DockerException at startup.
+    Pinning version=<str> skips the negotiation entirely; the value must be
+    a non-empty string so APIClient takes the no-network branch."""
+    import naiw_tasks.docker_client as docker_client_mod
+
+    mock_client_cls = MagicMock()
+    monkeypatch.setattr(docker_client_mod.docker, "DockerClient", mock_client_cls)
+
+    docker_client_mod.make_client("tcp://example:2375")
+
+    kwargs = mock_client_cls.call_args.kwargs
+    # Must be present, not None, and a string — that combination is what
+    # bypasses _retrieve_server_version() inside docker-py's APIClient init.
+    assert "version" in kwargs, (
+        "version kwarg missing — constructor will GET /version (blocked by proxy)"
+    )
+    assert kwargs["version"] is not None
+    assert isinstance(kwargs["version"], str)
+    assert kwargs["version"] != "auto"
+    # The exact value should match other proxy-version references in the codebase.
+    assert kwargs["version"] == docker_client_mod.PINNED_DOCKER_API_VERSION
+
+
+def test_pinned_api_version_constant_matches_proxy_paths() -> None:
+    """The PINNED_DOCKER_API_VERSION constant must match the API version used
+    in startup_checks (proxy allowlist probe) and the smoke harness — drift
+    means one path negotiates while the other has a hardcoded path."""
+    from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+
+    # startup_checks probes /v1.43/exec/fakeid/start
+    startup_src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src" / "naiw_tasks" / "naiw_tasks" / "startup_checks.py"
+    ).read_text(encoding="utf-8")
+    assert f"/v{PINNED_DOCKER_API_VERSION}/" in startup_src, (
+        f"startup_checks API path drifts from PINNED_DOCKER_API_VERSION="
+        f"{PINNED_DOCKER_API_VERSION!r}"
+    )
+
+
 def test_hardened_kwargs_match_phase25() -> None:
     from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS as K
 

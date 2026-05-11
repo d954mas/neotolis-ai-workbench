@@ -52,10 +52,26 @@ HARDENED_HOST_CONFIG_KWARGS = MappingProxyType({
 })
 
 
+# Pinned Engine API version. docker-py defaults to version=None which triggers
+# auto-negotiation via GET /version — blocked by the locked proxy (VERSION=0
+# in deploy/proxy/README.md). Pinning here skips the negotiation entirely; the
+# value matches the API path used everywhere else in the codebase
+# (startup_checks proxy probe, smoke harness).
+PINNED_DOCKER_API_VERSION: str = "1.43"
+
+
 def make_client(proxy_url: str) -> docker.DockerClient:
     """Construct the only DockerClient used by the controller.
 
     timeout=10 covers proxy + daemon round-trip on 127.0.0.1; longer values hide
     bugs (a hung proxy should fail loudly, not block the controller indefinitely).
+
+    `version` is pinned (NOT None / "auto") so the constructor does not call
+    GET /version — that endpoint is forbidden by the proxy (VERSION=0) and
+    would surface as DockerException at controller startup.
     """
-    return docker.DockerClient(base_url=proxy_url, timeout=10)
+    return docker.DockerClient(
+        base_url=proxy_url,
+        timeout=10,
+        version=PINNED_DOCKER_API_VERSION,
+    )
