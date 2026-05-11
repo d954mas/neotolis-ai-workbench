@@ -376,11 +376,29 @@ def _resolve_finish_policy(
     cli_override: str | None,
     task_policy: str,
 ) -> FinishPolicy:
-    """CLI flag wins; otherwise task.json's stored policy; if 'ask', prompt."""
+    """CLI flag wins; otherwise task.json's stored policy; if 'ask', prompt
+    in interactive contexts.
+
+    Non-interactive contexts (cron, systemd timers, shell pipes, Phase 4
+    signal-driven auto_finish, pytest captured stdin) cannot answer input()
+    and would either hang or raise EOFError. In those contexts the policy
+    defaults to delete_worktree — matches the documented MVP default
+    ('disk-light by default for small VPS' per CLAUDE.md) — with a clear
+    stderr note so the operator can see what happened in cron logs.
+    """
     if cli_override:
         return FinishPolicy(cli_override)
     policy = FinishPolicy(task_policy)
     if policy is FinishPolicy.ASK:
+        if not sys.stdin.isatty():
+            print(
+                "naiw-tasks: non-interactive context detected; defaulting "
+                "finish_policy=ask to delete_worktree. "
+                "Pass --keep-worktree to override.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return FinishPolicy.DELETE_WORKTREE
         answer = input("keep worktree? [y/N]: ").strip().lower()
         return (
             FinishPolicy.KEEP_WORKTREE

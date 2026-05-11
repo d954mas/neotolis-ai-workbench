@@ -1134,6 +1134,114 @@ def test_finish_skips_worktree_teardown_when_container_still_alive(
     )
 
 
+# ---------- _resolve_finish_policy — interactive vs non-interactive ---------
+
+
+def test_resolve_finish_policy_cli_override_wins_over_task_policy(monkeypatch):
+    """CLI flag wins regardless of TTY or stored policy."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert (
+        lifecycle._resolve_finish_policy("keep_worktree", "ask")
+        is FinishPolicy.KEEP_WORKTREE
+    )
+    assert (
+        lifecycle._resolve_finish_policy("delete_worktree", "ask")
+        is FinishPolicy.DELETE_WORKTREE
+    )
+
+
+def test_resolve_finish_policy_stored_non_ask_returns_as_is(monkeypatch):
+    """Stored delete/keep is returned without consulting TTY or input."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert (
+        lifecycle._resolve_finish_policy(None, "keep_worktree")
+        is FinishPolicy.KEEP_WORKTREE
+    )
+    assert (
+        lifecycle._resolve_finish_policy(None, "delete_worktree")
+        is FinishPolicy.DELETE_WORKTREE
+    )
+
+
+def test_resolve_finish_policy_non_tty_ask_defaults_to_delete_with_warning(
+    monkeypatch, capsys
+):
+    """Non-TTY + stored policy=ask: no prompt, defaults to delete_worktree,
+    prints a visible note to stderr so cron logs document the choice."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    result = lifecycle._resolve_finish_policy(None, "ask")
+
+    assert result is FinishPolicy.DELETE_WORKTREE
+    captured = capsys.readouterr()
+    assert "non-interactive context" in captured.err
+    assert "delete_worktree" in captured.err
+    assert "--keep-worktree" in captured.err
+
+
+def test_resolve_finish_policy_tty_ask_prompts_yes(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    assert (
+        lifecycle._resolve_finish_policy(None, "ask") is FinishPolicy.KEEP_WORKTREE
+    )
+
+
+def test_resolve_finish_policy_tty_ask_prompts_no(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    assert (
+        lifecycle._resolve_finish_policy(None, "ask") is FinishPolicy.DELETE_WORKTREE
+    )
+
+
+def test_resolve_finish_policy_tty_ask_default_is_no(monkeypatch):
+    """Empty answer / non-y answer defaults to delete (the explicit prompt is [y/N])."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert (
+        lifecycle._resolve_finish_policy(None, "ask") is FinishPolicy.DELETE_WORKTREE
+    )
+
+
+def test_finish_non_tty_ask_policy_deletes_worktree_integration(
+    tmp_naiw_data, mock_subprocess_run, capsys, monkeypatch
+):
+    """Integration: task with finish_policy=ask, finish called without override
+    in non-TTY context — worktree removed, stderr documents the choice."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        finish_policy="ask",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "alpha-001", policy_override=None)
+
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_remove_calls = [
+        c for c in cmds if c and c[0] == "git" and "worktree" in c and "remove" in c
+    ]
+    assert len(git_remove_calls) == 1
+
+    captured = capsys.readouterr()
+    assert "non-interactive context" in captured.err
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
 def test_finish_never_uses_rm_rf():
     src = (
         Path(__file__).resolve().parent.parent.parent
