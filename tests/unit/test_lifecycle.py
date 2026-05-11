@@ -39,21 +39,30 @@ def _make_fake_repo(data_root: Path, alias: str) -> Path:
     return repo
 
 
-def _fake_client(container_name: str = "naiw-task-alpha-001"):
-    """Fake Docker client that mirrors real semantics for finish's verify step:
-    after container.remove() is called, subsequent client.containers.get(name)
-    raises NotFound — same as a real daemon.
+_FAKE_DIGEST = (
+    "sha256:deadbeef0000000000000000000000000000000000000000000000000000000000"
+)
 
-    Override `client.containers.get.side_effect` in individual tests to model
-    APIError / persistent-running-container scenarios.
+
+def _fake_client(container_name: str = "naiw-task-alpha-001"):
+    """Fake Docker client that mirrors real semantics:
+
+    1. After container.remove() is called, subsequent client.containers.get(name)
+       raises NotFound — same as a real daemon.
+    2. container.attrs has "Image" populated up-front so the start() code path
+       (which reads container.attrs["Image"] after reload()) gets the digest
+       without triggering the blocked /images/<id>/json endpoint.
+
+    Override `client.containers.get.side_effect` or `container.attrs` in
+    individual tests to model APIError / digest-unresolvable scenarios.
     """
     client = MagicMock()
     container = MagicMock()
     container.name = container_name
-    container.image.id = (
-        "sha256:deadbeef0000000000000000000000000000000000000000000000000000000000"
-    )
-    container.attrs = {"State": {"Status": "running"}}
+    container.attrs = {
+        "State": {"Status": "running"},
+        "Image": _FAKE_DIGEST,
+    }
 
     def _get(name):
         if container.remove.called:
@@ -530,11 +539,14 @@ def test_start_other_api_errors_keep_raw_message(tmp_naiw_data):
     assert "already in use" not in reason
 
 
-def test_start_aborts_when_image_digest_unresolvable(tmp_naiw_data, capsys):
-    """If container.image.id is None (or empty), start must raise StartFailed —
-    a task without resolved image digest cannot be audited or recovered later."""
+def test_start_aborts_when_image_digest_missing_in_attrs(tmp_naiw_data, capsys):
+    """If container inspect (CONTAINERS=1 endpoint) returns no Image field,
+    start must raise StartFailed — a task without resolved image digest
+    cannot be audited or recovered later."""
     client, container = _fake_client(container_name="naiw-task-task-001")
-    container.image.id = None  # docker-py rarely yields this but it is possible
+    # Drop the Image key entirely — simulates a corrupt or unexpected inspect
+    # response. container.reload() is a MagicMock no-op so attrs stay as set.
+    container.attrs = {"State": {"Status": "running"}}
 
     cfg = _make_cfg(tmp_naiw_data)
 
@@ -548,16 +560,14 @@ def test_start_aborts_when_image_digest_unresolvable(tmp_naiw_data, capsys):
     assert on_disk["status"] == "failed"
     assert "audit digest" in on_disk["failure_reason"]
 
-    # Container was already created — operator-driven cleanup hint visible
     captured = capsys.readouterr()
     assert "naiw-tasks finish task-001 --delete-worktree" in captured.err
 
 
-def test_start_aborts_when_container_image_attribute_is_none(tmp_naiw_data):
-    """Same guard fires when container.image itself is None — getattr returns
-    the default None and the digest check triggers."""
+def test_start_aborts_when_image_digest_is_empty_string(tmp_naiw_data):
+    """Empty string in attrs["Image"] is also treated as unresolved (falsy check)."""
     client, container = _fake_client(container_name="naiw-task-task-001")
-    container.image = None  # docker-py edge case (no image record at run-time)
+    container.attrs = {"State": {"Status": "running"}, "Image": ""}
 
     cfg = _make_cfg(tmp_naiw_data)
 
@@ -567,8 +577,47 @@ def test_start_aborts_when_container_image_attribute_is_none(tmp_naiw_data):
         )
 
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_lifecycle_does_not_access_container_image_property():
+    """Regression guard: lifecycle.py MUST NOT access container.image — that
+    property calls client.images.get(...) under the hood (GET /images/<id>/json),
+    which the locked proxy blocks (IMAGES=0 in deploy/proxy/README.md). Digest
+    must come from container.attrs["Image"] after a reload() (CONTAINERS
+    endpoint, allow-listed). Static text guard mirrors test_docker_client's
+    `from_env` check pattern."""
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "lifecycle.py"
+    ).read_text(encoding="utf-8")
+    assert "container.image" not in src, (
+        "container.image access in lifecycle.py would hit /images/* "
+        "(blocked by proxy IMAGES=0); use container.attrs['Image'] "
+        "after reload() instead"
+    )
+    # Also forbid the equivalent low-level path through `client.images`.
+    assert "client.images" not in src, (
+        "client.images.* access would hit /images/* (blocked by proxy)"
+    )
+
+
+def test_start_records_attrs_image_as_digest(tmp_naiw_data):
+    """Happy path: container.attrs["Image"] becomes task.image_digest in task.json."""
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    task = lifecycle.start(
+        cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+    )
+
+    assert task.image_digest == _FAKE_DIGEST
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     on_disk = json.loads(tj.read_text(encoding="utf-8"))
-    assert on_disk["status"] == "failed"
+    assert on_disk["image_digest"] == _FAKE_DIGEST
 
 
 def test_start_writes_failed_status_on_containers_run_error(

@@ -253,7 +253,14 @@ def start(
             detach=True,
             **HARDENED_HOST_CONFIG_KWARGS,
         )
-        image_digest = getattr(container.image, "id", None)
+        # Read the image digest from inspect attrs, NOT from any property
+        # that would resolve to GET /images/* — the locked proxy blocks that
+        # path (IMAGES=0). reload() repopulates attrs via GET /containers/<id>/json
+        # (CONTAINERS endpoint, allow-listed); attrs["Image"] is the resolved
+        # digest in "sha256:..." form, same value the higher-level shortcut
+        # would return.
+        container.reload()
+        image_digest = container.attrs.get("Image")
         # task.json must carry the resolved image digest as audit trail —
         # without it we cannot answer "which image actually ran task X" once
         # the tag is repointed (e.g., naiw-task-image:latest moves to a new
