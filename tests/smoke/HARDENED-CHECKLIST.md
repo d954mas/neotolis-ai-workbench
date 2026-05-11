@@ -26,7 +26,7 @@ inspection; on PASS they are torn down. `naiw-task-net` is always kept.
 | HARD-07  | `tasks/<id>/meta/` never bind-mounted                                                | 12                  |
 | HARD-08  | writable bind-mounts only `/work` and `/io`; read-only `/pi-packages`, `/run/secrets/<name>` | 13          |
 | HARD-10  | `--restart=no`                                                                       | 14                  |
-| PROXY-05 | All non-allowlisted ops return 403 (20 denied verbs + 2 allowed)                     | 19-40               |
+| PROXY-05 | All non-allowlisted ops return 403 (24 denied verbs + 2 allowed)                     | 19-44               |
 
 HARD-09 (controller-side bind-mount source-path validation) lives in the
 controller and is verified when that phase ships.
@@ -39,4 +39,4 @@ controller and is verified when that phase ships.
 | Secret readable + Config.Env scrub + terminal.log redaction | 16 |
 | `terminal.log` survives stop+start; post-restart marker appears | 17 |
 | `naiw-signal done` appends valid event to `events.jsonl` | 18 |
-| cgroup `pids.peak` + `memory.peak` logged (WARN-only) | 41 |
+| cgroup `pids.peak` + `memory.peak` logged (WARN-only) | 45 |

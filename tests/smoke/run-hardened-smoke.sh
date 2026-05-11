@@ -427,45 +427,49 @@ assert d["payload"] == {"summary": "hardened-smoke ok"}, d
 ' || fail "events.jsonl tail did not match expected schema"
 step_ok "SIG-cycle" "events.jsonl tail kind=done schema_version=1 payload={summary:hardened-smoke ok}"
 
-# ─── Steps 19-38: PROXY-05 20 denied verb probes ───────────────────────
-step_check "PROXY-05" "Steps 19-38: 20 denied verb probes (each must return 403)"
-probe_proxy_endpoint POST /exec/fakeid/start         403 "EXEC"          || fail "PROXY-05 EXEC"
-probe_proxy_endpoint GET  /images/json               403 "IMAGES"        || fail "PROXY-05 IMAGES"
-probe_proxy_endpoint GET  /volumes                   403 "VOLUMES"       || fail "PROXY-05 VOLUMES"
-probe_proxy_endpoint GET  /networks                  403 "NETWORKS"      || fail "PROXY-05 NETWORKS"
-probe_proxy_endpoint POST /build                     403 "BUILD"         || fail "PROXY-05 BUILD"
-probe_proxy_endpoint GET  /info                      403 "INFO"          || fail "PROXY-05 INFO"
-probe_proxy_endpoint POST /auth                      403 "AUTH"          || fail "PROXY-05 AUTH"
-probe_proxy_endpoint GET  /secrets                   403 "SECRETS"       || fail "PROXY-05 SECRETS"
-probe_proxy_endpoint GET  /services                  403 "SERVICES"      || fail "PROXY-05 SERVICES"
-probe_proxy_endpoint POST /session                   403 "SESSION"       || fail "PROXY-05 SESSION"
-probe_proxy_endpoint GET  /swarm                     403 "SWARM"         || fail "PROXY-05 SWARM"
-probe_proxy_endpoint GET  /system/df                 403 "SYSTEM"        || fail "PROXY-05 SYSTEM"
-probe_proxy_endpoint GET  /tasks                     403 "TASKS"         || fail "PROXY-05 TASKS"
-probe_proxy_endpoint GET  /plugins                   403 "PLUGINS"       || fail "PROXY-05 PLUGINS"
-probe_proxy_endpoint GET  /nodes                     403 "NODES"         || fail "PROXY-05 NODES"
-probe_proxy_endpoint GET  /configs                   403 "CONFIGS"       || fail "PROXY-05 CONFIGS"
-probe_proxy_endpoint GET  /distribution/alpine/json  403 "DISTRIBUTION"  || fail "PROXY-05 DISTRIBUTION"
-probe_proxy_endpoint GET  '/events?since=0&until=0'  403 "EVENTS"        || fail "PROXY-05 EVENTS"
-probe_proxy_endpoint GET  /_ping                     403 "PING"          || fail "PROXY-05 PING"
-probe_proxy_endpoint GET  /version                   403 "VERSION"       || fail "PROXY-05 VERSION"
-step_ok "PROXY-05" "all 20 denied verb probes returned 403"
+# ─── Steps 19-42: PROXY-05 24 denied verb probes ───────────────────────
+step_check "PROXY-05" "Steps 19-42: 24 denied verb probes (each must return 403)"
+probe_proxy_endpoint POST /exec/fakeid/start             403 "EXEC"           || fail "PROXY-05 EXEC"
+probe_proxy_endpoint GET  /images/json                   403 "IMAGES"         || fail "PROXY-05 IMAGES"
+probe_proxy_endpoint GET  /volumes                       403 "VOLUMES"        || fail "PROXY-05 VOLUMES"
+probe_proxy_endpoint GET  /networks                      403 "NETWORKS"       || fail "PROXY-05 NETWORKS"
+probe_proxy_endpoint POST /build                         403 "BUILD"          || fail "PROXY-05 BUILD"
+probe_proxy_endpoint POST /commit                        403 "COMMIT"         || fail "PROXY-05 COMMIT"
+probe_proxy_endpoint POST /grpc                          403 "GRPC"           || fail "PROXY-05 GRPC"
+probe_proxy_endpoint GET  /info                          403 "INFO"           || fail "PROXY-05 INFO"
+probe_proxy_endpoint POST /auth                          403 "AUTH"           || fail "PROXY-05 AUTH"
+probe_proxy_endpoint GET  /secrets                       403 "SECRETS"        || fail "PROXY-05 SECRETS"
+probe_proxy_endpoint GET  /services                      403 "SERVICES"       || fail "PROXY-05 SERVICES"
+probe_proxy_endpoint POST /session                       403 "SESSION"        || fail "PROXY-05 SESSION"
+probe_proxy_endpoint GET  /swarm                         403 "SWARM"          || fail "PROXY-05 SWARM"
+probe_proxy_endpoint GET  /system/df                     403 "SYSTEM"         || fail "PROXY-05 SYSTEM"
+probe_proxy_endpoint GET  /tasks                         403 "TASKS"          || fail "PROXY-05 TASKS"
+probe_proxy_endpoint GET  /plugins                       403 "PLUGINS"        || fail "PROXY-05 PLUGINS"
+probe_proxy_endpoint GET  /nodes                         403 "NODES"          || fail "PROXY-05 NODES"
+probe_proxy_endpoint GET  /configs                       403 "CONFIGS"        || fail "PROXY-05 CONFIGS"
+probe_proxy_endpoint GET  /distribution/alpine/json      403 "DISTRIBUTION"   || fail "PROXY-05 DISTRIBUTION"
+probe_proxy_endpoint GET  '/events?since=0&until=0'      403 "EVENTS"         || fail "PROXY-05 EVENTS"
+probe_proxy_endpoint GET  /_ping                         403 "PING"           || fail "PROXY-05 PING"
+probe_proxy_endpoint GET  /version                       403 "VERSION"        || fail "PROXY-05 VERSION"
+probe_proxy_endpoint POST /containers/fakeid/pause       403 "ALLOW_PAUSE"    || fail "PROXY-05 ALLOW_PAUSE"
+probe_proxy_endpoint POST /containers/fakeid/unpause     403 "ALLOW_UNPAUSE"  || fail "PROXY-05 ALLOW_UNPAUSE"
+step_ok "PROXY-05" "all 24 denied verb probes returned 403"
 
-# ─── Step 39: PROXY-05 allowed GET /containers/json -> 200 ─────────────
-step_check "PROXY-05" "Step 39: allowed GET /containers/json -> 200"
+# ─── Step 43: PROXY-05 allowed GET /containers/json -> 200 ─────────────
+step_check "PROXY-05" "Step 43: allowed GET /containers/json -> 200"
 probe_proxy_endpoint GET /containers/json 200 "CONTAINERS-json" \
     || fail "PROXY-05 allowed GET /containers/json"
 
-# ─── Step 40: PROXY-05 allowed POST /containers/<id>/start -> 204|304 ──
-step_check "PROXY-05" "Step 40: allowed POST /containers/<target>/start -> 204 or 304 (throwaway sidecar)"
+# ─── Step 44: PROXY-05 allowed POST /containers/<id>/start -> 204|304 ──
+step_check "PROXY-05" "Step 44: allowed POST /containers/<target>/start -> 204 or 304 (throwaway sidecar)"
 target_id="$(docker create --name "$probe_target" --network naiw-internal alpine sleep 1)"
 probe_proxy_endpoint POST "/containers/${target_id}/start" 204 "POST start" \
     || probe_proxy_endpoint POST "/containers/${target_id}/start" 304 "POST start (already running)" \
     || fail "PROXY-05 POST start probe failed (expected 204 or 304)"
 docker rm -f "$probe_target" >/dev/null 2>&1 || true
 
-# ─── Step 41: cgroup peak evidence (WARN-only) ─────────────────────────
-step_check "cgroup-peak" "Step 41: log cgroup pids.peak + memory.peak (WARN-only)"
+# ─── Step 45: cgroup peak evidence (WARN-only) ─────────────────────────
+step_check "cgroup-peak" "Step 45: log cgroup pids.peak + memory.peak (WARN-only)"
 container_id="$(docker inspect --format='{{.Id}}' "$container")"
 cg_v2_path="/sys/fs/cgroup/system.slice/docker-${container_id}.scope"
 if [[ -d "$cg_v2_path" ]]; then
@@ -484,11 +488,11 @@ if [[ "$mem_peak" =~ ^[0-9]+$ ]] && (( mem_peak > 2576980378 )); then
 fi
 step_ok "cgroup-peak" "peak evidence recorded (pids=$pids_peak mem=$mem_peak)"
 
-# ─── Step 42: drift gate (checklist ↔ script ID set must align) ────────
+# ─── Step 46: drift gate (checklist ↔ script ID set must align) ────────
 # Only count IDs that are actually claimed (checklist table rows) or actually
 # probed (step_check "ID" in script). Narrative mentions in headers/comments
 # don't count — that's what makes this an honest coverage check.
-step_check "" "Step 42: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
+step_check "" "Step 46: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
 checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+)' tests/smoke/HARDENED-CHECKLIST.md \
     | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
 script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+)"' tests/smoke/run-hardened-smoke.sh \
@@ -501,6 +505,6 @@ if [[ -n "$drift" ]]; then
     echo "$drift" >&2
     fail "drift gate"
 fi
-step_ok "" "Step 42: drift gate ok — IDs aligned"
+step_ok "" "Step 46: drift gate ok — IDs aligned"
 
 # Final PASS line is printed by the cleanup trap's success branch on exit 0.
