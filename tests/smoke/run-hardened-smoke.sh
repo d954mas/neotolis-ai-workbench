@@ -235,6 +235,11 @@ docker run -d --init --name "$container" \
 
 wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 30 \
     || fail "main container not ready"
+# terminal.log existing doesn't mean tmux is accepting send-keys yet — the
+# server needs to bind /tmp/tmux-1000/default. Wait for it explicitly to
+# avoid a 'no such file or directory' race in later send-keys probes.
+wait_for_tmux_session "$container" main 10 \
+    || fail "tmux 'main' session not online within 10s of container start"
 log_path="$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
 events_path="$TMP/naiw-data/tasks/smoke-test/io/.naiw/events.jsonl"
 step_ok "" "Main hardened container ready"
