@@ -19,7 +19,7 @@ inspection; on PASS they are torn down. `naiw-task-net` is always kept.
 |----------|--------------------------------------------------------------------------------------|---------------------|
 | HARD-01  | `--cap-drop=ALL`                                                                     | 04                  |
 | HARD-02  | `--security-opt=no-new-privileges`                                                   | 05                  |
-| HARD-03  | `--read-only` rootfs + tmpfs `/tmp` (512m), `/run` (64m), `/home/pi` (128m) writable | 03, 06, 07, 08      |
+| HARD-03  | `--read-only` rootfs + tmpfs `/tmp` (512m), `/run` (64m), `/home/pi` (128m, mode=1777) writable | 03, 06, 07, 08 |
 | HARD-04  | `--pids-limit=512`                                                                   | 09                  |
 | HARD-05  | `--memory=4g --memory-swap=4g --cpus=2`                                              | 10                  |
 | HARD-06  | `--network naiw-task-net` (no host net, no docker socket)                            | 11                  |

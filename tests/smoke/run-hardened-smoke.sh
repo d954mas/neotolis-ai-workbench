@@ -177,7 +177,7 @@ if [[ "$pass1_rc" -eq 0 ]]; then
 else
     if grep -qE 'Read-only file system|EROFS|Permission denied' <<< "$pass1_out"; then
         step_ok "HARD-03" "pass1 pip failed as expected (no /home/pi tmpfs): $(head -1 <<< "$pass1_out")"
-        pip_result_note="REQUIRES --tmpfs /home/pi:rw,size=128m"
+        pip_result_note="REQUIRES --tmpfs /home/pi:rw,size=128m,mode=1777"
     else
         step_warn "HARD-03" "pass1 pip failed for a DIFFERENT reason: $(head -1 <<< "$pass1_out")"
         pip_result_note="REQUIRES --tmpfs /home/pi (probable; non-fs error in pass1)"
@@ -188,7 +188,7 @@ docker run -d --init --name "$pass2_container" \
     --cap-drop=ALL --security-opt=no-new-privileges --read-only \
     --tmpfs /tmp:rw,size=512m,mode=1777 \
     --tmpfs /run:rw,size=64m,mode=755 \
-    --tmpfs /home/pi:rw,size=128m \
+    --tmpfs /home/pi:rw,size=128m,mode=1777 \
     --pids-limit=512 --memory=4g --memory-swap=4g --cpus=2 \
     --network naiw-task-net --restart=no -t \
     -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
@@ -202,7 +202,7 @@ wait_for_container_ready "$pass2_container" '[ -f /io/.naiw/events.jsonl ]' 30 \
 docker exec -u pi "$pass2_container" sh -c 'pip install --user --quiet pyyaml && python -c "import yaml"' \
     || fail "pass2 pip install --user pyyaml failed even WITH /home/pi tmpfs — HARD-03 broken"
 step_ok "HARD-03" "pass2 pip succeeded with /home/pi tmpfs; yaml importable"
-echo "${_lib_log_prefix} [result] standard hardened run-flags MUST include --tmpfs /home/pi:rw,size=128m: $pip_result_note"
+echo "${_lib_log_prefix} [result] standard hardened run-flags MUST include --tmpfs /home/pi:rw,size=128m,mode=1777: $pip_result_note"
 docker rm -f "$pass2_container" >/dev/null
 
 # ─── Main hardened container start ─────────────────────────────────────
@@ -213,7 +213,7 @@ docker run -d --init --name "$container" \
     --read-only \
     --tmpfs /tmp:rw,size=512m,mode=1777 \
     --tmpfs /run:rw,size=64m,mode=755 \
-    --tmpfs /home/pi:rw,size=128m \
+    --tmpfs /home/pi:rw,size=128m,mode=1777 \
     --pids-limit=512 \
     --memory=4g \
     --memory-swap=4g \
