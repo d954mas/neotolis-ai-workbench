@@ -295,10 +295,12 @@ def start(
         except FileNotFoundError:
             pass
 
+        # flush=True so the message survives buffered-stderr in CI pipes / test runners.
         print(
             f"naiw-tasks: start failed for task {task_id}: {reason}{stderr_extra}\n"
             f"  to reclaim disk: naiw-tasks finish {task_id} --delete-worktree",
             file=sys.stderr,
+            flush=True,
         )
         if isinstance(exc, StartFailed):
             raise

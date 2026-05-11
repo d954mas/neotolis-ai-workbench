@@ -26,7 +26,11 @@ class StartupCheckFailed(SystemExit):
     """Exit 2 with a `naiw-tasks: ` stderr prefix."""
 
     def __init__(self, message: str) -> None:
-        print(f"naiw-tasks: {message}", file=sys.stderr)
+        # Flush after every line — without an explicit flush, SystemExit can
+        # tear the interpreter down before stderr drains when stderr is a pipe
+        # (CI logs, click.testing.CliRunner, `2>` redirects), and the operator
+        # sees an empty error.
+        print(f"naiw-tasks: {message}", file=sys.stderr, flush=True)
         super().__init__(2)
 
 
