@@ -31,8 +31,11 @@ services:
       ALLOW_STOP: "1"            # POST /containers/<id>/stop
       ALLOW_RESTARTS: "1"        # stop/restart/kill (controller `finish` path)
       # ── Everything else explicit "0" (paranoid-explicit). Alphabetical. ──
-      ALLOW_PAUSE: "0"
-      ALLOW_UNPAUSE: "0"
+      # NOTE: pause/unpause are NOT gated by Tecnativa v0.4.2 — there are no
+      # ALLOW_PAUSE / ALLOW_UNPAUSE env-vars in this image; requests pass
+      # through to Docker. Acceptable here because the controller never pauses
+      # task containers (HARD-10: recovery is operator-driven). Revisit if we
+      # ever switch to wollomatic/socket-proxy, which supports regex allowlisting.
       AUTH: "0"
       BUILD: "0"
       COMMIT: "0"
