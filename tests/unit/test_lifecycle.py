@@ -457,6 +457,79 @@ def test_start_failed_before_projects_load_keeps_finish_recoverable(tmp_naiw_dat
 # ---------- start — failure rollback -----------------------------------------
 
 
+def test_start_409_conflict_produces_clean_reason_with_docker_rm_hint(
+    tmp_naiw_data, capsys
+):
+    """When containers.run hits 409 Conflict (name already in use by an orphan),
+    the failure_reason and stderr must contain a ready-to-run `docker rm -f`
+    command, not raw HTTP error text."""
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+
+    # Construct an APIError with status_code=409 — daemon's signal for name conflict.
+    fake_response = MagicMock()
+    fake_response.status_code = 409
+    fake_response.text = ""
+    conflict_err = docker.errors.APIError(
+        "409 Client Error: Conflict",
+        response=fake_response,
+        explanation=(
+            'Conflict. The container name "/naiw-task-task-001" is already '
+            'in use by container "abc123def456..."'
+        ),
+    )
+    client.containers.run.side_effect = conflict_err
+
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    reason = on_disk["failure_reason"]
+
+    # Clean reason: includes the orphan name + cleanup command, NOT raw HTTP text.
+    assert "naiw-task-task-001" in reason
+    assert "already in use" in reason
+    assert "docker rm -f naiw-task-task-001" in reason
+    assert "409 Client Error" not in reason  # raw HTTP text stripped
+
+    # Same hint surfaces on stderr.
+    captured = capsys.readouterr()
+    assert "docker rm -f naiw-task-task-001" in captured.err
+
+
+def test_start_other_api_errors_keep_raw_message(tmp_naiw_data):
+    """A non-409 APIError must NOT be reframed as a name conflict — the operator
+    needs to see the actual daemon message."""
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+
+    fake_response = MagicMock()
+    fake_response.status_code = 500
+    fake_response.text = ""
+    server_err = docker.errors.APIError(
+        "500 Server Error: out of memory",
+        response=fake_response,
+    )
+    client.containers.run.side_effect = server_err
+
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    reason = json.loads(tj.read_text(encoding="utf-8"))["failure_reason"]
+    # Raw daemon message preserved — not rewritten as a name conflict
+    assert "docker rm -f" not in reason
+    assert "already in use" not in reason
+
+
 def test_start_aborts_when_image_digest_unresolvable(tmp_naiw_data, capsys):
     """If container.image.id is None (or empty), start must raise StartFailed —
     a task without resolved image digest cannot be audited or recovered later."""

@@ -318,6 +318,20 @@ def start(
             first_line = exc.stderr.strip().splitlines()[0] if exc.stderr.strip() else ""
             if first_line:
                 reason = f"git worktree add failed: {first_line}"
+        elif (
+            isinstance(exc, docker.errors.APIError)
+            and getattr(exc, "status_code", None) == 409
+        ):
+            # Daemon returns 409 Conflict when a container with the requested
+            # name already exists. Common operator scenario: the previous task
+            # crashed mid-start and left an orphan, or `tasks/<id>/` was deleted
+            # by hand but `docker rm` was forgotten. Swap the raw HTTP-409 text
+            # for a clean reason with a ready-to-run cleanup command.
+            cname = _container_name(task_id)
+            reason = (
+                f"container name {cname!r} already in use by an orphan; "
+                f"clean up with: docker rm -f {cname}"
+            )
 
         def _to_failed(d: dict) -> dict:
             d = dict(d)
