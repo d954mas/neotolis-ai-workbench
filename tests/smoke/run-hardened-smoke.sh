@@ -137,10 +137,13 @@ done
 [[ "$ready" -eq 1 ]] || fail "proxy did not accept allowed requests within 30s"
 
 # Permission wrinkle: image runs as uid 1000; chown if host uid differs.
+# Covers /work, /io (read-write task dirs) and the secret file pi must read.
 host_uid="$(id -u)"
 if [[ "$host_uid" != "1000" ]]; then
-    docker run --rm --user 0 -v "$TMP/naiw-data/tasks/smoke-test:/t" alpine \
-        chown -R 1000:1000 /t/work /t/io >/dev/null
+    docker run --rm --user 0 \
+        -v "$TMP/naiw-data/tasks/smoke-test:/t" \
+        -v "$TMP/naiw-data/secrets:/s" \
+        alpine sh -c 'chown -R 1000:1000 /t/work /t/io && chown 1000:1000 /s/test_token' >/dev/null
 fi
 
 step_ok "" "Step 02: setup complete (TMP=$TMP)"
