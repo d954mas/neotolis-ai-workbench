@@ -199,7 +199,7 @@ docker run -d --init --name "$pass2_container" \
 wait_for_container_ready "$pass2_container" '[ -f /io/.naiw/events.jsonl ]' 30 \
     || fail "pass2 container not ready (pre-pip)"
 
-docker exec -u pi "$pass2_container" sh -c 'pip install --user --quiet pyyaml && python -c "import yaml"' \
+docker exec -u pi "$pass2_container" sh -c 'pip install --user --quiet pyyaml && python3 -c "import yaml"' \
     || fail "pass2 pip install --user pyyaml failed even WITH /home/pi tmpfs — HARD-03 broken"
 step_ok "HARD-03" "pass2 pip succeeded with /home/pi tmpfs; yaml importable"
 echo "${_lib_log_prefix} [result] standard hardened run-flags MUST include --tmpfs /home/pi:rw,size=128m,mode=1777: $pip_result_note"
