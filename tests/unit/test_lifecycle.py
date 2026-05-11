@@ -533,6 +533,7 @@ def _pre_create_task(
     project: str | None = None,
     finish_policy: str = "ask",
     worktree_path: str | None = None,
+    project_repo_path: str | None = None,
 ) -> Path:
     """Pre-create a meta/task.json on disk in the requested state."""
     task_dir = data_root / "tasks" / task_id
@@ -560,6 +561,7 @@ def _pre_create_task(
         "worktree_path": worktree_path,
         "base_branch": None,
         "base_commit": None,
+        "project_repo_path": project_repo_path,
         "labels": {},
         "secrets": [],
         "events_offset": 0,
@@ -670,6 +672,7 @@ def test_finish_delete_worktree_calls_git_remove_then_prune(
         kind="project",
         project="alpha",
         worktree_path=str(work),
+        project_repo_path=str(repo),
     )
     client, _ = _fake_client(container_name="naiw-task-alpha-001")
     cfg = _make_cfg(tmp_naiw_data)
@@ -688,6 +691,112 @@ def test_finish_delete_worktree_calls_git_remove_then_prune(
     assert remove_idx is not None, f"no worktree remove call: {git_calls}"
     assert prune_idx is not None, f"no worktree prune call: {git_calls}"
     assert remove_idx < prune_idx, "remove must happen before prune"
+
+
+def test_finish_uses_project_repo_path_not_projects_yaml(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """finish must read repo path from task.json.project_repo_path, never re-load
+    projects.yaml. This decouples teardown from config edits between start/finish."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+
+    # Now WIPE projects.yaml — simulate operator removing/renaming the alias
+    # between start and finish. The task.json already has the resolved path,
+    # so finish must NOT depend on the yaml being readable.
+    (tmp_naiw_data / "projects.yaml").unlink()
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    # Must succeed (no FileNotFoundError from projects.load)
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+
+    # And git_ops.worktree_remove must have been called against the original repo
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_calls = [c for c in cmds if c and c[0] == "git" and "worktree" in c and "remove" in c]
+    assert len(git_calls) == 1, f"expected one worktree remove, got: {git_calls}"
+    # `git -C <repo_path> worktree remove --force <work_path>`
+    assert str(repo) in git_calls[0]
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_corrupted_projects_yaml_still_completes(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """Even when projects.yaml is unparseable, finish must complete the task."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+
+    (tmp_naiw_data / "projects.yaml").write_text(
+        "this is: not: valid: yaml: }}}\n", encoding="utf-8"
+    )
+
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="delete_worktree")
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_start_records_project_repo_path_in_task_json(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """start() must record the resolved repo path so finish can be self-contained."""
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work_path = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    mock_subprocess_run.side_effect = _git_side_effect(work_path)
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    task = lifecycle.start(
+        cfg, client, project="alpha", base_ref=None, finish_policy="ask", secrets=[]
+    )
+
+    assert task.project_repo_path is not None
+    # Resolved form must match what's on disk
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["project_repo_path"] == str(repo.resolve())
+    assert on_disk["project_repo_path"] == task.project_repo_path
+
+
+def test_start_generic_does_not_set_project_repo_path(tmp_naiw_data):
+    """Generic tasks have no repo; project_repo_path stays None."""
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    task = lifecycle.start(
+        cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+    )
+
+    assert task.project_repo_path is None
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["project_repo_path"] is None
 
 
 def test_finish_never_uses_rm_rf():

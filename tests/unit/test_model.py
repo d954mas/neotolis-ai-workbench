@@ -112,7 +112,8 @@ def test_task_full_field_set_present_in_asdict() -> None:
         "image_tag", "image_digest", "status", "failure_reason",
         "created_at", "started_at", "updated_at", "finished_at",
         "finish_policy", "auto_finish", "branch", "worktree_path",
-        "base_branch", "base_commit", "labels", "secrets",
+        "base_branch", "base_commit", "project_repo_path",
+        "labels", "secrets",
         "events_offset", "recovery_count", "recovery_history",
     }
     assert set(d.keys()) == expected

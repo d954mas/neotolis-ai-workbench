@@ -59,6 +59,10 @@ class Task:
     worktree_path: str | None = None
     base_branch: str | None = None
     base_commit: str | None = None
+    # Resolved project repo path at start-time. Recorded so `finish` does not
+    # need to re-load projects.yaml — that decouples teardown from config drift
+    # between start and finish (rename alias, edit path, remove entry).
+    project_repo_path: str | None = None
     # Defaults for fields later subsystems will write
     labels: dict[str, str] = field(default_factory=dict)
     secrets: list[str] = field(default_factory=list)

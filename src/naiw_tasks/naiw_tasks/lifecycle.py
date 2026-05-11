@@ -219,6 +219,7 @@ def start(
             git_ops.worktree_add(project_repo, task_id, work_path, base_commit)
             branch = f"agent/{task_id}"
             worktree_path = str(work_path.resolve())
+            project_repo_path = str(project_repo.resolve())
             ts_meta = Event.now_iso()
 
             def _attach_project_meta(d: dict) -> dict:
@@ -227,6 +228,7 @@ def start(
                 d["worktree_path"] = worktree_path
                 d["base_branch"] = base_branch
                 d["base_commit"] = base_commit
+                d["project_repo_path"] = project_repo_path
                 d["updated_at"] = ts_meta
                 return d
 
@@ -237,6 +239,7 @@ def start(
                 worktree_path=worktree_path,
                 base_branch=base_branch,
                 base_commit=base_commit,
+                project_repo_path=project_repo_path,
                 updated_at=ts_meta,
             )
 
@@ -393,19 +396,18 @@ def finish(
 
         # Worktree teardown — project tasks only. delete_worktree => git
         # worktree remove --force + prune (never raw recursive-delete).
+        # Repo path comes from task.json (project_repo_path), NOT from projects.yaml —
+        # this makes finish robust against config edits between start and finish.
         if data.get("kind") == str(TaskKind.PROJECT):
             policy = _resolve_finish_policy(
                 policy_override,
                 data.get("finish_policy", "ask"),
             )
             if policy is FinishPolicy.DELETE_WORKTREE:
-                projects_yaml = cfg.data_root / "projects.yaml"
-                pmap = projects.load(projects_yaml, cfg.data_root)
-                project_alias = data.get("project")
-                if project_alias and project_alias in pmap and data.get("worktree_path"):
-                    project_repo = Path(pmap[project_alias]["path"])
-                    work_path = Path(data["worktree_path"])
-                    git_ops.worktree_remove(project_repo, work_path)
+                repo_path = data.get("project_repo_path")
+                worktree_path = data.get("worktree_path")
+                if repo_path and worktree_path:
+                    git_ops.worktree_remove(Path(repo_path), Path(worktree_path))
 
         ts_now = Event.now_iso()
 
