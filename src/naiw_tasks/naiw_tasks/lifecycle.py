@@ -177,14 +177,29 @@ def start(
     task_dir = _make_skeleton(cfg.data_root, task_id, kind)
     log_handler = _attach_controller_log(task_dir)
 
+    # Schema-valid scaffold BEFORE any failable op: projects.load, resolve_base,
+    # worktree_add, validate_bind_source, containers.run can all raise — without
+    # a prewritten task.json, the failed-state path would publish a stub missing
+    # schema_version/id/kind, breaking subsequent `finish` with UnsupportedSchemaError.
+    labels = _build_labels(task_id, project)
+    task = _initial_task(
+        task_id=task_id,
+        kind=kind,
+        project=project,
+        branch=None,
+        worktree_path=None,
+        base_branch=None,
+        base_commit=None,
+        finish_policy=policy,
+        secrets=secrets,
+        cfg=cfg,
+        labels=labels,
+    )
+    store.write_task(task_dir, task)
+
     try:
         logger = logging.getLogger("naiw_tasks")
         logger.info("start: task_id=%s kind=%s", task_id, kind)
-
-        branch: str | None = None
-        worktree_path: str | None = None
-        base_branch: str | None = None
-        base_commit: str | None = None
 
         if kind is TaskKind.PROJECT:
             projects_yaml = cfg.data_root / "projects.yaml"
@@ -204,22 +219,26 @@ def start(
             git_ops.worktree_add(project_repo, task_id, work_path, base_commit)
             branch = f"agent/{task_id}"
             worktree_path = str(work_path.resolve())
+            ts_meta = Event.now_iso()
 
-        labels = _build_labels(task_id, project)
-        task = _initial_task(
-            task_id=task_id,
-            kind=kind,
-            project=project,
-            branch=branch,
-            worktree_path=worktree_path,
-            base_branch=base_branch,
-            base_commit=base_commit,
-            finish_policy=policy,
-            secrets=secrets,
-            cfg=cfg,
-            labels=labels,
-        )
-        store.write_task(task_dir, task)
+            def _attach_project_meta(d: dict) -> dict:
+                d = dict(d)
+                d["branch"] = branch
+                d["worktree_path"] = worktree_path
+                d["base_branch"] = base_branch
+                d["base_commit"] = base_commit
+                d["updated_at"] = ts_meta
+                return d
+
+            store.update_task(task_dir, _attach_project_meta)
+            task = replace(
+                task,
+                branch=branch,
+                worktree_path=worktree_path,
+                base_branch=base_branch,
+                base_commit=base_commit,
+                updated_at=ts_meta,
+            )
 
         volumes = _build_volumes(cfg.data_root, task_dir, secrets)
 
@@ -288,12 +307,10 @@ def start(
             d["updated_at"] = ts_now
             return d
 
-        try:
-            # Best-effort: if the skeleton meta dir was created (it always is —
-            # _make_skeleton runs before this try block), this will succeed.
-            store.update_task(task_dir, _to_failed)
-        except FileNotFoundError:
-            pass
+        # Scaffold task.json was written before the try block, so the failed-state
+        # mutation always operates on a schema-valid document. FileNotFoundError
+        # is impossible here under normal flow; let any real I/O failure surface.
+        store.update_task(task_dir, _to_failed)
 
         # flush=True so the message survives buffered-stderr in CI pipes / test runners.
         print(

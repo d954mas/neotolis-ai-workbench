@@ -317,6 +317,107 @@ def test_start_with_unknown_secret_aborts(tmp_naiw_data):
         )
 
 
+# ---------- start — scaffold-first invariant ---------------------------------
+
+
+def test_start_writes_schema_valid_scaffold_before_any_failable_op(tmp_naiw_data):
+    """projects.load raising must leave a schema-valid task.json on disk."""
+    # No projects.yaml exists → projects.load raises FileNotFoundError, which is
+    # NOT in the caught-exception tuple, so it propagates raw. Still, scaffold
+    # must have been written before that point.
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(FileNotFoundError):
+        lifecycle.start(
+            cfg, client, project="alpha", base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    assert tj.exists(), "scaffold task.json must exist after early failure"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["schema_version"] == 1
+    assert on_disk["id"] == "alpha-001"
+    assert on_disk["kind"] == "project"
+    assert on_disk["container_name"] == "naiw-task-alpha-001"
+    assert on_disk["status"] == "created"  # scaffold state — never written to failed because uncaught
+
+
+def test_start_failed_before_worktree_keeps_finish_recoverable(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """Worktree-add failure: task.json is schema-valid and finish works on it."""
+    _make_fake_repo(tmp_naiw_data, "alpha")
+    # rev-parse OK, worktree add → fail
+    def _git_fail_worktree(args, *a, **kw):
+        cmd = list(args)
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="abc1234\n", stderr=""
+            )
+        if "worktree" in cmd and "add" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=128,
+                stdout="",
+                stderr="fatal: invalid reference: bogus\n",
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    mock_subprocess_run.side_effect = _git_fail_worktree
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project="alpha", base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    # task.json must be schema-valid (has schema_version, id, kind, container_name)
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["schema_version"] == 1
+    assert on_disk["id"] == "alpha-001"
+    assert on_disk["kind"] == "project"
+    assert on_disk["container_name"] == "naiw-task-alpha-001"
+    assert on_disk["status"] == "failed"
+    assert "git worktree add failed" in on_disk["failure_reason"]
+
+    # finish must succeed without UnsupportedSchemaError (the bug we're fixing).
+    # Use policy_override to skip the interactive prompt (the failed task has
+    # worktree_path=None so policy is functionally irrelevant — pass keep_worktree
+    # to assert no git call is attempted).
+    lifecycle.finish(cfg, client, "alpha-001", policy_override="keep_worktree")
+
+    on_disk2 = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk2["status"] == "completed"
+    assert on_disk2["finished_at"] is not None
+
+
+def test_start_failed_before_projects_load_keeps_finish_recoverable(tmp_naiw_data):
+    """projects.yaml unknown alias: task.json is schema-valid and finish works."""
+    (tmp_naiw_data / "projects.yaml").write_text(
+        "projects: {}\n", encoding="utf-8"
+    )
+    client, _ = _fake_client(container_name="naiw-task-ghost-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project="ghost", base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "ghost-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["schema_version"] == 1
+    assert on_disk["status"] == "failed"
+    assert "unknown project" in on_disk["failure_reason"]
+
+    # finish reads, sees schema_version=1, marks completed — no UnsupportedSchemaError
+    lifecycle.finish(cfg, client, "ghost-001", policy_override="keep_worktree")
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
 # ---------- start — failure rollback -----------------------------------------
 
 
