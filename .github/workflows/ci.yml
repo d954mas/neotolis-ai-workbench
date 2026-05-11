@@ -28,22 +28,52 @@ jobs:
 
   smoke:
     runs-on: ubuntu-latest
+    # Image builds here are layer-cached for CI speed (GHA backend, ~7-day
+    # automatic eviction picks up Debian security patches roughly weekly).
+    # Production deploys MUST rebuild from master with --no-cache so an
+    # operator-driven release isn't pinned to a stale apt snapshot.
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: pip install pytest
 
       - name: Verify docker tooling
         run: |
           docker --version
           docker compose version
 
-      - name: Build naiw-task-image
-        run: bash scripts/build-image.sh
+      - name: Read PI_VERSION
+        id: pi
+        run: echo "version=$(cat image/PI_VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Image smoke (Phase 1)
-        run: bash tests/smoke/run-image-smoke.sh
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Proxy smoke (Phase 1)
+      - name: Build naiw-task-image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: image/Dockerfile
+          tags: |
+            naiw-task-image:0.1.0
+            naiw-task-image:latest
+          build-args: |
+            PI_VERSION=${{ steps.pi.outputs.version }}
+            NAIW_VERSION=0.1.0
+            NAIW_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Proxy smoke (no pytest wrapper)
         run: bash tests/smoke/run-proxy-smoke.sh
 
-      - name: Hardened-lifecycle smoke (Phase 2.5 gate)
-        run: bash tests/smoke/run-hardened-smoke.sh
+      # pytest -m smoke runs test_image.py and test_hardened.py, which each
+      # invoke their bash harness via subprocess. One step verifies both the
+      # bash scripts AND the pytest wrappers — no duplication.
+      - name: Image + hardened smoke via pytest
+        run: pytest tests/smoke/ -v -m smoke

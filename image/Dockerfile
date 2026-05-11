@@ -69,7 +69,7 @@ RUN npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VE
 
 # Wheels from builder stage (no source files in the final image).
 COPY --from=builder /wheels/*.whl /tmp/wheels/
-RUN pip3 install --no-cache-dir --break-system-packages /tmp/wheels/*.whl \
+RUN pip3 install --no-cache-dir /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
 
 # Bake config: redaction sed for pipe-pane, tmux config, system gitconfig with

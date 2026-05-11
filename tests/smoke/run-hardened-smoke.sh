@@ -150,7 +150,9 @@ step_ok "" "Step 02: setup complete (TMP=$TMP)"
 
 # ─── Step 03: HARD-03 pip install --user pyyaml two-pass probe ─────────
 # Run BEFORE the main hardened container to establish the empirical contract.
-# Pass 1 = no /home/pi tmpfs (must fail with EROFS); Pass 2 = with tmpfs (must succeed).
+# Pass 1 = no /home/pi tmpfs (must fail because the home dir is unwritable
+# on the read-only rootfs — EROFS or 'Permission denied' depending on which
+# write op pip hits first); Pass 2 = with tmpfs (must succeed).
 step_check "HARD-03" "Step 03: pip install --user pyyaml two-pass probe (writable-home contract)"
 
 docker run -d --init --name "$pass1_container" \
@@ -270,14 +272,15 @@ docker exec "$container" sh -c 'touch /tmp/probe && rm /tmp/probe' \
     || fail "HARD-03 /tmp not writable"
 step_ok "HARD-03" "/tmp writable"
 
-# ─── Step 08: HARD-03 /run mounted as rw tmpfs ─────────────────────────
+# ─── Step 08: HARD-03 /run writable by root ────────────────────────────
 # /run is intentionally mode=755 owned by root (matches the requirement),
-# so user `pi` cannot write there directly. We verify the kernel sees /run
-# as an rw tmpfs mount instead of attempting a touch from the pi user.
-step_check "HARD-03" "Step 08: /run mounted as rw tmpfs"
-assert_mountinfo_flag "$container" "/run" "rw" \
-    || fail "HARD-03 /run not present in mountinfo with rw flag"
-step_ok "HARD-03" "/run is rw tmpfs"
+# so we probe writability from uid 0 rather than from user `pi`. Probing
+# from pi would always fail and contradict the very mode bit the
+# requirement asks for.
+step_check "HARD-03" "Step 08: /run writable (tmpfs probe, from root)"
+docker exec -u 0 "$container" sh -c 'touch /run/probe && rm /run/probe' \
+    || fail "HARD-03 /run not writable by root"
+step_ok "HARD-03" "/run writable by root"
 
 # ─── Step 09: HARD-04 PidsLimit == 512 ─────────────────────────────────
 step_check "HARD-04" "Step 09: PidsLimit == 512"
