@@ -11,6 +11,7 @@ import sys
 import pytest
 
 
+@pytest.mark.smoke
 def test_image_smoke():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     # Use forward-slash relative path so bash on Windows (Git Bash / WSL) can
