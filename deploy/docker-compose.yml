@@ -2,10 +2,25 @@
 # Five Tecnativa env vars set to "1" (the allowlist); every other documented var
 # explicitly "0" (paranoid-explicit). Adding a new env var set to "1" requires
 # updating the rationale in deploy/proxy/README.md.
+#
+# Networks:
+#   naiw-internal — proxy lives here. Internal management network.
+#   naiw-task-net — task containers run here when started by the controller.
+#                   Defined here (not just created ad-hoc in smoke scripts) so
+#                   a fresh `docker compose up -d` provisions BOTH networks
+#                   and the first real `naiw-tasks start` cannot fail with
+#                   "network naiw-task-net not found".
 
 networks:
   naiw-internal:
     name: naiw-internal
+    driver: bridge
+  naiw-task-net:
+    # Task containers join this network. Proxy is NOT on it (task containers
+    # must never reach the docker daemon). Managed by this compose file so
+    # operators provision it via `docker compose up -d` rather than a separate
+    # `docker network create` step.
+    name: naiw-task-net
     driver: bridge
 
 services:
@@ -18,8 +33,14 @@ services:
     container_name: naiw-docker-proxy
     restart: unless-stopped
     networks: [naiw-internal]
-    # Private network only — NO host-published port.
-    # Adding a `ports:` block here is a security regression and MUST be rejected in code review.
+    # Published to localhost ONLY (127.0.0.1, NOT 0.0.0.0).
+    # The host-installed naiw-tasks CLI reaches the proxy at tcp://127.0.0.1:2375.
+    # No LAN/external exposure — `0.0.0.0:2375` here WOULD be a security
+    # regression and MUST be rejected in code review.
+    # The proxy itself enforces the locked allowlist (see env block) regardless
+    # of the binding; localhost-only binding is defense-in-depth.
+    ports:
+      - "127.0.0.1:2375:2375"
     # Socket mounted READ-ONLY.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

@@ -15,7 +15,7 @@ import os
 import sys
 
 
-def attach_to_task(client, task_id: str) -> None:
+def attach_to_task(client, proxy_url: str, task_id: str) -> None:
     """Attach the operator to the running task container, or refuse with a hint.
 
     On success this function does not return — os.execvp replaces the current
@@ -24,6 +24,11 @@ def attach_to_task(client, task_id: str) -> None:
     `client` is supplied by the CLI group's already-constructed docker client
     (same one used by start/finish) — symmetrical injection across the package
     and avoids opening a second TCP session to the proxy.
+
+    `proxy_url` is passed as `docker -H <proxy_url> attach <name>` so the CLI
+    talks to the same locked proxy as the SDK. Without -H, docker CLI would
+    fall back to the host socket (/var/run/docker.sock), bypassing the proxy
+    entirely — that breaks the engine boundary.
     """
     # filters={"label": [...]} as a list (not a comma-joined string) so docker-py
     # emits two ?label= query params and the daemon AND-matches both labels.
@@ -63,6 +68,9 @@ def attach_to_task(client, task_id: str) -> None:
 
     # POSIX argv[0] convention: the program name appears as the first element
     # of argv; execvp uses argv[1:] as the actual command arguments docker sees.
-    os.execvp("docker", ["docker", "attach", container.name])
+    # -H routes the CLI through the locked proxy (matches the SDK path).
+    os.execvp(
+        "docker", ["docker", "-H", proxy_url, "attach", container.name]
+    )
     # execvp does not return on success.
     raise SystemExit(1)

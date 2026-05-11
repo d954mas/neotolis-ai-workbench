@@ -4,7 +4,7 @@ Tecnativa Docker socket proxy. Single point of Docker Engine access for the NAIW
 
 ## Why a proxy?
 
-Mounting `/var/run/docker.sock` directly into any container gives that container root-equivalent access on the host. The controller never mounts the host socket. Instead, controller and proxy share a private bridge network (`naiw-internal`) and the controller talks HTTP to `tcp://naiw-docker-proxy:2375`. The proxy gates every Engine API path; the locked allowlist below is the canonical security boundary.
+Mounting `/var/run/docker.sock` directly into any container or process gives that consumer root-equivalent access on the host. The controller never mounts the host socket. Instead, the proxy lives on a private bridge network (`naiw-internal`), reads the host socket itself (mounted read-only), and exposes a heavily-locked HTTP API. The proxy gates every Engine API path; the locked allowlist below is the canonical security boundary.
 
 See `CLAUDE.md` "What NOT to Use" — direct socket mount is a permanent reject.
 
@@ -29,9 +29,10 @@ Flipping any of these to `"1"` is a security regression and MUST go through a do
 ## Network model
 
 - Proxy is on `naiw-internal` (private bridge).
-- **No `ports:` mapping** — proxy never publishes a host port.
-- The controller joins `naiw-internal` and reaches the proxy at `http://naiw-docker-proxy:2375`.
-- Task containers run on a SEPARATE network `naiw-task-net` and do NOT reach the proxy. Task containers have no Docker access.
+- **`ports: ["127.0.0.1:2375:2375"]`** — published to LOCALHOST ONLY. `0.0.0.0:2375` here is a security regression and MUST be rejected in code review.
+- The host-installed controller (`naiw-tasks` CLI via pipx / uv tool) reaches the proxy at `tcp://127.0.0.1:2375`. The proxy's locked allowlist is the security boundary; the localhost-only binding is defense-in-depth (no LAN process can hit even allow-listed endpoints).
+- Task containers run on a SEPARATE network `naiw-task-net` (created by the same compose file) and do NOT reach the proxy. Task containers have no Docker access.
+- Why this is not the same threat as "exposing the Docker socket": the bare socket exposes a full unrestricted Engine API. A locked proxy in front of the socket only exposes the five allow-listed endpoint groups (`CONTAINERS`, `POST`, `ALLOW_START`, `ALLOW_STOP`, `ALLOW_RESTARTS`). The threat model collapses to: an attacker with local-host code execution could already mount the host socket directly, so localhost-only proxy access is not a downgrade.
 
 ## Healthcheck
 

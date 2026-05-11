@@ -233,12 +233,16 @@ def test_attach_calls_attach_to_task(monkeypatch, patched_env):
     result = runner.invoke(cli, ["attach", "foo-001"])
     assert result.exit_code == 0, result.output
     args, kwargs = fake.call_args
-    # attach_to_task(client, task_id) — client from ctx.obj is positional first,
-    # task_id positional second. cfg is no longer in the signature.
-    assert args[1] == "foo-001" or kwargs.get("task_id") == "foo-001"
-    # First positional is the client (not cfg) — symmetry with start/finish.
+    # attach_to_task(client, proxy_url, task_id) — task_id positional third.
+    # proxy_url comes from cfg.docker_proxy_url so docker CLI uses -H against
+    # the same proxy as the SDK (NOT the host /var/run/docker.sock).
+    assert args[2] == "foo-001" or kwargs.get("task_id") == "foo-001"
     assert args[0] is not patched_env, (
-        "attach_to_task must receive the docker client, not cfg"
+        "first positional must be the docker client, not cfg"
+    )
+    assert args[1] == patched_env.docker_proxy_url, (
+        "second positional must be cfg.docker_proxy_url so docker CLI -H "
+        "routes through the proxy"
     )
 
 

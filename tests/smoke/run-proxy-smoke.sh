@@ -59,9 +59,22 @@ for i in $(seq 1 30); do
 done
 [[ "$ready" -eq 1 ]] || fail "proxy did not accept allowed requests within 30s"
 
-# Verify no host port is published — inspect compose-rendered config for `ports:`.
-if docker compose -f "$compose_file" config | grep -E '^\s*ports:'; then
-    fail "compose has 'ports:' mapping (host port leaked)"
+# Verify the proxy IS reachable on 127.0.0.1:2375 (host CLI contract) but NOT
+# on any non-localhost address (LAN exposure regression).
+echo "[proxy-smoke] verifying host-side localhost binding"
+host_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+    http://127.0.0.1:2375/v1.43/containers/json 2>/dev/null || echo "000")"
+[[ "$host_code" == "200" ]] \
+    || fail "proxy not reachable from host on 127.0.0.1:2375 (got $host_code); the host CLI contract requires this binding"
+
+# Negative: any `ports:` entry that publishes to a non-localhost address is a
+# security regression. Accepts only 127.0.0.1 / [::1] prefixes.
+suspicious_ports="$(grep -A 10 '^\s*ports:' "$compose_file" \
+    | grep -E '^\s*-\s' \
+    | grep -vE '^\s*-\s*"?(127\.0\.0\.1|\[::1\]):' \
+    || true)"
+if [[ -n "$suspicious_ports" ]]; then
+    fail "compose has non-localhost port mapping (LAN leak): $suspicious_ports"
 fi
 
 # Sibling container on naiw-internal probes the proxy.

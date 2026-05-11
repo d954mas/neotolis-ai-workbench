@@ -29,13 +29,33 @@ def test_attach_calls_execvp_when_running(
     # a defence-in-depth SystemExit(1) for the (impossible) post-execvp path.
     # With execvp mocked, that trailing exit fires — catch and ignore it.
     with pytest.raises(SystemExit):
-        attach_to_task(client, "foo-001")
+        attach_to_task(client, "tcp://127.0.0.1:2375", "foo-001")
 
-    # POSIX argv[0] convention — program name appears twice (first as exec's
-    # progname lookup target, then as argv[0] inside the new process).
+    # POSIX argv[0] convention — program name appears as argv[0] inside the
+    # new process. `-H <proxy_url>` routes the CLI through the locked proxy
+    # (same path as the SDK) so docker CLI does NOT fall back to the host
+    # socket.
     assert mock_execvp.call_args == call(
-        "docker", ["docker", "attach", "naiw-task-foo-001"]
+        "docker",
+        ["docker", "-H", "tcp://127.0.0.1:2375", "attach", "naiw-task-foo-001"],
     )
+
+
+def test_attach_passes_proxy_url_via_dash_h(mock_execvp: MagicMock) -> None:
+    """The -H flag is the only thing keeping `docker attach` on the proxy. If
+    it disappears or the URL is wrong, docker CLI silently falls back to
+    /var/run/docker.sock — bypassing every allowlist check."""
+    from naiw_tasks.attach import attach_to_task
+
+    client, _container = _fake_client_with_container(state="running")
+
+    with pytest.raises(SystemExit):
+        attach_to_task(client, "tcp://example.internal:2375", "foo-001")
+
+    argv = mock_execvp.call_args.args[1]
+    assert "-H" in argv
+    h_index = argv.index("-H")
+    assert argv[h_index + 1] == "tcp://example.internal:2375"
 
 
 def test_attach_uses_label_list_filter(mock_execvp: MagicMock) -> None:
@@ -44,7 +64,7 @@ def test_attach_uses_label_list_filter(mock_execvp: MagicMock) -> None:
     client, _container = _fake_client_with_container(state="running")
 
     with pytest.raises(SystemExit):
-        attach_to_task(client, "foo-001")
+        attach_to_task(client, "tcp://127.0.0.1:2375", "foo-001")
 
     list_kwargs = client.containers.list.call_args.kwargs
     label_filter = list_kwargs["filters"]["label"]
@@ -62,7 +82,7 @@ def test_attach_calls_list_with_all_true(mock_execvp: MagicMock) -> None:
     client, _container = _fake_client_with_container(state="running")
 
     with pytest.raises(SystemExit):
-        attach_to_task(client, "foo-001")
+        attach_to_task(client, "tcp://127.0.0.1:2375", "foo-001")
 
     # all=True so a stopped-but-still-existing container surfaces and the
     # refusal hint fires (otherwise containers.list silently returns []).
@@ -78,7 +98,7 @@ def test_attach_refuses_when_not_running(
     client, _container = _fake_client_with_container(state="exited")
 
     with pytest.raises(SystemExit) as exc:
-        attach_to_task(client, "foo-001")
+        attach_to_task(client, "tcp://127.0.0.1:2375", "foo-001")
     assert exc.value.code == 1
 
     err = capsys.readouterr().err
@@ -100,7 +120,7 @@ def test_attach_refuses_when_no_container_found(
     client.containers.list = MagicMock(return_value=[])
 
     with pytest.raises(SystemExit) as exc:
-        attach_to_task(client, "foo-001")
+        attach_to_task(client, "tcp://127.0.0.1:2375", "foo-001")
     assert exc.value.code == 1
 
     err = capsys.readouterr().err
