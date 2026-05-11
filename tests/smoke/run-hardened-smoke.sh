@@ -262,11 +262,14 @@ docker exec "$container" sh -c 'touch /tmp/probe && rm /tmp/probe' \
     || fail "HARD-03 /tmp not writable"
 step_ok "HARD-03" "/tmp writable"
 
-# ─── Step 08: HARD-03 /run writable ────────────────────────────────────
-step_check "HARD-03" "Step 08: /run writable (tmpfs probe)"
-docker exec "$container" sh -c 'touch /run/probe && rm /run/probe' \
-    || fail "HARD-03 /run not writable"
-step_ok "HARD-03" "/run writable"
+# ─── Step 08: HARD-03 /run mounted as rw tmpfs ─────────────────────────
+# /run is intentionally mode=755 owned by root (matches the requirement),
+# so user `pi` cannot write there directly. We verify the kernel sees /run
+# as an rw tmpfs mount instead of attempting a touch from the pi user.
+step_check "HARD-03" "Step 08: /run mounted as rw tmpfs"
+assert_mountinfo_flag "$container" "/run" "rw" \
+    || fail "HARD-03 /run not present in mountinfo with rw flag"
+step_ok "HARD-03" "/run is rw tmpfs"
 
 # ─── Step 09: HARD-04 PidsLimit == 512 ─────────────────────────────────
 step_check "HARD-04" "Step 09: PidsLimit == 512"
