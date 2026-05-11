@@ -1084,7 +1084,8 @@ def test_finish_marks_failed_when_container_still_running_after_remove(
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     on_disk = json.loads(tj.read_text(encoding="utf-8"))
     assert on_disk["status"] == "failed"
-    assert "still 'running'" in on_disk["failure_reason"]
+    assert "state='running'" in on_disk["failure_reason"]
+    assert "still present" in on_disk["failure_reason"]
 
     captured = capsys.readouterr()
     assert "retry: naiw-tasks finish task-001" in captured.err
@@ -1120,23 +1121,66 @@ def test_finish_marks_failed_when_verify_call_itself_errors(
     assert "cannot verify" in on_disk["failure_reason"]
 
 
-def test_finish_accepts_exited_container_as_completed(tmp_naiw_data):
-    """If the container is still in the daemon record but in a non-running
-    terminal state (exited / dead / created), finish marks completed — the
-    workload is gone, only the metadata record persists."""
+def test_finish_marks_failed_when_container_record_persists_in_exited_state(
+    tmp_naiw_data, capsys
+):
+    """An exited container record is NOT enough to consider finish complete —
+    `docker ps -a` still shows the container, the name is still reserved,
+    and finish short-circuits on completed so the operator would lose the
+    CLI path back to cleanup. Only NotFound counts as success."""
     _pre_create_task(tmp_naiw_data, "task-001", "running")
     client, container = _fake_client(container_name="naiw-task-task-001")
     container.attrs = {"State": {"Status": "exited"}}
-    # remove silently fails, but the daemon kept the record in exited state.
+    # remove silently fails, daemon kept the record in exited state.
     container.remove.side_effect = docker.errors.APIError("removal blocked")
     client.containers.get.side_effect = lambda name: container
 
     cfg = _make_cfg(tmp_naiw_data)
-    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    with pytest.raises(SystemExit) as excinfo:
+        lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    assert excinfo.value.code == 1
 
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     on_disk = json.loads(tj.read_text(encoding="utf-8"))
-    assert on_disk["status"] == "completed"
+    assert on_disk["status"] == "failed"
+    # Failure reason includes the surviving state for diagnostics
+    assert "state='exited'" in on_disk["failure_reason"]
+    assert "after stop+remove" in on_disk["failure_reason"]
+
+    captured = capsys.readouterr()
+    assert "retry: naiw-tasks finish task-001" in captured.err
+
+
+def test_finish_marks_failed_for_dead_and_created_states(tmp_naiw_data):
+    """`dead` and `created` are also non-NotFound — same rule, same outcome."""
+    for state in ("dead", "created"):
+        _pre_create_task(
+            tmp_naiw_data, f"task-{state[:3]}", "running"
+        )
+        client, container = _fake_client(
+            container_name=f"naiw-task-task-{state[:3]}"
+        )
+        container.attrs = {"State": {"Status": state}}
+        container.remove.side_effect = docker.errors.APIError("blocked")
+        client.containers.get.side_effect = lambda name: container
+
+        cfg = _make_cfg(tmp_naiw_data)
+        with pytest.raises(SystemExit) as excinfo:
+            lifecycle.finish(
+                cfg, client, f"task-{state[:3]}", policy_override=None
+            )
+        assert excinfo.value.code == 1
+
+        tj = (
+            tmp_naiw_data
+            / "tasks"
+            / f"task-{state[:3]}"
+            / "meta"
+            / "task.json"
+        )
+        on_disk = json.loads(tj.read_text(encoding="utf-8"))
+        assert on_disk["status"] == "failed"
+        assert f"state='{state}'" in on_disk["failure_reason"]
 
 
 def test_finish_failed_by_verify_step_can_be_retried(tmp_naiw_data, capsys):

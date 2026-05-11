@@ -473,9 +473,13 @@ def finish(
             except (docker.errors.NotFound, docker.errors.APIError):
                 pass
 
-        # Verify teardown actually happened. NotFound is the success signal.
-        # Any non-running terminal state (exited/dead/created) is also OK —
-        # the workload is no longer alive even if Docker keeps the record.
+        # Verify teardown actually happened. ONLY NotFound counts as completed
+        # — even an exited/dead/created container leaves a record in
+        # `docker ps -a`, keeps the name reserved, and (because finish
+        # short-circuits on status=completed) cuts off the CLI path back to
+        # cleanup. Marking failed in those cases lets the operator retry once
+        # the daemon is healthy; force-remove typically succeeds on the
+        # second attempt against an exited container.
         try:
             survivor = client.containers.get(container_name)
             survivor_state = survivor.attrs.get("State", {}).get(
@@ -491,13 +495,12 @@ def finish(
             )
             raise SystemExit(1) from exc
 
-        _NON_RUNNING_TERMINAL = (None, "exited", "dead", "created")
-        if survivor_state not in _NON_RUNNING_TERMINAL:
+        if survivor_state is not None:
             _mark_finish_failed(
                 task_dir,
                 task_id,
-                f"container {container_name} still {survivor_state!r} "
-                f"after stop+remove",
+                f"container {container_name} still present "
+                f"(state={survivor_state!r}) after stop+remove",
             )
             raise SystemExit(1)
 
