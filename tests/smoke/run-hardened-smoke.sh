@@ -2,9 +2,12 @@
 # tests/smoke/run-hardened-smoke.sh — hardened lifecycle gate.
 #
 # Runs naiw-task-image under the full HARD-* hardening flag set with production-shape
-# bind-mounts and exercises 11 requirement assertions (HARD-01..HARD-10 + PROXY-05)
+# bind-mounts and exercises 10 requirement assertions (HARD-01..HARD-08, HARD-10 + PROXY-05)
 # plus lifecycle cross-cutting validations (PID-1 wrapper, secret redaction,
 # stop+start log survival, signal cycle, cgroup peak evidence).
+#
+# HARD-09 (controller-side bind-mount source-path validation) is owned by the
+# controller phase and not probed here — its smoke check ships with that code.
 #
 # Contract: tests/smoke/HARDENED-CHECKLIST.md is the static contract; this script
 # is the executor. Drift gate at the end of this script asserts the ID set in
@@ -65,7 +68,7 @@ _hardened_cleanup() {
         docker rm -f "$probe_target" >/dev/null 2>&1 || true
         [[ -n "$TMP" ]] && rm -rf "$TMP" || true
         docker compose -f "$compose_file" down >/dev/null 2>&1 || true
-        echo "${_lib_log_prefix} PASS — all 11 requirements verified"
+        echo "${_lib_log_prefix} PASS — all 10 requirements verified"
     else
         echo "${_lib_log_prefix} FAIL — artifacts preserved for inspection:" >&2
         echo "  container: $container" >&2
@@ -113,9 +116,6 @@ mkdir -p "$TMP/naiw-data/tasks/smoke-test/io"
 echo "synthetic" > "$TMP/naiw-data/pi-packages/dummy-pkg/marker"
 printf '%s' "$fake_token" > "$TMP/naiw-data/secrets/test_token"
 chmod 0600 "$TMP/naiw-data/secrets/test_token"
-
-# HARD-09 probe artifact — symlink ALONGSIDE naiw-data/, not inside it.
-ln -s /etc "$TMP/evil-link"
 
 # Idempotent network creation; race-safe against concurrent runs.
 docker network inspect naiw-task-net >/dev/null 2>&1 \
@@ -204,21 +204,6 @@ docker exec -u pi "$pass2_container" sh -c 'pip install --user --quiet pyyaml &&
 step_ok "HARD-03" "pass2 pip succeeded with /home/pi tmpfs; yaml importable"
 echo "${_lib_log_prefix} [result] standard hardened run-flags MUST include --tmpfs /home/pi:rw,size=128m: $pip_result_note"
 docker rm -f "$pass2_container" >/dev/null
-
-# ─── Step 14 (early): HARD-09 threat baseline via alpine sidecar ───────
-# Run BEFORE the main hardened container starts — this probe tests Docker
-# bind-mount source-path resolution semantics, not the hardened-image runtime.
-step_check "HARD-09" "Step 14: threat baseline — source-symlink bind-mount via alpine sidecar"
-set +e
-hard09_out="$(docker run --rm -v "$TMP/evil-link:/evil:ro" alpine cat /evil/passwd 2>&1)"
-set -e
-hard09_lines="$(wc -l <<< "$hard09_out")"
-if grep -qE '^[a-z][a-z0-9_-]*:x:1000:' <<< "$hard09_out" || [[ "$hard09_lines" -ge 25 ]]; then
-    step_ok "HARD-09" "threat baseline ok: raw docker bind-mount allows source-symlink escape (controller-level defense lives in the next phase) [PARTIAL]"
-else
-    step_fail "HARD-09" "source-symlink bind-mount did NOT expose host /etc/passwd — output lines=$hard09_lines (env may not support threat model)"
-    fail "HARD-09 threat baseline failed (see above)"
-fi
 
 # ─── Main hardened container start ─────────────────────────────────────
 step_check "" "Starting main hardened container"
@@ -365,8 +350,6 @@ else
     fail "HARD-08 /run/secrets not ro"
 fi
 
-# Step 14 already ran above (HARD-09).
-
 # ─── Step 15: HARD-10 RestartPolicy == no ──────────────────────────────
 step_check "HARD-10" "Step 15: RestartPolicy.Name == no"
 expect_inspect_eq "$container" "HARD-10" ".HostConfig.RestartPolicy.Name" '"no"' \
@@ -506,9 +489,14 @@ fi
 step_ok "cgroup-peak" "peak evidence recorded (pids=$pids_peak mem=$mem_peak)"
 
 # ─── Step 43: drift gate (checklist ↔ script ID set must align) ────────
+# Only count IDs that are actually claimed (checklist table rows) or actually
+# probed (step_check "ID" in script). Narrative mentions in headers/comments
+# don't count — that's what makes this an honest coverage check.
 step_check "" "Step 43: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
-checklist_ids="$(grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' tests/smoke/HARDENED-CHECKLIST.md | sort -u)"
-script_ids="$(grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' tests/smoke/run-hardened-smoke.sh | sort -u)"
+checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+)' tests/smoke/HARDENED-CHECKLIST.md \
+    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
+script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+)"' tests/smoke/run-hardened-smoke.sh \
+    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
 set +e
 drift="$(diff <(echo "$checklist_ids") <(echo "$script_ids"))"
 set -e

@@ -11,10 +11,7 @@ command listed below and emits `[hardened-smoke] [<ID>] ok|FAIL: ...` on stdout/
   enforced by the script's `diff <(grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' ...)` drift gate.
 
 **Gate exit contract:**
-- All rows must be `ok` (or `PARTIAL` for rows explicitly marked so below) for the gate to exit 0.
-- `PARTIAL` rows count as passing for the gate's exit-0 semantics — they document half-coverage
-  where the OTHER half is owned by a different phase. Phase 6 (ops finalisation) updates these to
-  full PASS once the cross-phase work lands.
+- All rows must be `ok` for the gate to exit 0.
 
 **How to run:**
 
@@ -38,7 +35,6 @@ On a non-Linux host (Windows-native, `/mnt/c/`-backed `$HOME`), the gate prints
 | HARD-06  | `--network naiw-task-net` (private bridge; no host networking, no docker socket)         | step 11                  |             |
 | HARD-07  | `tasks/<id>/meta/` is NEVER bind-mounted into the container                              | step 12                  |             |
 | HARD-08  | only writable bind-mounts are `/work` and `/io`; only read-only bind-mounts are `/pi-packages` and `/run/secrets/<name>` | step 13 |             |
-| HARD-09  | bind-mount source paths validated by controller via `Path.resolve()` + prefix check (DEFENSE is in Phase 3; THREAT BASELINE here) | step 14 | **PARTIAL** — threat baseline @ Phase 2.5 (this script, source-symlink probe via alpine sidecar); defense @ Phase 3 (controller `Path.resolve()` + prefix check). Counts as PASS for gate exit-0. |
 | HARD-10  | `--restart=no` (recovery is operator-driven)                                             | step 15                  |             |
 | PROXY-05 | All non-allowlisted operations return 403 from naiw-docker-proxy                         | steps 20-41              | Covers 20 denied verb probes + 2 allowed probes (GET `/containers/json`, POST `/containers/<id>/start`). Denied verb grid: EXEC, IMAGES, VOLUMES, NETWORKS, BUILD, INFO, AUTH, SECRETS, SERVICES, SESSION, SWARM, SYSTEM, TASKS, PLUGINS, NODES, CONFIGS, DISTRIBUTION, EVENTS, PING, VERSION. |
 
@@ -73,8 +69,8 @@ On gate FAIL, the cleanup trap is **asymmetric**:
   docker compose -f deploy/docker-compose.yml down
   ```
 
-## Phase Boundaries
+## Out of Scope
 
-- **Phase 2.5 (this file):** Verifies runtime contract of the hardened lifecycle on Phase-1 artifacts (image, compose, entrypoint, naiw-signal). No controller code is written in this phase.
-- **Phase 3 (out of scope here):** Controller code that constructs `docker run` arguments and enforces the HARD-09 source-path defense via `Path.resolve()` + prefix check against `~/naiw-data/`. After Phase 3 ships, HARD-09 graduates from `PARTIAL` to full PASS.
-- **Phase 6 (out of scope here):** OPS-01 drift audit reads this checklist and verifies running containers' `HostConfig` still matches.
+HARD-09 (controller-side bind-mount source-path validation via `Path.resolve()` + prefix check
+against `~/naiw-data/`) is not verified here. The defense lives in the controller, which
+is built in a later phase; its smoke probe will be added then.
