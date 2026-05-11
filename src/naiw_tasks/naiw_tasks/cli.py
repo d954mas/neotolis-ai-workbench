@@ -134,24 +134,42 @@ def attach_cmd(ctx: click.Context, task_id: str) -> None:
 @click.argument("task_id")
 @click.option(
     "--keep-worktree",
-    "policy_override",
-    flag_value="keep_worktree",
-    default=None,
+    "keep_worktree",
+    is_flag=True,
+    default=False,
     help="Force keep_worktree (overrides task.json.finish_policy).",
 )
 @click.option(
     "--delete-worktree",
-    "policy_override",
-    flag_value="delete_worktree",
+    "delete_worktree",
+    is_flag=True,
+    default=False,
     help="Force delete_worktree (overrides task.json.finish_policy).",
 )
 @click.pass_context
 def finish(
     ctx: click.Context,
     task_id: str,
-    policy_override: str | None,
+    keep_worktree: bool,
+    delete_worktree: bool,
 ) -> None:
     """Stop+remove the container, apply worktree policy, mark completed."""
+    # Conflict is a usage error, NOT silent last-flag-wins. Otherwise an
+    # operator who typed `--keep-worktree --delete-worktree` (or set one
+    # in a shell alias and the other on the command line) silently performs
+    # the destructive operation. Better to refuse and force an explicit choice.
+    if keep_worktree and delete_worktree:
+        raise click.UsageError(
+            "--keep-worktree and --delete-worktree are mutually exclusive; "
+            "pass at most one (or neither, to fall back to "
+            "task.json.finish_policy)."
+        )
+    policy_override: str | None = None
+    if keep_worktree:
+        policy_override = "keep_worktree"
+    elif delete_worktree:
+        policy_override = "delete_worktree"
+
     try:
         validate_task_id(task_id)
     except ValueError as exc:

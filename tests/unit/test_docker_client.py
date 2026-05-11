@@ -53,20 +53,27 @@ def test_make_client_pins_api_version_to_skip_negotiation(
     assert kwargs["version"] == docker_client_mod.PINNED_DOCKER_API_VERSION
 
 
-def test_pinned_api_version_constant_matches_proxy_paths() -> None:
-    """The PINNED_DOCKER_API_VERSION constant must match the API version used
-    in startup_checks (proxy allowlist probe) and the smoke harness — drift
-    means one path negotiates while the other has a hardcoded path."""
-    from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
-
-    # startup_checks probes /v1.43/exec/fakeid/start
+def test_startup_checks_uses_pinned_api_version_constant() -> None:
+    """startup_checks must IMPORT PINNED_DOCKER_API_VERSION (not hardcode the
+    version literal) so a future bump of the constant cannot leave the
+    proxy-allowlist probe URL drifting. The previous design hardcoded
+    `/v1.43/exec/fakeid/start` and relied on a source-grep guard; the import
+    makes drift impossible by construction."""
     startup_src = (
         Path(__file__).resolve().parent.parent.parent
         / "src" / "naiw_tasks" / "naiw_tasks" / "startup_checks.py"
     ).read_text(encoding="utf-8")
-    assert f"/v{PINNED_DOCKER_API_VERSION}/" in startup_src, (
-        f"startup_checks API path drifts from PINNED_DOCKER_API_VERSION="
-        f"{PINNED_DOCKER_API_VERSION!r}"
+    assert "from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION" in startup_src, (
+        "startup_checks must import PINNED_DOCKER_API_VERSION from docker_client"
+    )
+    # And the literal-hardcoded `/v<digits>.<digits>/` form must be absent
+    # from the source — any future regression that hardcodes a version
+    # number in a URL path here will trip this check.
+    import re
+    hardcoded = re.findall(r"/v\d+\.\d+/", startup_src)
+    assert hardcoded == [], (
+        f"startup_checks contains hardcoded API-version paths {hardcoded}; "
+        f"use f'/v{{PINNED_DOCKER_API_VERSION}}/' instead"
     )
 
 

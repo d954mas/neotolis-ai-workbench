@@ -22,6 +22,8 @@ from pathlib import Path
 
 import docker
 
+from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+
 # Any /mnt/<letter>/ path on WSL2 is a Windows-FS mount (Docker Desktop
 # virtiofs/9P). Original /mnt/c/-only check was a false-negative on /mnt/d/ etc.
 _WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[a-z]/")
@@ -75,8 +77,11 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
     """Negative probe: an EXEC endpoint MUST 403 (proxy EXEC=0 invariant)."""
     # proxy_url is tcp://host:port — reshape to http://host:port for urllib.
     base = proxy_url.replace("tcp://", "http://")
+    # Use the same pinned API version the SDK does — single source of truth,
+    # no chance of probe-URL drifting from the version naiw_tasks actually
+    # speaks if the constant is ever bumped.
     req = urllib.request.Request(
-        f"{base}/v1.43/exec/fakeid/start",
+        f"{base}/v{PINNED_DOCKER_API_VERSION}/exec/fakeid/start",
         method="POST",
     )
     try:

@@ -343,22 +343,34 @@ def test_finish_delete_worktree_flag(monkeypatch, patched_env):
     assert kwargs["policy_override"] == "delete_worktree"
 
 
-def test_finish_mutually_exclusive_flags(monkeypatch, patched_env):
-    """Passing both flags: the second one wins (click flag_value semantics).
-
-    Either behaviour (second-wins OR explicit error) is acceptable per the plan.
-    We assert the chosen behaviour: second-wins, so call succeeds with the
-    last-flag's value.
-    """
+def test_finish_mutually_exclusive_flags_rejected(monkeypatch, patched_env):
+    """Passing both --keep-worktree and --delete-worktree is a UsageError.
+    Silent last-flag-wins is dangerous for the destructive `delete_worktree`
+    branch — an operator who typed both (or whose shell alias did) deserves
+    an explicit choice, not a quiet pick."""
     fake = MagicMock()
     monkeypatch.setattr(cli_mod.lifecycle, "finish", fake)
     runner = CliRunner()
     result = runner.invoke(
         cli, ["finish", "foo-001", "--keep-worktree", "--delete-worktree"]
     )
+    # Click exits 2 on UsageError.
+    assert result.exit_code == 2, result.output
+    assert "mutually exclusive" in result.output or "mutually exclusive" in result.stderr
+    # lifecycle.finish MUST NOT be called for an ambiguous request.
+    fake.assert_not_called()
+
+
+def test_finish_neither_flag_falls_back_to_task_policy(monkeypatch, patched_env):
+    """Neither flag → policy_override is None → lifecycle.finish uses
+    task.json.finish_policy (the documented fallback)."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "finish", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["finish", "foo-001"])
     assert result.exit_code == 0, result.output
     _, kwargs = fake.call_args
-    assert kwargs["policy_override"] == "delete_worktree"
+    assert kwargs["policy_override"] is None
 
 
 # ---------- source-policy guard ---------------------------------------------
