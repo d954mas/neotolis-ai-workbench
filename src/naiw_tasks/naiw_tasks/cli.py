@@ -93,7 +93,7 @@ def attach_cmd(ctx: click.Context, task_id: str) -> None:
     except ValueError as exc:
         click.echo(f"naiw-tasks: {exc}", err=True)
         sys.exit(3)
-    attach_mod.attach_to_task(ctx.obj["cfg"], task_id)
+    attach_mod.attach_to_task(ctx.obj["client"], task_id)
 
 
 @cli.command()

@@ -14,18 +14,17 @@ shares STDIO with the container's pid 1 (tmux), which is exactly what we want.
 import os
 import sys
 
-from naiw_tasks.config import Config
-from naiw_tasks.docker_client import make_client
 
-
-def attach_to_task(cfg: Config, task_id: str) -> None:
+def attach_to_task(client, task_id: str) -> None:
     """Attach the operator to the running task container, or refuse with a hint.
 
     On success this function does not return — os.execvp replaces the current
     process image. The trailing SystemExit is defence-in-depth.
-    """
-    client = make_client(cfg.docker_proxy_url)
 
+    `client` is supplied by the CLI group's already-constructed docker client
+    (same one used by start/finish) — symmetrical injection across the package
+    and avoids opening a second TCP session to the proxy.
+    """
     # filters={"label": [...]} as a list (not a comma-joined string) so docker-py
     # emits two ?label= query params and the daemon AND-matches both labels.
     matches = client.containers.list(

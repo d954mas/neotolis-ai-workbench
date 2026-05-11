@@ -177,8 +177,13 @@ def test_attach_calls_attach_to_task(monkeypatch, patched_env):
     result = runner.invoke(cli, ["attach", "foo-001"])
     assert result.exit_code == 0, result.output
     args, kwargs = fake.call_args
-    # attach_to_task(cfg, task_id) — task_id is positional second
+    # attach_to_task(client, task_id) — client from ctx.obj is positional first,
+    # task_id positional second. cfg is no longer in the signature.
     assert args[1] == "foo-001" or kwargs.get("task_id") == "foo-001"
+    # First positional is the client (not cfg) — symmetry with start/finish.
+    assert args[0] is not patched_env, (
+        "attach_to_task must receive the docker client, not cfg"
+    )
 
 
 # ---------- finish subcommand ------------------------------------------------
