@@ -25,3 +25,25 @@ jobs:
 
       - name: pytest (unit)
         run: pytest tests/unit/ -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify docker tooling
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Build naiw-task-image
+        run: bash scripts/build-image.sh
+
+      - name: Image smoke (Phase 1)
+        run: bash tests/smoke/run-image-smoke.sh
+
+      - name: Proxy smoke (Phase 1)
+        run: bash tests/smoke/run-proxy-smoke.sh
+
+      - name: Hardened-lifecycle smoke (Phase 2.5 gate)
+        run: bash tests/smoke/run-hardened-smoke.sh
