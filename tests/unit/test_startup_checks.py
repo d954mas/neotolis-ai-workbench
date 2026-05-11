@@ -1,0 +1,230 @@
+"""Tests for naiw_tasks.startup_checks — four fatal probes that gate every CLI call.
+
+docker is monkey-imported lazily so these tests can run even when docker SDK's
+real socket is unreachable. The Linux symlink test is skipped on Windows.
+"""
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import naiw_tasks.startup_checks as startup_checks
+from naiw_tasks.startup_checks import (
+    StartupCheckFailed,
+    check_docker_reachable,
+    check_naiw_data_not_symlink,
+    check_not_on_mnt_c_on_linux,
+    check_proxy_allowlist_drift,
+    run_all,
+)
+
+
+# ---------------------------------------------------------------------------
+# StartupCheckFailed
+# ---------------------------------------------------------------------------
+
+
+def test_startup_check_failed_writes_naiw_tasks_prefix_to_stderr(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        raise StartupCheckFailed("hello world")
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.err == "naiw-tasks: hello world\n"
+
+
+# ---------------------------------------------------------------------------
+# check_naiw_data_not_symlink
+# ---------------------------------------------------------------------------
+
+
+def test_check_naiw_data_not_symlink_passes_for_real_dir(tmp_naiw_data):
+    # No raise = success
+    assert check_naiw_data_not_symlink(tmp_naiw_data) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics differ on Windows")
+def test_check_naiw_data_not_symlink_rejects_symlink(tmp_path, capsys):
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "naiw-data"
+    link.symlink_to(target)
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_naiw_data_not_symlink(link)
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("naiw-tasks: ")
+    assert "must not be a symlink" in captured.err
+    assert str(target) in captured.err
+
+
+# ---------------------------------------------------------------------------
+# check_not_on_mnt_c_on_linux
+# ---------------------------------------------------------------------------
+
+
+def test_check_not_on_mnt_c_skips_on_non_linux(tmp_naiw_data, monkeypatch):
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Darwin"
+    )
+    # Even though resolved path may include /mnt/c/, non-Linux returns immediately.
+    assert check_not_on_mnt_c_on_linux(tmp_naiw_data) is None
+
+
+def test_check_not_on_mnt_c_passes_for_normal_linux_path(tmp_naiw_data, monkeypatch):
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+    # tmp_naiw_data is under tmp_path, not /mnt/c/
+    assert check_not_on_mnt_c_on_linux(tmp_naiw_data) is None
+
+
+def test_check_not_on_mnt_c_rejects_mnt_c_on_linux(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+
+    class FakeDataRoot:
+        def is_symlink(self) -> bool:
+            return False
+
+        def resolve(self) -> Path:
+            return Path("/mnt/c/Users/foo/naiw-data")
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_not_on_mnt_c_on_linux(FakeDataRoot())
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "/mnt/c/" in captured.err
+    assert "is not supported" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# check_docker_reachable
+# ---------------------------------------------------------------------------
+
+
+def test_check_docker_reachable_passes():
+    fake_client = SimpleNamespace(
+        containers=SimpleNamespace(list=lambda **kwargs: [])
+    )
+    assert check_docker_reachable(fake_client, "tcp://127.0.0.1:2375") is None
+
+
+def test_check_docker_reachable_rejects_on_exception(capsys):
+    import docker
+
+    def raise_docker(**kwargs):
+        raise docker.errors.DockerException("connection refused")
+
+    fake_client = SimpleNamespace(containers=SimpleNamespace(list=raise_docker))
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_docker_reachable(fake_client, "tcp://127.0.0.1:2375")
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "cannot reach Docker via proxy at tcp://127.0.0.1:2375" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# check_proxy_allowlist_drift
+# ---------------------------------------------------------------------------
+
+
+def test_check_proxy_allowlist_drift_passes_when_403(monkeypatch):
+    import urllib.error
+
+    def raise_403(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.urllib.request.urlopen", raise_403
+    )
+    assert check_proxy_allowlist_drift("tcp://127.0.0.1:2375") is None
+
+
+def test_check_proxy_allowlist_drift_rejects_when_200(monkeypatch, capsys):
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a, **kw):
+            return b""
+
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.urllib.request.urlopen",
+        lambda req, timeout: FakeResp(),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_proxy_allowlist_drift("tcp://127.0.0.1:2375")
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "proxy allowlist drift" in captured.err
+    assert "EXEC=0" in captured.err
+
+
+def test_check_proxy_allowlist_drift_rejects_when_other_http_error(monkeypatch, capsys):
+    import urllib.error
+
+    def raise_500(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 500, "Server Error", {}, None)
+
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.urllib.request.urlopen", raise_500
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_proxy_allowlist_drift("tcp://127.0.0.1:2375")
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "500" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# run_all
+# ---------------------------------------------------------------------------
+
+
+def test_run_all_runs_in_documented_order(tmp_naiw_data, monkeypatch):
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        startup_checks,
+        "check_naiw_data_not_symlink",
+        lambda d: order.append("symlink"),
+    )
+    monkeypatch.setattr(
+        startup_checks,
+        "check_not_on_mnt_c_on_linux",
+        lambda d: order.append("mnt_c"),
+    )
+    monkeypatch.setattr(
+        startup_checks,
+        "check_docker_reachable",
+        lambda c, u: order.append("docker_reachable"),
+    )
+    monkeypatch.setattr(
+        startup_checks,
+        "check_proxy_allowlist_drift",
+        lambda u: order.append("allowlist_drift"),
+    )
+
+    cfg = SimpleNamespace(
+        data_root=tmp_naiw_data, docker_proxy_url="tcp://127.0.0.1:2375"
+    )
+    client = SimpleNamespace()
+    run_all(cfg, client)
+
+    assert order == ["symlink", "mnt_c", "docker_reachable", "allowlist_drift"]
