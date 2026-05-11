@@ -323,12 +323,12 @@ def test_start_with_unknown_secret_aborts(tmp_naiw_data):
 def test_start_writes_schema_valid_scaffold_before_any_failable_op(tmp_naiw_data):
     """projects.load raising must leave a schema-valid task.json on disk."""
     # No projects.yaml exists → projects.load raises FileNotFoundError, which is
-    # NOT in the caught-exception tuple, so it propagates raw. Still, scaffold
-    # must have been written before that point.
+    # now caught by start()'s except clause and translated to StartFailed (clean
+    # operator-visible error, not raw Python traceback).
     client, _ = _fake_client(container_name="naiw-task-alpha-001")
     cfg = _make_cfg(tmp_naiw_data)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(lifecycle.StartFailed):
         lifecycle.start(
             cfg, client, project="alpha", base_ref=None, finish_policy="ask", secrets=[]
         )
@@ -340,7 +340,29 @@ def test_start_writes_schema_valid_scaffold_before_any_failable_op(tmp_naiw_data
     assert on_disk["id"] == "alpha-001"
     assert on_disk["kind"] == "project"
     assert on_disk["container_name"] == "naiw-task-alpha-001"
-    assert on_disk["status"] == "created"  # scaffold state — never written to failed because uncaught
+    assert on_disk["status"] == "failed"
+    assert "projects.yaml" in on_disk["failure_reason"]
+
+
+def test_start_corrupted_projects_yaml_raises_start_failed(tmp_naiw_data, capsys):
+    """A malformed projects.yaml must surface as StartFailed, not a YAML traceback."""
+    (tmp_naiw_data / "projects.yaml").write_text(
+        "this is: not: valid: yaml: }}}\n", encoding="utf-8"
+    )
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project="alpha", base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    captured = capsys.readouterr()
+    assert "naiw-tasks: start failed for task alpha-001" in captured.err
+
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
 
 
 def test_start_failed_before_worktree_keeps_finish_recoverable(

@@ -291,6 +291,12 @@ def start(
         docker.errors.APIError,
         docker.errors.NotFound,
         StartFailed,
+        # projects.load raises raw FileNotFoundError (yaml missing) or ValueError
+        # (yaml schema bad). Without catching them, `naiw-tasks start <alias>`
+        # against a missing/corrupt projects.yaml dumps a Python traceback to the
+        # operator instead of a clean naiw-tasks: error.
+        FileNotFoundError,
+        ValueError,
     ) as exc:
         ts_now = Event.now_iso()
         reason = str(exc)

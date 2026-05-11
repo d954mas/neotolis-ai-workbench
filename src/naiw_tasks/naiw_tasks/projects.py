@@ -19,8 +19,19 @@ def load(yaml_path: Path, data_root: Path) -> dict[str, dict]:
     """Parse projects.yaml and validate every entry against the strict schema.
 
     Each project's `path` must resolve under data_root/workspace/repos/.
+
+    Raises:
+        FileNotFoundError: yaml file does not exist.
+        ValueError: yaml is unparseable, schema invalid, or any project's path
+            fails bind-source validation. yaml.YAMLError is wrapped in ValueError
+            so callers do not need to depend on yaml internals.
     """
-    raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    try:
+        raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"projects.yaml: cannot parse {yaml_path} ({exc})"
+        ) from exc
     if not isinstance(raw, dict) or "projects" not in raw:
         raise ValueError(
             f"projects.yaml: missing top-level 'projects:' key in {yaml_path}"

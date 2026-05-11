@@ -48,6 +48,20 @@ def test_load_rejects_non_dict_top_level(tmp_naiw_data):
     assert "projects" in msg
 
 
+def test_load_unparseable_yaml_raises_value_error(tmp_naiw_data):
+    """yaml.YAMLError must be normalised to ValueError so callers do not need
+    to import yaml — keeps the projects-load contract one-liner: FileNotFoundError
+    or ValueError, nothing else from this module."""
+    yaml_path = _write_yaml(tmp_naiw_data, "this is: not: valid: yaml: }}}\n")
+
+    with pytest.raises(ValueError) as excinfo:
+        load(yaml_path, tmp_naiw_data)
+
+    msg = str(excinfo.value)
+    assert "projects.yaml" in msg
+    assert "cannot parse" in msg
+
+
 def test_load_rejects_missing_projects_key(tmp_naiw_data):
     yaml_path = _write_yaml(tmp_naiw_data, "other: 1\n")
 
