@@ -14,8 +14,14 @@ dependencies = [
     "click>=8.3,<9",
     "docker>=7.1,<8",
     "PyYAML>=6.0,<7",
-    "naiw_common>=0.1.0",
 ]
+# Intentionally NOT depending on naiw_common: that package is in-repo only
+# (not on any index), so a declared dependency would break the documented
+# `pipx install -e ./src/naiw_tasks` operator workflow — pipx would try to
+# resolve naiw_common from PyPI and fail. The only previous use was
+# Event.now_iso(), now inlined as _now_iso() in lifecycle.py (3 lines of
+# stdlib datetime). naiw_signal keeps the dep because it ships INSIDE the
+# task image where both packages install together via `pip install`.
 
 [project.scripts]
 naiw-tasks = "naiw_tasks.cli:cli"

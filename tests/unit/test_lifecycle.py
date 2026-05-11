@@ -500,12 +500,55 @@ def test_start_409_conflict_produces_clean_reason_with_docker_rm_hint(
     # Clean reason: includes the orphan name + cleanup command, NOT raw HTTP text.
     assert "naiw-task-task-001" in reason
     assert "already in use" in reason
-    assert "docker rm -f naiw-task-task-001" in reason
+    # The cleanup command MUST include -H <proxy_url> so it stays inside the
+    # locked-proxy boundary (a plain `docker rm -f` would bypass the proxy).
+    assert (
+        f"docker -H {cfg.docker_proxy_url} rm -f naiw-task-task-001" in reason
+    )
     assert "409 Client Error" not in reason  # raw HTTP text stripped
 
     # Same hint surfaces on stderr.
     captured = capsys.readouterr()
-    assert "docker rm -f naiw-task-task-001" in captured.err
+    assert (
+        f"docker -H {cfg.docker_proxy_url} rm -f naiw-task-task-001"
+        in captured.err
+    )
+
+
+def test_start_409_cleanup_hint_never_omits_proxy_h_flag(tmp_naiw_data, capsys):
+    """Regression guard: the 409-conflict cleanup hint MUST always include
+    `-H <proxy_url>` so the suggested docker CLI command stays on the locked
+    proxy. A bare `docker rm -f ...` would silently route through
+    /var/run/docker.sock, bypassing the same boundary that attach.py and the
+    SDK respect."""
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+    fake_response = MagicMock()
+    fake_response.status_code = 409
+    conflict_err = docker.errors.APIError(
+        "409 Client Error: Conflict", response=fake_response
+    )
+    client.containers.run.side_effect = conflict_err
+
+    cfg = _make_cfg(tmp_naiw_data)
+    with pytest.raises(lifecycle.StartFailed):
+        lifecycle.start(
+            cfg, client, project=None, base_ref=None, finish_policy="ask", secrets=[]
+        )
+
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    reason = json.loads(tj.read_text(encoding="utf-8"))["failure_reason"]
+    captured = capsys.readouterr()
+
+    # Both the on-disk reason AND the stderr hint must include the -H flag.
+    # A bare "docker rm -f naiw-task-task-001" (without -H) is forbidden.
+    import re
+    bare_rm_pattern = re.compile(r"(?<!-H )docker rm -f naiw-task-task-001")
+    assert not bare_rm_pattern.search(reason), (
+        f"bare `docker rm -f` (no -H) in failure_reason: {reason}"
+    )
+    assert not bare_rm_pattern.search(captured.err), (
+        f"bare `docker rm -f` (no -H) in stderr: {captured.err}"
+    )
 
 
 def test_start_other_api_errors_keep_raw_message(tmp_naiw_data):
