@@ -40,10 +40,12 @@ _WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[a-z]/")
 # Phase 3.5 D-S3: WinFS warning + sticky env-var ack. Exact match on "1"
 # (not truthy) so accidental settings like "true" / "yes" / "0" still raise.
 _NAIW_ACK_ENV_VAR: str = "NAIW_ACCEPT_WINDOWS_FS_RISK"
-# Marker lives on the controller container's tmpfs (/tmp is tmpfs per D-H1),
-# so it resets on every fresh `docker compose run --rm`. Suppresses the WARNING
-# noise to once per controller invocation, not once per shell session.
-_WINFS_ACK_MARKER: Path = Path("/tmp/.naiw-winfs-acked")
+# Marker lives on the bind-mounted data root (host filesystem), NOT on the
+# container's /tmp tmpfs. The controller is one-shot (D-R1) so a tmpfs marker
+# would reset on every `docker compose run --rm` and the WARNING would print
+# on every invocation. Anchoring under /naiw-data persists across runs and
+# gives true "warn once per (operator-host, data-root) pairing" semantics.
+_WINFS_ACK_MARKER: Path = Path("/naiw-data/.naiw-winfs-acked")
 
 
 class StartupCheckFailed(SystemExit):

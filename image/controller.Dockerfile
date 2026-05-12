@@ -80,7 +80,10 @@ RUN pip install --no-cache-dir /tmp/wheels/*.whl \
 # wrapper (scripts/install-wrapper.sh from P03) always passes --user so files
 # in /naiw-data land with the operator's UID. UID 1000 matches the common
 # host operator UID, same as the Phase 1 task image's `pi` user.
-RUN useradd -m -u 1000 -s /bin/bash naiw
+# No -m / -s: HOME is overridden by ENV HOME=/tmp/naiw-home above (so a
+# /home/naiw under read_only:true rootfs would be dead weight), and ENTRYPOINT
+# is naiw-tasks (not a shell), so login-shell isn't relevant either.
+RUN useradd -u 1000 naiw
 
 USER 1000
 WORKDIR /naiw-data

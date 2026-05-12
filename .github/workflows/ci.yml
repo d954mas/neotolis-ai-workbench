@@ -45,11 +45,18 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest + PyYAML
-        # PyYAML is required by tests/smoke/test_compose_contract.py (file-only
-        # contract assertions over deploy/docker-compose.yml). Pinned to match
-        # the version locked in src/naiw_tasks/pyproject.toml.
-        run: pip install pytest "pyyaml>=6.0,<7"
+      - name: Install pytest + naiw_tasks (for transitive PyYAML)
+        # tests/smoke/test_compose_contract.py imports yaml. Rather than
+        # hand-pin pyyaml here and risk version drift from
+        # src/naiw_tasks/pyproject.toml, install the package editable so its
+        # declared dependencies (PyYAML, click, docker, naiw_common) are
+        # resolved from the single source of truth — same pattern as the
+        # lint-and-test job below.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest \
+            -e ./src/naiw_common \
+            -e ./src/naiw_tasks
 
       - name: Verify docker tooling
         run: |

@@ -81,10 +81,15 @@ cat >"$WRAPPER_PATH" <<'WRAPPER'
 # Delegates every invocation to a one-shot `docker compose run --rm -it`
 # against the naiw-controller service in the system compose file.
 #
-# Env knobs the operator can set in their shell (all forwarded into the
-# controller container):
-#   NAIW_DATA                    bind-mount source on the host (default ~/naiw-data)
+# Env knobs the operator can set in their shell:
+#   NAIW_DATA                    bind-mount source on the host (default ~/naiw-data).
+#                                Consumed by COMPOSE'S volume substitution
+#                                (${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data),
+#                                NOT forwarded into the container — inside the
+#                                container NAIW_DATA stays /naiw-data per the
+#                                service-level env in deploy/docker-compose.yml.
 #   NAIW_ACCEPT_WINDOWS_FS_RISK  set to "1" to opt in on WSL2 /mnt/<letter>/ paths
+#   NAIW_DOCKER_PROXY_URL        override proxy URL (config.py reads this env)
 #   NAIW_COMPOSE_FILE            override the compose file path (default /etc/naiw/docker-compose.yml)
 set -euo pipefail
 
@@ -96,16 +101,25 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
     exit 2
 fi
 
-# exec (not plain invocation): the wrapper replaces itself with `docker compose`
-# so the operator's terminal connects directly to the compose process and
-# Ctrl-C reaches it with one fewer PID hop. --user makes bind-mount writes
-# land with the operator's UID (D-U1). -e forwards two env vars explicitly
-# rather than relying on compose's env-forwarding heuristics.
+# Compose reads $NAIW_DATA from the wrapper's env to resolve the bind-mount
+# source in `volumes:`. `exec docker compose` inherits this env transparently,
+# so the operator's `export NAIW_DATA=...` (or absence) flows through.
+#
+# CRITICAL: do NOT pass `-e NAIW_DATA=...` into the container. The container's
+# NAIW_DATA must stay `/naiw-data` (the mount target, set by the service-level
+# `environment:` block in deploy/docker-compose.yml). `compose run -e` OVERRIDES
+# service-level env, so forwarding the host path here would make naiw_tasks
+# look for /home/operator/naiw-data inside the container — which does not
+# exist (the mount lives at /naiw-data).
+#
+# Operator-tunable env vars forwarded via `-e VAR_NAME` (no `=value`): compose
+# reads the current value from the wrapper's env if set, or skips the var
+# entirely if unset, which lets the service-level defaults stand.
 exec docker compose -f "$COMPOSE_FILE" \
     run --rm -it \
     --user "$(id -u):$(id -g)" \
-    -e "NAIW_DATA=${NAIW_DATA:-${HOME}/naiw-data}" \
-    -e "NAIW_ACCEPT_WINDOWS_FS_RISK=${NAIW_ACCEPT_WINDOWS_FS_RISK:-}" \
+    -e NAIW_ACCEPT_WINDOWS_FS_RISK \
+    -e NAIW_DOCKER_PROXY_URL \
     naiw-controller \
     "$@"
 WRAPPER

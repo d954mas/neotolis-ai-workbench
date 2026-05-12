@@ -40,6 +40,16 @@ def _resolve_data_root() -> Path:
     return Path.home() / "naiw-data"
 
 
+def _resolve_docker_proxy_url(raw: dict) -> str:
+    # Precedence: NAIW_DOCKER_PROXY_URL env > config.yaml docker_proxy_url > default.
+    # Env-first lets the wrapper script (and ad-hoc debug shells) override without
+    # editing config.yaml; matches the NAIW_DATA contract.
+    env = os.environ.get("NAIW_DOCKER_PROXY_URL")
+    if env:
+        return env
+    return raw.get("docker_proxy_url", DEFAULT_DOCKER_PROXY_URL)
+
+
 def load() -> Config:
     """Load controller config. Returns defaults when config.yaml is absent.
 
@@ -51,7 +61,10 @@ def load() -> Config:
     data_root = _resolve_data_root()
     cfg_path = data_root / "config.yaml"
     if not cfg_path.exists():
-        return Config(data_root=data_root)
+        return Config(
+            data_root=data_root,
+            docker_proxy_url=_resolve_docker_proxy_url({}),
+        )
 
     try:
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
@@ -83,14 +96,19 @@ def load() -> Config:
     # `task_image: 123`) surfaces as a schema error from this loader, not as
     # a raw TypeError later when the value reaches docker.DockerClient or
     # client.containers.run. Default values are not subject to the check —
-    # an absent key falls back to the typed DEFAULT_* constants.
-    docker_proxy_url = raw.get("docker_proxy_url", DEFAULT_DOCKER_PROXY_URL)
-    if not isinstance(docker_proxy_url, str) or not docker_proxy_url:
+    # an absent key falls back to the typed DEFAULT_* constants. The YAML
+    # value is validated even when NAIW_DOCKER_PROXY_URL overrides it so a
+    # broken config.yaml is caught at load time, not when the env var is
+    # unset months later.
+    if "docker_proxy_url" in raw and (
+        not isinstance(raw["docker_proxy_url"], str) or not raw["docker_proxy_url"]
+    ):
         raise ValueError(
             f"naiw-tasks: config.yaml docker_proxy_url must be a non-empty "
-            f"string, got {type(docker_proxy_url).__name__}: "
-            f"{docker_proxy_url!r}"
+            f"string, got {type(raw['docker_proxy_url']).__name__}: "
+            f"{raw['docker_proxy_url']!r}"
         )
+    docker_proxy_url = _resolve_docker_proxy_url(raw)
     task_image = raw.get("task_image", DEFAULT_TASK_IMAGE)
     if not isinstance(task_image, str) or not task_image:
         raise ValueError(

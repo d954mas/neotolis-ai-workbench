@@ -59,6 +59,13 @@ if ! docker compose version >/dev/null 2>&1; then
     echo "[${LIB_LOG_PREFIX}] FAIL: docker compose plugin not available" >&2
     exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+    # Step 03 parses `docker compose config --format json` via python3 for
+    # the one-line image-reference extraction. Surface the missing dep up
+    # front rather than at the pipe with a "command not found".
+    echo "[${LIB_LOG_PREFIX}] FAIL: python3 required for compose-config JSON parsing" >&2
+    exit 1
+fi
 
 SMOKE_STATUS=FAIL
 tmp_data="$(mktemp -d)"

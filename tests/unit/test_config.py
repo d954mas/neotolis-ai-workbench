@@ -146,3 +146,37 @@ def test_default_task_image_uses_ghcr(tmp_naiw_data: Path) -> None:
     name that assumed `bash scripts/build-image.sh` ran on every operator host)."""
     cfg = config_mod.load()
     assert cfg.task_image == "ghcr.io/d954mas/naiw-task-image:latest"
+
+
+def test_docker_proxy_url_env_overrides_default(
+    monkeypatch, tmp_naiw_data: Path
+) -> None:
+    """NAIW_DOCKER_PROXY_URL env mirrors the NAIW_DATA contract — operator can
+    override without editing config.yaml. Path: env > yaml > default."""
+    monkeypatch.setenv("NAIW_DOCKER_PROXY_URL", "tcp://debug-proxy:9999")
+    cfg = config_mod.load()
+    assert cfg.docker_proxy_url == "tcp://debug-proxy:9999"
+
+
+def test_docker_proxy_url_env_overrides_yaml(
+    monkeypatch, tmp_naiw_data: Path
+) -> None:
+    """Env wins over config.yaml. Order: env > yaml > default."""
+    (tmp_naiw_data / "config.yaml").write_text(
+        "docker_proxy_url: tcp://from-yaml:1111\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("NAIW_DOCKER_PROXY_URL", "tcp://from-env:2222")
+    cfg = config_mod.load()
+    assert cfg.docker_proxy_url == "tcp://from-env:2222"
+
+
+def test_docker_proxy_url_yaml_used_when_env_unset(
+    monkeypatch, tmp_naiw_data: Path
+) -> None:
+    """config.yaml docker_proxy_url is honored when env var is absent."""
+    monkeypatch.delenv("NAIW_DOCKER_PROXY_URL", raising=False)
+    (tmp_naiw_data / "config.yaml").write_text(
+        "docker_proxy_url: tcp://from-yaml:3333\n", encoding="utf-8"
+    )
+    cfg = config_mod.load()
+    assert cfg.docker_proxy_url == "tcp://from-yaml:3333"

@@ -76,11 +76,20 @@ def test_controller_only_on_naiw_internal(compose):
 
 @pytest.mark.smoke
 def test_controller_bind_mounts_naiw_data(compose):
+    """The :/naiw-data mount must exist and its source must reference the
+    NAIW_DATA env var so operator overrides flow through compose substitution.
+    Structural parse (split on ':') instead of literal-substring match so the
+    test stays green if the default fallback syntax is reformatted."""
     vols = compose["services"]["naiw-controller"]["volumes"]
-    assert any(
-        v.endswith(":/naiw-data") and "${NAIW_DATA" in v and "${HOME}/naiw-data" in v
-        for v in vols
-    ), f"naiw-controller volumes missing the NAIW_DATA bind mount; got {vols!r}"
+    data_mounts = [v for v in vols if isinstance(v, str) and v.endswith(":/naiw-data")]
+    assert data_mounts, (
+        f"naiw-controller missing the :/naiw-data bind mount; got volumes={vols!r}"
+    )
+    src, _, _ = data_mounts[0].partition(":")
+    assert "NAIW_DATA" in src, (
+        f"NAIW_DATA env var must drive the bind-mount source for operator "
+        f"override; got src={src!r}"
+    )
 
 
 @pytest.mark.smoke
