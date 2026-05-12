@@ -67,6 +67,18 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 2
 fi
 
+# Ensure naiw-task-net exists. deploy/docker-compose.yml declares it under
+# top-level networks: but no service in the compose file references it
+# (controller and proxy both live on naiw-internal). So `docker compose up -d
+# naiw-docker-proxy` — the install path in README — only creates naiw-internal.
+# Without this step, the first `naiw-tasks start` would call
+# `containers.run(network="naiw-task-net")` and fail because the network
+# does not yet exist on the daemon.
+if ! docker network inspect naiw-task-net >/dev/null 2>&1; then
+    echo "[install] creating naiw-task-net (bridge)"
+    docker network create naiw-task-net >/dev/null
+fi
+
 mkdir -p "${HOME}/.local/bin"
 
 # Single-quoted heredoc — every $VAR resolves at the OPERATOR's shell-runtime,

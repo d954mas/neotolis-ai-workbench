@@ -17,9 +17,10 @@ networks:
     driver: bridge
   naiw-task-net:
     # Task containers join this network. Proxy is NOT on it (task containers
-    # must never reach the docker daemon). Managed by this compose file so
-    # operators provision it via `docker compose up -d` rather than a separate
-    # `docker network create` step.
+    # must never reach the docker daemon). NOTE: no service in this compose
+    # file references naiw-task-net, so `compose up -d <service>` will NOT
+    # create it on demand. scripts/install-wrapper.sh creates the network
+    # idempotently at install time so the first `naiw-tasks start` succeeds.
     name: naiw-task-net
     driver: bridge
 
