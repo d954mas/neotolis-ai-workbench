@@ -75,11 +75,46 @@ jobs:
           cache-to: type=gha,mode=max
           load: true
 
+      - name: Build naiw-controller (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: image/controller.Dockerfile
+          tags: |
+            naiw-controller:0.1.0
+            naiw-controller:latest
+          build-args: |
+            NAIW_VERSION=0.1.0
+            NAIW_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=naiw-controller
+          cache-to: type=gha,mode=max,scope=naiw-controller
+          load: true
+
       - name: Proxy smoke (no pytest wrapper)
         run: bash tests/smoke/run-proxy-smoke.sh
 
-      # pytest -m smoke runs test_image.py and test_hardened.py, which each
-      # invoke their bash harness via subprocess. One step verifies both the
-      # bash scripts AND the pytest wrappers — no duplication.
-      - name: Image + hardened smoke via pytest
+      # Production compose pins naiw-controller by sha256 (.github/workflows/build-images.yml
+      # from Phase 3.5 P05). For CI we test the just-built local image instead. The override
+      # drops `image:` back to the local-build tag; everything else (hardening, networks,
+      # volumes, env) inherits from deploy/docker-compose.yml via compose's standard override
+      # merging triggered by the COMPOSE_FILE env var on the next step. The
+      # run-containerized-smoke.sh harness (Phase 3.5 P06) reads $COMPOSE_FILE and passes
+      # no `-f` flag in that case — docker compose merges the two files natively.
+      - name: Override controller image in compose for CI (local build)
+        run: |
+          cat > deploy/compose.override.yml <<'OVR'
+          services:
+            naiw-controller:
+              image: naiw-controller:latest
+          OVR
+
+      # pytest -m smoke runs test_image.py, test_hardened.py, and
+      # test_containerized.py — each invokes its bash harness via subprocess.
+      # One step verifies both the bash scripts AND the pytest wrappers — no
+      # duplication. COMPOSE_FILE env stacks the local-build override on top
+      # of the production compose file; the containerized harness omits its
+      # own `-f` when this env is set so the stacking actually takes effect.
+      - name: Image + hardened + containerized smoke via pytest
+        env:
+          COMPOSE_FILE: deploy/docker-compose.yml:deploy/compose.override.yml
         run: pytest tests/smoke/ -v -m smoke
