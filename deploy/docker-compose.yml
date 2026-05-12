@@ -81,14 +81,17 @@ services:
     # TCP-level probe (see deploy/proxy/README.md).
 
   naiw-controller:
-    # GHCR-published image. Currently tag-pinned to :latest so `docker compose
-    # pull` resolves against ghcr after the first master push. The README
-    # promises a digest pin (image: ghcr.io/d954mas/naiw-controller@sha256:...)
-    # — operator action after the first successful build (see README
-    # "Distribution" section).
+    # GHCR-published image, tag-pinned to :latest. `docker compose pull`
+    # fetches whatever master CI published most recently.
     # For local dev: `bash scripts/build-controller.sh` tags the local build
     # with this same GHCR ref, so `docker compose run` reuses the local image
     # without re-pulling.
+    # Note: pinning to @sha256:<digest> would be more immutable but turns
+    # every commit into a compose-edit treadmill on a single-operator setup
+    # where GHCR is private and you are the only pusher. Not worth it for
+    # this scope. If you cut a release tag (`git tag v0.1.0 && git push --tags`)
+    # the build workflow also publishes `:0.1.0` — pin to that instead if
+    # you want stability between releases without per-commit churn.
     image: ghcr.io/d954mas/naiw-controller:latest
     container_name: naiw-controller
     # Controller is one-shot: every `naiw-tasks` call spawns a fresh container
