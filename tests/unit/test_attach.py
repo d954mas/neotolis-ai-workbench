@@ -119,8 +119,9 @@ def test_attach_passes_internal_dns_url_when_default_proxy_url(
     attach module itself does not import config — but Phase 3 cli.py / lifecycle.py
     construct `Config` and pass `cfg.docker_proxy_url` into attach_to_task; this
     test pins the value Phase 3.5 expects at the wire."""
-    from naiw_tasks import config
     from naiw_tasks.attach import attach_to_task
+
+    from naiw_tasks import config
 
     client, _container = _fake_client_with_container(state="running")
 

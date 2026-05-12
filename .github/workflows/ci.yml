@@ -45,8 +45,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest
-        run: pip install pytest
+      - name: Install pytest + PyYAML
+        # PyYAML is required by tests/smoke/test_compose_contract.py (file-only
+        # contract assertions over deploy/docker-compose.yml). Pinned to match
+        # the version locked in src/naiw_tasks/pyproject.toml.
+        run: pip install pytest "pyyaml>=6.0,<7"
 
       - name: Verify docker tooling
         run: |

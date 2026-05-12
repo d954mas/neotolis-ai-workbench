@@ -13,6 +13,7 @@ INFO=0 (a security invariant). Operators verify live-restore manually after
 Docker daemon install via `docker info --format '{{.LiveRestoreEnabled}}'`.
 """
 
+import contextlib
 import os
 import platform
 import re
@@ -104,12 +105,10 @@ def check_not_on_windows_fs_on_linux(data_root: Path) -> None:
         file=sys.stderr,
         flush=True,
     )
-    try:
+    # Marker creation failures (read-only /tmp) make the warning print every
+    # invocation - annoying but not broken. Stay silent here.
+    with contextlib.suppress(OSError):
         _WINFS_ACK_MARKER.touch()
-    except OSError:
-        # Marker creation failures (read-only /tmp) make the warning print every
-        # invocation - annoying but not broken. Stay silent here.
-        pass
 
 
 def check_docker_reachable(client, proxy_url: str) -> None:
