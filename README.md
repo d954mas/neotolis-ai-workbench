@@ -14,12 +14,14 @@ The Phase 3 controller (`naiw-tasks` CLI) is implemented and ships in this repo.
 | `naiw_common` + `naiw_signal` Python packages | `src/naiw_common/`, `src/naiw_signal/` |
 | `naiw_tasks` controller (`naiw-tasks` CLI) | `src/naiw_tasks/` |
 | Image build helper | `scripts/build-image.sh` |
-| Controller install helper | `scripts/install-controller.sh` |
+| Controller wrapper installer (Phase 3.5) | `scripts/install-wrapper.sh` |
+| Controller Dockerfile (Phase 3.5) | `image/controller.Dockerfile` |
+| CI build+push workflow (Phase 3.5) | `.github/workflows/build-images.yml` |
 
 ## Architecture
 
 - **Image** — `naiw-task-image` bakes Pi (`@earendil-works/pi-coding-agent`) + tmux + git + gh + node + python + ffmpeg + ripgrep + the `naiw-signal` wheel. Runs as non-root `pi` user. Default `CMD ["tmux","new-session","-A","-s","main"]` — the controller attaches via `docker attach` (NOT `exec`).
-- **Proxy** — `tecnativa/docker-socket-proxy` pinned by sha256 on a private `naiw-internal` Docker bridge. **Publishes 2375 on `127.0.0.1` only** (localhost-bound; not LAN-exposed). The host-installed `naiw-tasks` CLI reaches the proxy at `tcp://127.0.0.1:2375`. Locked allowlist enforces the security boundary regardless of the binding; see `deploy/proxy/README.md`.
+- **Proxy** — `tecnativa/docker-socket-proxy` pinned by sha256 on a private `naiw-internal` Docker bridge. **Publishes no host port** (Phase 3.5 D-N2). The containerized controller (`naiw-controller` service on `naiw-internal`) reaches it via internal DNS at `tcp://naiw-docker-proxy:2375`. Locked allowlist enforces the security boundary; see `deploy/proxy/README.md`.
 - **Task network** — Task containers run on a separate `naiw-task-net` bridge created by the same compose file. Tasks have NO route to the proxy or to `/var/run/docker.sock`.
 - **Host data layout** — `~/naiw-data/` contains `projects.yaml`, `secrets/` (mode 0700), `pi-packages/`, `workspace/repos/`, and per-task `tasks/<id>/{meta,work,io}` directories. `meta/` is host-only (never mounted into the container).
 - **Signal CLI** — `naiw-signal done|fail|wait` runs inside the image as the `pi` user, appends one JSON event line to `/io/.naiw/events.jsonl`. Pure file-writer; no Docker access; never reads `meta/`.
@@ -30,51 +32,56 @@ The Phase 3 controller (`naiw-tasks` CLI) is implemented and ships in this repo.
 # 1. Bootstrap host data layout
 bash scripts/naiw-init-data.sh
 
-# 2. Build the task image (resolves PI_VERSION and git SHA automatically)
-bash scripts/build-image.sh
+# 2. Install the system compose file (requires sudo for /etc/naiw)
+sudo install -d /etc/naiw
+sudo cp deploy/docker-compose.yml /etc/naiw/docker-compose.yml
 
-# 3. Bring up the Docker socket proxy
-docker compose -f deploy/docker-compose.yml up -d
+# 3. Pull both images (controller + task image) from ghcr
+docker compose -f /etc/naiw/docker-compose.yml pull
 
-# 4. Verify
-bash tests/smoke/run-image-smoke.sh
-bash tests/smoke/run-proxy-smoke.sh
+# 4. Start the proxy (controller is one-shot via `docker compose run`)
+docker compose -f /etc/naiw/docker-compose.yml up -d naiw-docker-proxy
+
+# 5. Install the operator wrapper to ~/.local/bin/naiw-tasks
+bash scripts/install-wrapper.sh   # also pre-pulls ghcr.io/d954mas/naiw-task-image:latest
+
+# 6. Verify
+naiw-tasks --help                                  # delegates to docker compose run
+bash tests/smoke/run-containerized-smoke.sh        # full smoke (Linux only)
 ```
+
+The host needs Docker + the docker-compose plugin; **Python is not required** on the host. Operator edits `~/naiw-data/projects.yaml`, drops files in `~/naiw-data/secrets/`, and clones repos under `~/naiw-data/workspace/repos/` using normal host tools (D-S2).
+
+If you previously ran the Phase-3 host-CLI installer (now removed per D-M3), uninstall the pipx package once: `pipx uninstall naiw_tasks` (or `uv tool uninstall naiw_tasks`). No automated migration is provided because Phase 3 was not deployed in production (CONTEXT.md D-M1 overrides ROADMAP SC #5).
 
 ## Controller contract
 
 The controller (`naiw-tasks` CLI) communicates with the Docker engine via the proxy ONLY. No direct socket mount is permitted.
 
-- **Distribution:** host-installed CLI. Run `bash scripts/install-controller.sh` — it provisions both `naiw_tasks` AND its in-repo `naiw_common` wire-format dep into the same `uv tool` / `pipx` venv (with a venv fallback if neither is present). A bare `pipx install -e ./src/naiw_tasks` will fail because pipx isolates per-tool venvs and `naiw_common` is not published to any index — by design; the script enforces the correct install path. Runs as the operator's user, not as root.
-- **Endpoint:** `tcp://127.0.0.1:2375` (localhost-bound proxy port). Override via `docker_proxy_url` in `~/naiw-data/config.yaml` if needed.
-- **`docker attach`:** the CLI invokes `docker -H tcp://127.0.0.1:2375 attach <name>` so the docker CLI also goes through the proxy (without `-H`, it would silently fall back to `/var/run/docker.sock`).
-- **SDK:** `docker` Python SDK 7.1 with `base_url=tcp://127.0.0.1:2375`.
-- **Allowed Engine API surface (effective):**
-  - `GET /containers/*` (list, inspect, logs)
-  - `POST /containers/create` — creates ANY container with operator-supplied image, mounts, and host-config kwargs. Controller pins this to `naiw-task-image` + the hardened HostConfig kwargs, but the proxy itself does not restrict the image or mounts. A direct HTTP caller can pick anything.
-  - `POST /containers/<id>/start`, `/stop`, `/attach`, restart/kill paths
-  - `DELETE /containers/<id>?force=true` — `POST=1` is a global write-method gate (POST + PUT + DELETE), so DELETE on `/containers/*` is allowed. The controller uses this for `container.remove(force=True)` in `finish`. A direct HTTP caller can remove (force-kill + delete) any container, including the operator's other NAIW tasks.
-  - `POST /containers/<id>/exec` (the exec CREATE endpoint) — **not blocked**: it lives under `/containers/*` and goes through `CONTAINERS=1+POST=1`. Creates an exec instance but does NOT start it.
-- **Denied:** `POST /exec/<id>/start`, `/exec/<id>/resize`, `GET /exec/<id>/json` (so the created exec instance cannot actually run), `images/*`, `volumes/*`, `networks/*`, `build/*`, every Swarm endpoint. See `deploy/proxy/README.md` for the full deny list.
+- **Distribution:** Docker image `ghcr.io/d954mas/naiw-controller:<tag>` (published by `.github/workflows/build-images.yml`; production compose pins by sha256). Wrapper at `~/.local/bin/naiw-tasks` delegates every call to `docker compose run --rm -it --user "$(id -u):$(id -g)" naiw-controller "$@"`. One-shot run mode (D-R1) — every `naiw-tasks` call spawns a fresh container.
+- **Endpoint:** `tcp://naiw-docker-proxy:2375` (internal DNS on `naiw-internal`; D-N3 default). Operator override via `docker_proxy_url` in `~/naiw-data/config.yaml`.
+- **`docker attach`:** the controller invokes `docker -H tcp://naiw-docker-proxy:2375 attach <name>` from inside the controller container so the CLI also goes through the proxy.
+- **SDK:** `docker` Python SDK 7.1 with `base_url=tcp://naiw-docker-proxy:2375`; API version pinned to 1.43.
 
-### Trust boundary (read this before deploying)
+Allowed engine surface, denied surface: see `deploy/proxy/README.md` for the full table.
 
-The proxy is bound to `127.0.0.1:2375`. On Linux TCP localhost is **not user-scoped** — any process running as **any user on this host** can connect to it. In practice that means:
+## Trust boundary (Phase 3.5)
 
-| Caller | Access |
-|---|---|
-| Remote host (LAN/Internet) | ❌ blocked (binding is 127.0.0.1, not 0.0.0.0) |
-| Another local user on this host | ✅ **can connect** (TCP localhost ignores uid) |
-| The operator's own processes (`npm install` post-install scripts, browser extensions with native messaging, `pip install` packages, IDE plugins, etc.) | ✅ **can connect** |
+Phase 3.5 isolates the controller in its own hardened container on a private Docker network; the proxy publishes no host port.
 
-What such a caller can do via the allowlist above:
+| Component         | Network         | Allowed access                          | Threat model                                                       |
+|-------------------|-----------------|------------------------------------------|---------------------------------------------------------------------|
+| `naiw-controller` | `naiw-internal` | proxy via DNS (`tcp://naiw-docker-proxy:2375`) | trusted code, holds Docker control surface via the locked proxy allowlist |
+| `naiw-docker-proxy` | `naiw-internal` | `/var/run/docker.sock:ro` (host) | locked allowlist (`CONTAINERS=1`, `POST=1`, `ALLOW_START/STOP/RESTARTS=1`, everything else `0` paranoid-explicit) |
+| task containers (Pi) | `naiw-task-net` | no proxy, no daemon, no host socket | untrusted Pi runs here; container hardening (cap-drop=ALL, read-only, no-new-privileges, …) is the boundary |
 
-- Create a container with `Image: alpine`, `HostConfig.Binds: ["/:/host"]`, `HostConfig.Privileged: true` and start it → root-on-host via a side-loaded container, **bypassing every NAIW hardening setting** because those settings only constrain containers the controller itself creates.
-- List, inspect, stop, **and force-remove** any container — including the operator's other NAIW tasks. `DELETE /containers/<id>?force=true` is allowed by the `POST=1` global write-gate.
+### What changed from Phase 3
 
-**This is the same threat model as having the operator's user in the `docker` group** with a local Docker daemon: trusted code runs as the operator with broad container-control authority. NAIW is single-user, single-host (per `CLAUDE.md`) and assumes the operator audits the code they install. If that assumption does not hold for your deployment, you need a stricter proxy (e.g., `wollomatic/socket-proxy` with per-name/per-image/per-mount regex allowlist) — see "Alternatives Considered" in `CLAUDE.md`. The current proxy is **not** "attach/start/stop only"; it is "containers/* + POST + start/stop", which is substantial Docker control surface.
+Previously the proxy published a localhost port so a host-installed Python CLI could reach it; that exposed substantial Docker control surface to any same-host process. Phase 3.5 puts the controller back inside `naiw-internal` and unpublishes the proxy port. The Phase-3 round-4 localhost-binding caveat is no longer applicable and has been removed.
 
-The previous design (controller container joining `naiw-internal`, no host port published) avoided this exposure but cost operator UX. The current design accepts the same-user-trust assumption to keep `naiw-tasks <cmd>` a simple host CLI invocation. The container-level isolation (`cap_drop=ALL`, `read_only`, separate `naiw-task-net`, `--privileged: false`, …) is still enforced for every container the controller creates — that boundary protects Pi inside a task. The trust boundary discussed here is at a different layer: same-host code outside the controller.
+### What did NOT change
+
+Container hardening (`cap-drop=ALL`, `read-only`, separate `naiw-task-net`, no `--privileged`, …) for task containers is unchanged. The proxy allowlist (5 yes-vars, 24 paranoid-zeros) is unchanged. The trust assumption — operator audits the code they run on this host — is unchanged.
 
 ## Project rules
 
