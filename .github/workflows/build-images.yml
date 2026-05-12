@@ -1,0 +1,74 @@
+name: build-images
+
+# Builds and pushes both images to ghcr on master pushes, git tags, and manual
+# dispatch. Phase 3.5 D-D1 (controller via ghcr) + D-D3 (task image via ghcr).
+# The Tecnativa proxy is NOT in this matrix — it is a third-party image pinned
+# by sha256 in deploy/docker-compose.yml and never rebuilt by us.
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: naiw-controller
+            dockerfile: image/controller.Dockerfile
+          - image: naiw-task-image
+            dockerfile: image/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag matrix:
+      #   `latest`   on master push
+      #   `vX.Y.Z`   on git tag (semver pattern)
+      #   `sha-XXX`  always (short SHA)
+      # metadata-action also generates OCI annotation labels.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      # PI_VERSION is only consumed by naiw-task-image. The conditional `if`
+      # keeps the controller job lean (no extra apt-get reads).
+      - id: pi
+        if: matrix.image == 'naiw-task-image'
+        run: echo "version=$(cat image/PI_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NAIW_VERSION=0.1.0
+            NAIW_GIT_SHA=${{ github.sha }}
+            ${{ matrix.image == 'naiw-task-image' && format('PI_VERSION={0}', steps.pi.outputs.version) || '' }}
+          # Per-image cache scope: a naiw-task-image rebuild does not bust the
+          # naiw-controller cache and vice versa (CLAUDE.md / RESEARCH Pattern 4).
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
