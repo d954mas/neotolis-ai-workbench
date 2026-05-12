@@ -65,12 +65,27 @@ def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
     Generic tasks get meta/, work/, io/ — controller owns the empty work/.
     Project tasks get meta/, io/ only — git worktree add creates work/ later
     (and it requires the path to not already exist).
+
+    Bind-mount source dirs (io/.naiw, generic-task work/) get mode 1777 (sticky
+    + world-writable, same as /tmp). The task image runs as `pi` uid 1000
+    hardcoded; without this the operator's umask 0755 would block pi from
+    writing /io/.naiw/events.jsonl whenever the operator's host uid is not
+    1000 (LDAP boxes, second-user installs, etc.). Sticky bit preserves
+    owner-only delete so pi cannot remove files written by the operator.
+    meta/ stays at default 0755: it is host-only, never bind-mounted into the
+    container, and pi must not touch it.
     """
     task_dir = data_root / "tasks" / task_id
     (task_dir / "meta").mkdir(parents=True, exist_ok=True)
-    (task_dir / "io" / ".naiw").mkdir(parents=True, exist_ok=True)
+    io_naiw = task_dir / "io" / ".naiw"
+    io_naiw.mkdir(parents=True, exist_ok=True)
+    # Apply mode AFTER mkdir — mkdir's mode arg is masked by umask, chmod is not.
+    (task_dir / "io").chmod(0o1777)
+    io_naiw.chmod(0o1777)
     if kind is TaskKind.GENERIC:
-        (task_dir / "work").mkdir(exist_ok=True)
+        work = task_dir / "work"
+        work.mkdir(exist_ok=True)
+        work.chmod(0o1777)
     return task_dir
 
 

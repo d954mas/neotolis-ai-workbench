@@ -118,6 +118,47 @@ def test_make_skeleton_project_does_not_create_work(tmp_naiw_data):
     assert not (td / "work").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_skeleton_bind_mount_dirs_are_sticky_writable(tmp_naiw_data):
+    """The image's pi user is hardcoded to uid 1000. When the operator's
+    host uid differs (LDAP boxes, second-user installs), the default
+    `mkdir` mode 0755 blocks pi from writing. _make_skeleton sets 1777
+    (sticky-writable, /tmp-style) on EVERY bind-mount source — io/, io/.naiw,
+    and (for generic tasks) work/ — so the container's pi can write
+    regardless of operator uid."""
+    td = lifecycle._make_skeleton(tmp_naiw_data, "task-001", TaskKind.GENERIC)
+
+    for path in (td / "io", td / "io" / ".naiw", td / "work"):
+        mode = path.stat().st_mode & 0o7777
+        assert mode == 0o1777, (
+            f"{path.name}: expected mode 1777 (sticky write), got {oct(mode)}"
+        )
+
+    # meta/ stays default — it is host-only, never bind-mounted into the
+    # container. Default mkdir mode is operator-controlled (typically 0755).
+    meta_mode = (td / "meta").stat().st_mode & 0o7777
+    assert meta_mode != 0o1777, (
+        f"meta/ MUST NOT be 1777 (host-only, not bind-mounted): {oct(meta_mode)}"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_skeleton_project_io_is_sticky_no_work_yet(tmp_naiw_data):
+    """Project tasks: same io/ stickiness, but work/ is NOT created here
+    (git worktree add owns it later)."""
+    td = lifecycle._make_skeleton(tmp_naiw_data, "alpha-001", TaskKind.PROJECT)
+
+    for path in (td / "io", td / "io" / ".naiw"):
+        assert path.stat().st_mode & 0o7777 == 0o1777
+    assert not (td / "work").exists()
+
+
 def test_lifecycle_module_does_not_call_rmdir():
     src = (
         Path(__file__).resolve().parent.parent.parent

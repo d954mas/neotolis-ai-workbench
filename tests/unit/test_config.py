@@ -41,6 +41,35 @@ def test_load_reads_config_yaml(tmp_naiw_data: Path) -> None:
     assert cfg.data_root == tmp_naiw_data
 
 
+@pytest.mark.parametrize(
+    "yaml_body, field",
+    [
+        ("docker_proxy_url: null\n", "docker_proxy_url"),
+        ("docker_proxy_url: 12345\n", "docker_proxy_url"),
+        ('docker_proxy_url: ""\n', "docker_proxy_url"),
+        ("docker_proxy_url: [tcp, 127, 0, 0, 1]\n", "docker_proxy_url"),
+        ("task_image: null\n", "task_image"),
+        ("task_image: 123\n", "task_image"),
+        ('task_image: ""\n', "task_image"),
+        ("task_image:\n  name: foo\n  tag: bar\n", "task_image"),
+    ],
+)
+def test_load_rejects_non_string_field_values(
+    yaml_body, field, tmp_naiw_data: Path
+) -> None:
+    """Wrong-typed config values (yaml null, int, list, dict, empty string)
+    must raise ValueError from config.load — not flow through to a raw
+    TypeError when DockerClient or containers.run gets handed the bad value."""
+    (tmp_naiw_data / "config.yaml").write_text(yaml_body, encoding="utf-8")
+
+    with pytest.raises(ValueError) as excinfo:
+        config_mod.load()
+
+    msg = str(excinfo.value)
+    assert field in msg
+    assert "must be a non-empty string" in msg
+
+
 def test_load_unparseable_yaml_raises_value_error(tmp_naiw_data: Path) -> None:
     """yaml.YAMLError must be normalised to ValueError so cli.py does not need
     to depend on yaml internals when wrapping config.load() errors."""

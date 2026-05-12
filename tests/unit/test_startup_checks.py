@@ -264,4 +264,62 @@ def test_run_all_runs_in_documented_order(tmp_naiw_data, monkeypatch):
     client = SimpleNamespace()
     run_all(cfg, client)
 
+    # uid-mismatch warning runs at the end and is non-fatal — it just appends
+    # to stderr, so it's expected to NOT appear in the order list above (the
+    # other checks block monkey-patches on themselves; uid warning has no
+    # specific monkey-patch in this test). We don't assert its absence; the
+    # dedicated test below verifies the warn behaviour.
     assert order == ["symlink", "windows_fs", "docker_reachable", "allowlist_drift"]
+
+
+# ---------------------------------------------------------------------------
+# warn_uid_mismatch_with_image
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="getuid is POSIX-only")
+def test_warn_uid_mismatch_emits_when_uid_not_1000(monkeypatch, capsys):
+    """When operator uid != 1000 the warning surfaces with key phrases."""
+    monkeypatch.setattr("naiw_tasks.startup_checks.os.getuid", lambda: 5000)
+
+    startup_checks.warn_uid_mismatch_with_image()
+
+    captured = capsys.readouterr()
+    assert "operator uid=5000" in captured.err
+    assert "pi uid=1000" in captured.err
+    assert "1777" in captured.err  # mentions the chmod fix
+    assert "rebuild the image" in captured.err  # points to long-term fix
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="getuid is POSIX-only")
+def test_warn_uid_mismatch_silent_when_uid_is_1000(monkeypatch, capsys):
+    """uid 1000 is the happy case (matches image's baked pi user)."""
+    monkeypatch.setattr("naiw_tasks.startup_checks.os.getuid", lambda: 1000)
+
+    startup_checks.warn_uid_mismatch_with_image()
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_warn_uid_mismatch_skips_on_non_posix(monkeypatch, capsys):
+    """Windows-native Python lacks os.getuid — function must early-return,
+    NOT crash with AttributeError."""
+    # Simulate non-POSIX: drop getuid attribute from the imported os module.
+    monkeypatch.delattr("naiw_tasks.startup_checks.os.getuid", raising=False)
+
+    startup_checks.warn_uid_mismatch_with_image()  # must not raise
+
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="getuid is POSIX-only")
+def test_warn_uid_mismatch_is_non_fatal(monkeypatch):
+    """Even when the warning fires, it returns None — must NOT raise
+    StartupCheckFailed (which would block startup). The whole point of the
+    warning is to inform without breaking operators on uid != 1000 hosts."""
+    monkeypatch.setattr("naiw_tasks.startup_checks.os.getuid", lambda: 5000)
+
+    # Just call — anything raised here would surface as test failure.
+    result = startup_checks.warn_uid_mismatch_with_image()
+    assert result is None

@@ -73,8 +73,27 @@ def load() -> Config:
             f"(controller supports schema_version={SCHEMA_VERSION})"
         )
 
+    # Type-check string fields here so a bad value (`docker_proxy_url: null`,
+    # `task_image: 123`) surfaces as a schema error from this loader, not as
+    # a raw TypeError later when the value reaches docker.DockerClient or
+    # client.containers.run. Default values are not subject to the check —
+    # an absent key falls back to the typed DEFAULT_* constants.
+    docker_proxy_url = raw.get("docker_proxy_url", DEFAULT_DOCKER_PROXY_URL)
+    if not isinstance(docker_proxy_url, str) or not docker_proxy_url:
+        raise ValueError(
+            f"naiw-tasks: config.yaml docker_proxy_url must be a non-empty "
+            f"string, got {type(docker_proxy_url).__name__}: "
+            f"{docker_proxy_url!r}"
+        )
+    task_image = raw.get("task_image", DEFAULT_TASK_IMAGE)
+    if not isinstance(task_image, str) or not task_image:
+        raise ValueError(
+            f"naiw-tasks: config.yaml task_image must be a non-empty string, "
+            f"got {type(task_image).__name__}: {task_image!r}"
+        )
+
     return Config(
         data_root=data_root,
-        docker_proxy_url=raw.get("docker_proxy_url", DEFAULT_DOCKER_PROXY_URL),
-        task_image=raw.get("task_image", DEFAULT_TASK_IMAGE),
+        docker_proxy_url=docker_proxy_url,
+        task_image=task_image,
     )
