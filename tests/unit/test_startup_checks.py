@@ -142,6 +142,91 @@ def test_check_not_on_windows_fs_passes_for_lookalike_paths(
 
 
 # ---------------------------------------------------------------------------
+# D-S3 — NAIW_ACCEPT_WINDOWS_FS_RISK ack semantics
+# ---------------------------------------------------------------------------
+
+
+def test_winfs_check_fatal_without_ack(monkeypatch, capsys, tmp_path):
+    """D-S3: missing/unset ack on a /mnt/<letter>/ path -> fatal exit 2 with
+    opt-in hint. Belt-and-braces over the existing parametrize block."""
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+    monkeypatch.delenv("NAIW_ACCEPT_WINDOWS_FS_RISK", raising=False)
+
+    class FakeRoot:
+        def is_symlink(self): return False
+        def resolve(self): return Path("/mnt/c/Users/foo/naiw-data")
+
+    with pytest.raises(SystemExit) as exc:
+        check_not_on_windows_fs_on_linux(FakeRoot())
+    assert exc.value.code == 2
+
+    err = capsys.readouterr().err
+    assert "/mnt/c/Users/foo/naiw-data" in err
+    assert "NAIW_ACCEPT_WINDOWS_FS_RISK" in err
+    assert "set NAIW_ACCEPT_WINDOWS_FS_RISK=1" in err  # opt-in hint
+
+
+def test_winfs_check_warn_with_ack(monkeypatch, capsys, tmp_path):
+    """D-S3: ack set + marker absent -> WARNING printed; returns None; marker created."""
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+    monkeypatch.setenv("NAIW_ACCEPT_WINDOWS_FS_RISK", "1")
+    marker = tmp_path / ".naiw-winfs-acked"
+    monkeypatch.setattr("naiw_tasks.startup_checks._WINFS_ACK_MARKER", marker)
+
+    class FakeRoot:
+        def is_symlink(self): return False
+        def resolve(self): return Path("/mnt/c/Users/foo/naiw-data")
+
+    assert check_not_on_windows_fs_on_linux(FakeRoot()) is None
+
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "NAIW_ACCEPT_WINDOWS_FS_RISK=1" in err
+    assert "/mnt/c/Users/foo/naiw-data" in err
+    assert marker.exists()
+
+
+def test_winfs_warn_marker_suppression(monkeypatch, capsys, tmp_path):
+    """D-S3: ack set + marker pre-exists -> returns None; stderr empty (suppressed)."""
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+    monkeypatch.setenv("NAIW_ACCEPT_WINDOWS_FS_RISK", "1")
+    marker = tmp_path / ".naiw-winfs-acked"
+    marker.touch()  # pre-existing marker
+    monkeypatch.setattr("naiw_tasks.startup_checks._WINFS_ACK_MARKER", marker)
+
+    class FakeRoot:
+        def is_symlink(self): return False
+        def resolve(self): return Path("/mnt/c/Users/foo/naiw-data")
+
+    assert check_not_on_windows_fs_on_linux(FakeRoot()) is None
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("ack_value", ["true", "yes", "0", " 1", "1 ", "TRUE", ""])
+def test_winfs_check_only_exact_one_acks(monkeypatch, ack_value, tmp_path):
+    """D-S3 exact-match semantics: only the literal string '1' enables the ack.
+    Truthy-looking strings (true/yes), padded values, and even the empty string
+    must NOT bypass the fatal branch."""
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
+    )
+    monkeypatch.setenv("NAIW_ACCEPT_WINDOWS_FS_RISK", ack_value)
+
+    class FakeRoot:
+        def is_symlink(self): return False
+        def resolve(self): return Path("/mnt/d/data/naiw-data")
+
+    with pytest.raises(SystemExit):
+        check_not_on_windows_fs_on_linux(FakeRoot())
+
+
+# ---------------------------------------------------------------------------
 # check_docker_reachable
 # ---------------------------------------------------------------------------
 
