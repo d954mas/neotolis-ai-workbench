@@ -111,6 +111,17 @@ def _make_worktree_writable_by_pi(work_path: Path) -> None:
                                  mode as before — `git status` stays clean)
       - symlinks / special     → skipped (chmod through symlink target may
                                  leak outside the worktree)
+
+    Trade-off: this gives every host user rw access to the worktree, which
+    is acceptable on the single-operator VPS this tool targets but is not
+    the tightest possible sandbox. Cleaner alternatives, none free:
+      - build task image with the operator's uid (requires a per-host image
+        rebuild and breaks the published-from-ghcr distribution story)
+      - run task containers with `--user $(id -u):$(id -g)` like the wrapper
+        does (requires Pi tooling to function without a passwd entry)
+      - chown the worktree to uid 1000 on Linux hosts (requires `sudo` or
+        capable setuid helper, complicates Windows/WSL2 portability)
+    Revisit when the single-user assumption stops holding.
     """
     work_path.chmod(0o1777)
     for path in work_path.rglob("*"):

@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
 # tests/smoke/run-containerized-smoke.sh
 #
-# Phase 3.5 containerized-loop smoke harness. Brings up deploy/docker-compose.yml,
-# verifies the post-3.5 isolation model (proxy unpublished, controller in
-# naiw-internal, wrapper-equivalent `compose run` works), then tears down.
+# Containerized-loop smoke harness. Brings up deploy/docker-compose.yml,
+# verifies the isolation model (proxy unpublished, controller in naiw-internal,
+# wrapper-equivalent `compose run` works), then tears down.
 #
 # COMPOSE_FILE handling:
-#   - If $COMPOSE_FILE is set (e.g. CI provides multi-file stacking like
+#   - If $COMPOSE_FILE is set (CI multi-file stacking like
 #     "deploy/docker-compose.yml:deploy/compose.override.yml"), the harness
 #     DOES NOT pass `-f`. `docker compose` reads $COMPOSE_FILE natively and
 #     supports the `:`-separated multi-file form on Linux.
-#   - Otherwise, the harness defaults to the in-repo deploy/docker-compose.yml.
-#   This makes the harness work for both local dev (no env) and CI (env-stacked).
+#   - Otherwise, defaults to the in-repo deploy/docker-compose.yml.
+#   So the harness works for both local dev (no env) and CI (env-stacked).
 #
-# Python3 requirement: this harness uses `python3` only on the EXECUTOR side
-# (CI runner OR developer workstation) for ONE JSON parse — extracting the
-# controller image reference from `docker compose config --format json`.
-# This is NOT a requirement on operator hosts running `naiw-tasks` — operator
-# hosts only need Docker; python3 is used only for parsing convenience inside
-# this smoke harness.
+# Python3 is required ONLY for one JSON parse below (controller image ref
+# from `docker compose config --format json`). It is NOT a runtime requirement
+# on operator hosts running `naiw-tasks` — those only need Docker.
 #
-# SKIP-on-non-Linux: matches Phase-2.5 hardened-smoke pattern. Manual happy-path
-# attach gate (TTY + Ctrl-P Ctrl-Q + SIGWINCH known-broken) lives in
-# HARDENED-CHECKLIST.md Phase-3.5 section.
+# SKIP-on-non-Linux. Manual happy-path attach gate (TTY + Ctrl-P Ctrl-Q +
+# SIGWINCH known-broken) lives in tests/smoke/HARDENED-CHECKLIST.md.
 
 set -euo pipefail
 
@@ -87,7 +83,7 @@ trap teardown EXIT
 echo "[${LIB_LOG_PREFIX}] 01: docker compose up -d naiw-docker-proxy"
 docker compose "${COMPOSE_ARGS[@]}" up -d naiw-docker-proxy
 
-# Step 02: proxy must NOT have published ports (D-N2 / PROXY-04 revisited).
+# Step 02: proxy must NOT have published ports.
 echo "[${LIB_LOG_PREFIX}] 02: proxy unpublished"
 proxy_ports="$(docker inspect naiw-docker-proxy --format '{{json .HostConfig.PortBindings}}' 2>/dev/null || echo 'null')"
 case "$proxy_ports" in
@@ -95,12 +91,12 @@ case "$proxy_ports" in
         echo "[${LIB_LOG_PREFIX}]     OK: PortBindings=$proxy_ports"
         ;;
     *)
-        echo "[${LIB_LOG_PREFIX}]     FAIL: PortBindings=$proxy_ports (D-N2 violated)" >&2
+        echo "[${LIB_LOG_PREFIX}]     FAIL: proxy must not publish a host port; PortBindings=$proxy_ports" >&2
         exit 1
         ;;
 esac
 
-# Step 03: controller image carries the expected Phase 3.5 labels.
+# Step 03: controller image carries the expected labels.
 echo "[${LIB_LOG_PREFIX}] 03: controller image labels"
 ctrl_image="$(docker compose "${COMPOSE_ARGS[@]}" config --format json | python3 -c \
     "import sys, json; d=json.load(sys.stdin); print(d['services']['naiw-controller']['image'])")"

@@ -112,13 +112,13 @@ def test_attach_passes_proxy_url_via_dash_h(mock_execvpe: MagicMock) -> None:
 def test_attach_passes_internal_dns_url_when_default_proxy_url(
     mock_execvpe: MagicMock,
 ) -> None:
-    """D-N3 sentinel: when the caller passes config.DEFAULT_DOCKER_PROXY_URL,
-    the `-H` value in the spawned docker CLI is `tcp://naiw-docker-proxy:2375`.
+    """Sentinel: when the caller passes config.DEFAULT_DOCKER_PROXY_URL, the
+    `-H` value in the spawned docker CLI is `tcp://naiw-docker-proxy:2375`.
 
     Regression guard against re-introducing the host-localhost default. The
-    attach module itself does not import config — but Phase 3 cli.py / lifecycle.py
-    construct `Config` and pass `cfg.docker_proxy_url` into attach_to_task; this
-    test pins the value Phase 3.5 expects at the wire."""
+    attach module itself does not import config — but cli.py / lifecycle.py
+    construct `Config` and pass `cfg.docker_proxy_url` into attach_to_task;
+    this test pins the value at the wire."""
     from naiw_tasks.attach import attach_to_task
 
     from naiw_tasks import config

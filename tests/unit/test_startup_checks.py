@@ -142,13 +142,13 @@ def test_check_not_on_windows_fs_passes_for_lookalike_paths(
 
 
 # ---------------------------------------------------------------------------
-# D-S3 — NAIW_ACCEPT_WINDOWS_FS_RISK ack semantics
+# NAIW_ACCEPT_WINDOWS_FS_RISK ack semantics
 # ---------------------------------------------------------------------------
 
 
 def test_winfs_check_fatal_without_ack(monkeypatch, capsys, tmp_path):
-    """D-S3: missing/unset ack on a /mnt/<letter>/ path -> fatal exit 2 with
-    opt-in hint. Belt-and-braces over the existing parametrize block."""
+    """Missing/unset ack on a /mnt/<letter>/ path -> fatal exit 2 with
+    opt-in hint."""
     monkeypatch.setattr(
         "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
     )
@@ -169,7 +169,7 @@ def test_winfs_check_fatal_without_ack(monkeypatch, capsys, tmp_path):
 
 
 def test_winfs_check_warn_with_ack(monkeypatch, capsys, tmp_path):
-    """D-S3: ack set + marker absent -> WARNING printed; returns None; marker created."""
+    """Ack set + marker absent -> WARNING printed; returns None; marker created."""
     monkeypatch.setattr(
         "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
     )
@@ -191,7 +191,7 @@ def test_winfs_check_warn_with_ack(monkeypatch, capsys, tmp_path):
 
 
 def test_winfs_warn_marker_suppression(monkeypatch, capsys, tmp_path):
-    """D-S3: ack set + marker pre-exists -> returns None; stderr empty (suppressed)."""
+    """Ack set + marker pre-exists -> returns None; stderr empty (suppressed)."""
     monkeypatch.setattr(
         "naiw_tasks.startup_checks.platform.system", lambda: "Linux"
     )
@@ -210,7 +210,7 @@ def test_winfs_warn_marker_suppression(monkeypatch, capsys, tmp_path):
 
 @pytest.mark.parametrize("ack_value", ["true", "yes", "0", " 1", "1 ", "TRUE", ""])
 def test_winfs_check_only_exact_one_acks(monkeypatch, ack_value, tmp_path):
-    """D-S3 exact-match semantics: only the literal string '1' enables the ack.
+    """Exact-match semantics: only the literal string '1' enables the ack.
     Truthy-looking strings (true/yes), padded values, and even the empty string
     must NOT bypass the fatal branch."""
     monkeypatch.setattr(

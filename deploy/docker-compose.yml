@@ -33,12 +33,9 @@ services:
     container_name: naiw-docker-proxy
     restart: unless-stopped
     networks: [naiw-internal]
-    # No host port published. Phase 3.5 (D-N2) reverts the localhost publish
-    # that briefly existed for the host-installed naiw-tasks CLI: the controller
-    # now runs as a sibling service on `naiw-internal` and reaches this proxy
-    # via internal DNS at tcp://naiw-docker-proxy:2375. Reachability is
-    # network-scoped, not host-scoped. See deploy/proxy/README.md (rewritten
-    # in this phase) for the new trust-boundary narrative.
+    # No host port published. Controller is a sibling on `naiw-internal` and
+    # reaches the proxy via internal DNS (tcp://naiw-docker-proxy:2375);
+    # reachability is network-scoped, not host-scoped. See deploy/proxy/README.md.
     # Socket mounted READ-ONLY.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -50,11 +47,11 @@ services:
       ALLOW_STOP: "1"            # POST /containers/<id>/stop
       ALLOW_RESTARTS: "1"        # stop/restart/kill (controller `finish` path)
       # ── Everything else explicit "0" (paranoid-explicit). Alphabetical. ──
-      # NOTE: pause/unpause are NOT gated by Tecnativa v0.4.2 — there are no
-      # ALLOW_PAUSE / ALLOW_UNPAUSE env-vars in this image; requests pass
-      # through to Docker. Acceptable here because the controller never pauses
-      # task containers (HARD-10: recovery is operator-driven). Revisit if we
-      # ever switch to wollomatic/socket-proxy, which supports regex allowlisting.
+      # NOTE: pause/unpause are NOT gated by Tecnativa v0.4.2 — no
+      # ALLOW_PAUSE/ALLOW_UNPAUSE env-vars; requests pass through to Docker.
+      # Acceptable because the controller never pauses task containers
+      # (recovery is operator-driven). Revisit if switching to
+      # wollomatic/socket-proxy which supports regex allowlisting.
       AUTH: "0"
       BUILD: "0"
       COMMIT: "0"
@@ -83,31 +80,34 @@ services:
     # TCP-level probe (see deploy/proxy/README.md).
 
   naiw-controller:
-    # Local-build tag for development; CI workflow .github/workflows/build-images.yml
-    # pushes ghcr.io/d954mas/naiw-controller:<tag> and P05 replaces this tag with
-    # an @sha256:<digest> pin once the first successful push lands.
-    image: naiw-controller:latest
+    # GHCR-published image. Currently tag-pinned to :latest so `docker compose
+    # pull` resolves against ghcr after the first master push. The README
+    # promises a digest pin (image: ghcr.io/d954mas/naiw-controller@sha256:...)
+    # — operator action after the first successful build (see README
+    # "Distribution" section).
+    # For local dev: `bash scripts/build-controller.sh` tags the local build
+    # with this same GHCR ref, so `docker compose run` reuses the local image
+    # without re-pulling.
+    image: ghcr.io/d954mas/naiw-controller:latest
     container_name: naiw-controller
-    # Controller is one-shot per D-R1: every `naiw-tasks` call spawns a fresh
-    # container via `docker compose run --rm`. No `command:` here — the
-    # ENTRYPOINT in image/controller.Dockerfile is `naiw-tasks`; positional
-    # args from `compose run` become the subcommand.
+    # Controller is one-shot: every `naiw-tasks` call spawns a fresh container
+    # via `docker compose run --rm`. No `command:` — the ENTRYPOINT in
+    # image/controller.Dockerfile is `naiw-tasks` and positional args from
+    # `compose run` become the subcommand.
     networks: [naiw-internal]
     depends_on:
       - naiw-docker-proxy
     volumes:
-      # Bind-mount source resolves via the operator's shell env. The wrapper
-      # script (scripts/install-wrapper.sh, P03) passes the same NAIW_DATA
-      # via `-e NAIW_DATA=...` so the in-container path stays /naiw-data.
+      # Bind-mount source resolves via the operator's shell env. In-container
+      # path stays /naiw-data via the service-level `environment:` below.
       - ${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data
     environment:
-      # NAIW_DATA inside the container is always /naiw-data (the bind mount
-      # target). Operator's host-side $NAIW_DATA controls the SOURCE.
+      # In-container NAIW_DATA is always /naiw-data (the mount target);
+      # operator's host-side $NAIW_DATA controls the bind-mount SOURCE.
       NAIW_DATA: /naiw-data
-      # Belt-and-braces: config.py default flips to this in P04, but the env
-      # var is the operator-visible override path (Phase 3 D-18).
+      # Operator-visible override path; config.py also reads this env var.
       NAIW_DOCKER_PROXY_URL: tcp://naiw-docker-proxy:2375
-    # D-H1 hardening (controller-scoped — smaller limits than task containers
+    # Hardening (controller-scoped — smaller limits than task containers
     # because the controller does not run Pi or build wheels at runtime).
     cap_drop: [ALL]
     security_opt: [no-new-privileges]

@@ -90,9 +90,14 @@ jobs:
         with:
           context: .
           file: image/controller.Dockerfile
+          # Tag with the GHCR ref so the deploy/docker-compose.yml reference
+          # (ghcr.io/d954mas/naiw-controller:latest) resolves against the
+          # just-built image without a compose override. The bare local tags
+          # are kept for parity with scripts/build-controller.sh.
           tags: |
             naiw-controller:0.1.0
             naiw-controller:latest
+            ghcr.io/d954mas/naiw-controller:latest
           build-args: |
             NAIW_VERSION=0.1.0
             NAIW_GIT_SHA=${{ github.sha }}
@@ -103,28 +108,11 @@ jobs:
       - name: Proxy smoke (no pytest wrapper)
         run: bash tests/smoke/run-proxy-smoke.sh
 
-      # Production compose pins naiw-controller by sha256 (.github/workflows/build-images.yml
-      # from Phase 3.5 P05). For CI we test the just-built local image instead. The override
-      # drops `image:` back to the local-build tag; everything else (hardening, networks,
-      # volumes, env) inherits from deploy/docker-compose.yml via compose's standard override
-      # merging triggered by the COMPOSE_FILE env var on the next step. The
-      # run-containerized-smoke.sh harness (Phase 3.5 P06) reads $COMPOSE_FILE and passes
-      # no `-f` flag in that case — docker compose merges the two files natively.
-      - name: Override controller image in compose for CI (local build)
-        run: |
-          cat > deploy/compose.override.yml <<'OVR'
-          services:
-            naiw-controller:
-              image: naiw-controller:latest
-          OVR
-
       # pytest -m smoke runs test_image.py, test_hardened.py, and
       # test_containerized.py — each invokes its bash harness via subprocess.
       # One step verifies both the bash scripts AND the pytest wrappers — no
-      # duplication. COMPOSE_FILE env stacks the local-build override on top
-      # of the production compose file; the containerized harness omits its
-      # own `-f` when this env is set so the stacking actually takes effect.
+      # duplication. The `Build naiw-controller` step above tags the local
+      # build with the same GHCR ref the compose file pins to, so no override
+      # file is needed and `docker compose run` resolves to the local image.
       - name: Image + hardened + containerized smoke via pytest
-        env:
-          COMPOSE_FILE: deploy/docker-compose.yml:deploy/compose.override.yml
         run: pytest tests/smoke/ -v -m smoke

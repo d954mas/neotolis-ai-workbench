@@ -1,17 +1,11 @@
 # syntax=docker/dockerfile:1
-# Phase 3.5 controller image. Multi-stage: builder produces wheels for
-# naiw_common + naiw_tasks; runtime installs them plus git and docker-ce-cli
-# (for `os.execvpe attach` from naiw_tasks/attach.py).
+# Controller image. Multi-stage: builder produces wheels for naiw_common +
+# naiw_tasks; runtime installs them plus git and docker-ce-cli (for
+# `os.execvpe attach` from naiw_tasks/attach.py).
 #
-# Mirrors image/Dockerfile (Phase 1 task image) so the project stays internally
-# consistent: same builder/runtime split, same LABEL block shape, same useradd
-# pattern, same env hygiene (UTF-8 + DEBIAN_FRONTEND).
-#
-# This image is invoked one-shot per `naiw-tasks` call by the host wrapper
-# (scripts/install-wrapper.sh / Phase 3.5 P03) via:
-#   docker compose run --rm -it --user "$(id -u):$(id -g)" naiw-controller ...
-# The compose service definition (deploy/docker-compose.yml / Phase 3.5 P02)
-# applies the hardening flags (cap_drop ALL, read_only, tmpfs, pids/cpu/mem).
+# Mirrors image/Dockerfile (task image) for internal consistency. Invoked
+# one-shot per `naiw-tasks` call by the host wrapper (scripts/install-wrapper.sh)
+# via `docker compose run --rm`. Hardening flags live on the compose service.
 
 ARG NAIW_VERSION=0.1.0
 ARG NAIW_GIT_SHA=unknown
@@ -25,14 +19,10 @@ COPY src/naiw_tasks/ ./naiw_tasks/
 RUN python -m build --wheel --outdir /wheels ./naiw_common && \
     python -m build --wheel --outdir /wheels ./naiw_tasks
 
-# ── Stage 2: runtime — python:3.12-slim-bookworm (tag form for this plan) ──
-# To refresh the base image digest:
+# ── Stage 2: runtime ──
+# Tag-only base. To refresh and pin by digest:
 #   docker pull python:3.12-slim-bookworm
 #   docker inspect --format='{{index .RepoDigests 0}}' python:3.12-slim-bookworm
-# The @sha256:... digest pin is intentionally deferred to Phase 3.5 P05 (ghcr
-# build-push workflow) — CI resolves and stamps the digest as part of the first
-# published build. Until then the tag form below is acceptable per the P01
-# plan (Phase 3.5 RESEARCH Pattern 1 skeleton uses <RESOLVE_AT_BUILD_TIME>).
 FROM python:3.12-slim-bookworm AS final
 
 ARG NAIW_VERSION
@@ -41,8 +31,8 @@ ARG NAIW_GIT_SHA
 # HOME=/tmp/naiw-home — when wrapper passes `--user UID:GID`, /etc/passwd has
 # no entry for the operator UID; setting HOME explicitly makes Python's
 # expanduser('~') and git's ~/.gitconfig lookup work without a passwd entry.
-# /tmp is tmpfs-backed at runtime per D-H1. DOCKER_API_VERSION pins the docker
-# CLI to API 1.43, matching naiw_tasks.docker_client.PINNED_DOCKER_API_VERSION.
+# /tmp is tmpfs-backed at runtime. DOCKER_API_VERSION pins the docker CLI to
+# API 1.43, matching naiw_tasks.docker_client.PINNED_DOCKER_API_VERSION.
 # PYTHONDONTWRITEBYTECODE=1 silences pyc-write failures under read_only:true
 # rootfs (compileall below installs them once at build time).
 ENV DEBIAN_FRONTEND=noninteractive \

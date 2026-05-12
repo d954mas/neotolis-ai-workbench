@@ -7,13 +7,10 @@ from pathlib import Path
 import yaml
 
 SCHEMA_VERSION: int = 1
-# Phase 3.5 D-N3: proxy is no longer published to 127.0.0.1; the controller runs
-# as a sibling service on `naiw-internal` and reaches the proxy via internal DNS.
-# Operator override path via $NAIW_DATA/config.yaml stays the same (Phase 3 D-18).
+# Default proxy URL. Internal DNS name from `naiw-internal`; operator override
+# via NAIW_DOCKER_PROXY_URL env or `docker_proxy_url` in ~/naiw-data/config.yaml.
 DEFAULT_DOCKER_PROXY_URL: str = "tcp://naiw-docker-proxy:2375"
-# Phase 3.5 D-D3: task image is published to ghcr by .github/workflows/build-images.yml
-# (P05). Deploy story is symmetric: `docker compose pull` fetches both controller
-# and task image. Operator override path via $NAIW_DATA/config.yaml stays the same.
+# Mutable :latest tag. Operator may pin to @sha256:<digest> via config.yaml.
 DEFAULT_TASK_IMAGE: str = "ghcr.io/d954mas/naiw-task-image:latest"
 
 # Whitelist drives the typo-rejection error message — keep keys in sync with Config fields.
@@ -92,14 +89,9 @@ def load() -> Config:
             f"(controller supports schema_version={SCHEMA_VERSION})"
         )
 
-    # Type-check string fields here so a bad value (`docker_proxy_url: null`,
-    # `task_image: 123`) surfaces as a schema error from this loader, not as
-    # a raw TypeError later when the value reaches docker.DockerClient or
-    # client.containers.run. Default values are not subject to the check —
-    # an absent key falls back to the typed DEFAULT_* constants. The YAML
-    # value is validated even when NAIW_DOCKER_PROXY_URL overrides it so a
-    # broken config.yaml is caught at load time, not when the env var is
-    # unset months later.
+    # Type-check string fields so bad YAML surfaces here, not later at
+    # docker.DockerClient or client.containers.run. The yaml value is checked
+    # even when env-override wins, so a broken config.yaml is caught up front.
     if "docker_proxy_url" in raw and (
         not isinstance(raw["docker_proxy_url"], str) or not raw["docker_proxy_url"]
     ):

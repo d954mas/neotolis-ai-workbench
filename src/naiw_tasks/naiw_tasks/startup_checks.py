@@ -37,14 +37,10 @@ _IMAGE_PI_UID: int = 1000
 # virtiofs/9P). Original /mnt/c/-only check was a false-negative on /mnt/d/ etc.
 _WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[a-z]/")
 
-# Phase 3.5 D-S3: WinFS warning + sticky env-var ack. Exact match on "1"
-# (not truthy) so accidental settings like "true" / "yes" / "0" still raise.
 _NAIW_ACK_ENV_VAR: str = "NAIW_ACCEPT_WINDOWS_FS_RISK"
-# Marker lives on the bind-mounted data root (host filesystem), NOT on the
-# container's /tmp tmpfs. The controller is one-shot (D-R1) so a tmpfs marker
-# would reset on every `docker compose run --rm` and the WARNING would print
-# on every invocation. Anchoring under /naiw-data persists across runs and
-# gives true "warn once per (operator-host, data-root) pairing" semantics.
+# Marker lives on the bind-mounted data root (NOT /tmp): the controller is
+# one-shot, so a tmpfs marker would reset on every `compose run --rm` and the
+# WARNING would print on every invocation instead of once per data-root.
 _WINFS_ACK_MARKER: Path = Path("/naiw-data/.naiw-winfs-acked")
 
 
@@ -72,16 +68,15 @@ def check_naiw_data_not_symlink(data_root: Path) -> None:
 def check_not_on_windows_fs_on_linux(data_root: Path) -> None:
     """Warn (or fatal) when ~/naiw-data/ resolves under /mnt/<letter>/ on Linux.
 
-    Phase 3.5 D-S3 behavior matrix:
+    Behavior matrix:
       - Not on Linux                                -> no-op.
       - Path does not match /mnt/<letter>/          -> no-op.
       - Matches AND NAIW_ACCEPT_WINDOWS_FS_RISK!='1'-> StartupCheckFailed (exit 2).
       - Matches AND NAIW_ACCEPT_WINDOWS_FS_RISK=='1'-> one-time WARNING; return None.
 
-    The opt-in env var is sticky (operator sets it in their shell rc). Suppression
-    of repeated warnings uses the /tmp tmpfs marker (D-H1 ensures /tmp is tmpfs);
-    fresh `docker compose run --rm` resets the marker, so each new container
-    surfaces the WARNING once. Production VPS on Linux ext4 never trips this branch.
+    Warning suppression via the bind-mounted marker — fires once per
+    (operator-host, data-root), not once per controller invocation. Production
+    Linux ext4 never trips this branch.
     """
     if platform.system() != "Linux":
         return

@@ -16,13 +16,10 @@
 #         sudo install -d /etc/naiw
 #         sudo cp deploy/docker-compose.yml /etc/naiw/docker-compose.yml
 #   - `docker compose -f /etc/naiw/docker-compose.yml pull` once at install time
-#     (CI workflow build-images.yml from P05 publishes naiw-controller to ghcr).
+#     (CI workflow build-images.yml publishes naiw-controller to ghcr).
 #
-# If you previously ran the host-CLI installer (deprecated `scripts/install-controller.sh`,
-# now removed), uninstall the pipx package first:
-#     pipx uninstall naiw_tasks  # or: uv tool uninstall naiw_tasks
-# The previous phase was not deployed to production (CONTEXT.md D-M1 overrides ROADMAP SC #5),
-# so a separate migration doc is intentionally not provided.
+# If you previously ran the host-CLI installer (deprecated, removed), uninstall
+# the pipx package: `pipx uninstall naiw_tasks` (or `uv tool uninstall`).
 
 set -euo pipefail
 
@@ -42,8 +39,8 @@ EOF
     exit 0
 fi
 
-# Pitfall 8 — running install-wrapper.sh under sudo would set HOME=/root and
-# bake /root/.local/bin into the operator's wrapper.
+# Running under sudo would set HOME=/root and bake /root/.local/bin into the
+# operator's wrapper. Refuse.
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
     echo "[install] ERROR: do not run install-wrapper.sh as root" >&2
     echo "[install]   The wrapper relies on \$HOME and \$NAIW_DATA from the" >&2
@@ -115,8 +112,19 @@ fi
 # Operator-tunable env vars forwarded via `-e VAR_NAME` (no `=value`): compose
 # reads the current value from the wrapper's env if set, or skips the var
 # entirely if unset, which lets the service-level defaults stand.
+#
+# TTY allocation: -it works only when stdin AND stdout are both terminals.
+# When invoked from cron, a pipe, systemd unit, or any non-interactive
+# context, -t would fail with "the input device is not a TTY". Detect once
+# and pick -T (no-TTY) for non-interactive callers.
+if [[ -t 0 && -t 1 ]]; then
+    tty_args=(-i -t)
+else
+    tty_args=(-T)
+fi
+
 exec docker compose -f "$COMPOSE_FILE" \
-    run --rm -it \
+    run --rm "${tty_args[@]}" \
     --user "$(id -u):$(id -g)" \
     -e NAIW_ACCEPT_WINDOWS_FS_RISK \
     -e NAIW_DOCKER_PROXY_URL \
@@ -127,10 +135,9 @@ WRAPPER
 chmod 0755 "$WRAPPER_PATH"
 echo "[install] wrote $WRAPPER_PATH"
 
-# Pitfall 5 — pre-pull the task image so the first `naiw-tasks start` doesn't
-# block on a cold GHCR fetch on a fresh VPS. Non-fatal: GHCR may be unreachable
-# (private repo / network policy / CI not yet published) and the first start
-# will retry the pull anyway.
+# Pre-pull task image so the first `naiw-tasks start` doesn't block on a cold
+# GHCR fetch. Non-fatal: GHCR may be unreachable (private repo, network policy,
+# CI not yet published) — the first start will retry the pull anyway.
 echo "[install] pulling $TASK_IMAGE_REF"
 if ! docker pull "$TASK_IMAGE_REF"; then
     echo "[install] WARN: failed to pull $TASK_IMAGE_REF" >&2

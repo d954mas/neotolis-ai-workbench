@@ -31,7 +31,12 @@ DOCKER_BUILDKIT=1 docker build \
     --build-arg "NAIW_GIT_SHA=$NAIW_GIT_SHA" \
     -t "naiw-controller:$NAIW_VERSION" \
     -t "naiw-controller:latest" \
+    -t "ghcr.io/d954mas/naiw-controller:$NAIW_VERSION" \
+    -t "ghcr.io/d954mas/naiw-controller:latest" \
     -f image/controller.Dockerfile \
     .
 
-echo "naiw-build-controller: built naiw-controller:$NAIW_VERSION and :latest"
+# Tag the GHCR ref too so deploy/docker-compose.yml (which pins to
+# ghcr.io/d954mas/naiw-controller:latest for production-pull) finds the local
+# build without an additional `docker compose pull` step.
+echo "naiw-build-controller: built naiw-controller:$NAIW_VERSION + :latest + ghcr.io/d954mas/naiw-controller:$NAIW_VERSION + :latest"

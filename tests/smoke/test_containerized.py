@@ -1,9 +1,9 @@
-"""Phase 3.5 containerized-loop smoke wrapper.
+"""Containerized-loop smoke wrapper.
 
 Mirrors tests/smoke/test_hardened.py: invokes run-containerized-smoke.sh via
 subprocess and asserts returncode 0. Linux-only marker keeps Windows pytest
-collection clean. Belt-and-braces unit-style tests cover the proxy-no-port and
-controller-label invariants so a partial harness failure pinpoints the cause.
+collection clean. Two unit-style spot-checks (proxy-no-port and controller
+image labels) pinpoint the cause when the harness fails as a black box.
 """
 
 import json
@@ -43,7 +43,7 @@ def test_containerized_smoke_harness_passes():
 @pytest.mark.smoke
 @pytest.mark.linux_only
 def test_proxy_unpublished_via_inspect():
-    """Spot-check D-N2: proxy has no HostConfig.PortBindings."""
+    """Spot-check: proxy has no HostConfig.PortBindings."""
     if not _docker_available():
         pytest.skip("docker CLI not on PATH")
     subprocess.run(
@@ -56,14 +56,14 @@ def test_proxy_unpublished_via_inspect():
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     assert out in ("{}", "null", ""), (
-        f"D-N2 / PROXY-04 violated: proxy has port bindings: {out!r}"
+        f"proxy must not publish a host port; got bindings: {out!r}"
     )
 
 
 @pytest.mark.smoke
 @pytest.mark.linux_only
 def test_controller_image_labels():
-    """IMG-10: controller image carries the expected label set."""
+    """Controller image carries the expected label set."""
     if not _docker_available():
         pytest.skip("docker CLI not on PATH")
     cfg = subprocess.run(

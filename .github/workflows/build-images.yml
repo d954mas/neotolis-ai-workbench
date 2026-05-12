@@ -1,9 +1,8 @@
 name: build-images
 
-# Builds and pushes both images to ghcr on master pushes, git tags, and manual
-# dispatch. Phase 3.5 D-D1 (controller via ghcr) + D-D3 (task image via ghcr).
-# The Tecnativa proxy is NOT in this matrix — it is a third-party image pinned
-# by sha256 in deploy/docker-compose.yml and never rebuilt by us.
+# Builds and pushes both naiw images to ghcr on master pushes, git tags, and
+# manual dispatch. The Tecnativa proxy is NOT in this matrix — it is a
+# third-party image pinned by sha256 in deploy/docker-compose.yml.
 
 on:
   push:
@@ -68,7 +67,7 @@ jobs:
             NAIW_VERSION=0.1.0
             NAIW_GIT_SHA=${{ github.sha }}
             ${{ matrix.image == 'naiw-task-image' && format('PI_VERSION={0}', steps.pi.outputs.version) || '' }}
-          # Per-image cache scope: a naiw-task-image rebuild does not bust the
-          # naiw-controller cache and vice versa (CLAUDE.md / RESEARCH Pattern 4).
+          # Per-image cache scope: rebuilds of one image do not bust the
+          # other's cache.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}

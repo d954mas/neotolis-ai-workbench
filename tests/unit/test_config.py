@@ -133,17 +133,15 @@ def test_default_data_root_is_home_when_env_unset(
 
 
 def test_default_docker_proxy_url_uses_internal_dns(tmp_naiw_data: Path) -> None:
-    """D-N3: default proxy URL is the internal DNS name of the proxy service.
-    Sentinel against a regression that reintroduces the host-published 127.0.0.1:2375
-    pattern (Phase 3 round-4 trust-boundary surface that 3.5 closes)."""
+    """Default proxy URL is the internal DNS name. Sentinel against a regression
+    that reintroduces the host-published 127.0.0.1:2375 pattern."""
     cfg = config_mod.load()
     assert cfg.docker_proxy_url == "tcp://naiw-docker-proxy:2375"
 
 
 def test_default_task_image_uses_ghcr(tmp_naiw_data: Path) -> None:
-    """D-D3: default task image is the ghcr-published artifact. Sentinel against
-    a regression that reintroduces `naiw-task-image:latest` (the local-build
-    name that assumed `bash scripts/build-image.sh` ran on every operator host)."""
+    """Default task image is the ghcr-published artifact. Sentinel against a
+    regression that reintroduces a local-build name like `naiw-task-image:latest`."""
     cfg = config_mod.load()
     assert cfg.task_image == "ghcr.io/d954mas/naiw-task-image:latest"
 
