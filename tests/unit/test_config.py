@@ -24,8 +24,8 @@ def test_naiw_data_env_expands_tilde(monkeypatch, tmp_path) -> None:
 def test_load_defaults_when_no_config_file(tmp_naiw_data: Path) -> None:
     cfg = config_mod.load()
     assert cfg.data_root == tmp_naiw_data
-    assert cfg.docker_proxy_url == "tcp://127.0.0.1:2375"
-    assert cfg.task_image == "naiw-task-image:latest"
+    assert cfg.docker_proxy_url == "tcp://naiw-docker-proxy:2375"
+    assert cfg.task_image == "ghcr.io/d954mas/naiw-task-image:latest"
 
 
 def test_load_reads_config_yaml(tmp_naiw_data: Path) -> None:
@@ -130,3 +130,19 @@ def test_default_data_root_is_home_when_env_unset(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     cfg = config_mod.load()
     assert cfg.data_root == tmp_path / "naiw-data"
+
+
+def test_default_docker_proxy_url_uses_internal_dns(tmp_naiw_data: Path) -> None:
+    """D-N3: default proxy URL is the internal DNS name of the proxy service.
+    Sentinel against a regression that reintroduces the host-published 127.0.0.1:2375
+    pattern (Phase 3 round-4 trust-boundary surface that 3.5 closes)."""
+    cfg = config_mod.load()
+    assert cfg.docker_proxy_url == "tcp://naiw-docker-proxy:2375"
+
+
+def test_default_task_image_uses_ghcr(tmp_naiw_data: Path) -> None:
+    """D-D3: default task image is the ghcr-published artifact. Sentinel against
+    a regression that reintroduces `naiw-task-image:latest` (the local-build
+    name that assumed `bash scripts/build-image.sh` ran on every operator host)."""
+    cfg = config_mod.load()
+    assert cfg.task_image == "ghcr.io/d954mas/naiw-task-image:latest"
