@@ -59,18 +59,26 @@ for i in $(seq 1 30); do
 done
 [[ "$ready" -eq 1 ]] || fail "proxy did not accept allowed requests within 30s"
 
-# Verify the proxy IS reachable on 127.0.0.1:2375 (host CLI contract) but NOT
-# on any non-localhost address (LAN exposure regression).
-echo "[proxy-smoke] verifying host-side localhost binding"
-host_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
-    http://127.0.0.1:2375/v1.43/containers/json 2>/dev/null || echo "000")"
-[[ "$host_code" == "200" ]] \
-    || fail "proxy not reachable from host on 127.0.0.1:2375 (got $host_code); the host CLI contract requires this binding"
+# Verify the proxy publishes NO host port (Phase 3.5 D-N2 / PROXY-04 revisited).
+# The previous Phase-3 contract bound 127.0.0.1:2375 for the host-CLI; Phase 3.5
+# moves the controller into the naiw-internal network and unpublishes the port,
+# so the proxy is reachable only via the sibling-container probe above.
+echo "[proxy-smoke] verifying proxy has no published host port"
+proxy_ports="$(docker inspect naiw-docker-proxy --format '{{json .HostConfig.PortBindings}}' 2>/dev/null || echo 'null')"
+case "$proxy_ports" in
+    "{}"|"null"|"")
+        echo "[proxy-smoke] OK: PortBindings=$proxy_ports"
+        ;;
+    *)
+        fail "proxy has unexpected host PortBindings=$proxy_ports (D-N2 / PROXY-04 violated)"
+        ;;
+esac
 
-# Negative: any `ports:` entry that publishes to a non-localhost address is a
-# security regression. Accepts only 127.0.0.1 / [::1] prefixes.
-# awk scopes the scan to the actual ports: block — a previous grep -A approach
-# ran past the block boundary and false-flagged the volumes mount entry.
+# Belt-and-braces compose-source check: any non-localhost `ports:` entry on
+# any service in deploy/docker-compose.yml is a security regression. Accepts
+# only 127.0.0.1 / [::1] prefixes. With Phase 3.5 D-N2 the naiw-docker-proxy
+# service has no `ports:` block at all; this scan stays as defense-in-depth
+# in case a future service adds one.
 suspicious_ports="$(awk '
     in_ports && /^[[:space:]]+-[[:space:]]/ {
         line=$0
