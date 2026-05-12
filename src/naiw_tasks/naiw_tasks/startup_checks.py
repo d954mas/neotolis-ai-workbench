@@ -36,6 +36,14 @@ _IMAGE_PI_UID: int = 1000
 # virtiofs/9P). Original /mnt/c/-only check was a false-negative on /mnt/d/ etc.
 _WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[a-z]/")
 
+# Phase 3.5 D-S3: WinFS warning + sticky env-var ack. Exact match on "1"
+# (not truthy) so accidental settings like "true" / "yes" / "0" still raise.
+_NAIW_ACK_ENV_VAR: str = "NAIW_ACCEPT_WINDOWS_FS_RISK"
+# Marker lives on the controller container's tmpfs (/tmp is tmpfs per D-H1),
+# so it resets on every fresh `docker compose run --rm`. Suppresses the WARNING
+# noise to once per controller invocation, not once per shell session.
+_WINFS_ACK_MARKER: Path = Path("/tmp/.naiw-winfs-acked")
+
 
 class StartupCheckFailed(SystemExit):
     """Exit 2 with a `naiw-tasks: ` stderr prefix."""
@@ -59,15 +67,49 @@ def check_naiw_data_not_symlink(data_root: Path) -> None:
 
 
 def check_not_on_windows_fs_on_linux(data_root: Path) -> None:
+    """Warn (or fatal) when ~/naiw-data/ resolves under /mnt/<letter>/ on Linux.
+
+    Phase 3.5 D-S3 behavior matrix:
+      - Not on Linux                                -> no-op.
+      - Path does not match /mnt/<letter>/          -> no-op.
+      - Matches AND NAIW_ACCEPT_WINDOWS_FS_RISK!='1'-> StartupCheckFailed (exit 2).
+      - Matches AND NAIW_ACCEPT_WINDOWS_FS_RISK=='1'-> one-time WARNING; return None.
+
+    The opt-in env var is sticky (operator sets it in their shell rc). Suppression
+    of repeated warnings uses the /tmp tmpfs marker (D-H1 ensures /tmp is tmpfs);
+    fresh `docker compose run --rm` resets the marker, so each new container
+    surfaces the WARNING once. Production VPS on Linux ext4 never trips this branch.
+    """
     if platform.system() != "Linux":
         return
     resolved = str(data_root.resolve())
-    if _WINDOWS_FS_ON_LINUX_RE.match(resolved):
+    if not _WINDOWS_FS_ON_LINUX_RE.match(resolved):
+        return
+
+    if os.environ.get(_NAIW_ACK_ENV_VAR) != "1":
         raise StartupCheckFailed(
             f"~/naiw-data/ on Windows-FS path {resolved!r} is not supported "
-            f"(Docker Desktop virtiofs/9P semantics); "
-            f"move to a Linux-FS path on WSL2"
+            f"(Docker Desktop virtiofs/9P breaks fcntl.flock atomicity, "
+            f"os.replace non-atomic, chmod 0600 ignored on NTFS). "
+            f"To proceed anyway for local dev, set {_NAIW_ACK_ENV_VAR}=1 in your shell."
         )
+
+    if _WINFS_ACK_MARKER.exists():
+        return
+    print(
+        f"naiw-tasks: WARNING - ~/naiw-data/ on Windows-FS path {resolved!r}; "
+        f"running with {_NAIW_ACK_ENV_VAR}=1. Known risks: fcntl.flock races, "
+        f"os.replace non-atomicity, chmod 0600 ignored on NTFS. Suitable for "
+        f"single-task local dev only; do NOT use for production.",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        _WINFS_ACK_MARKER.touch()
+    except OSError:
+        # Marker creation failures (read-only /tmp) make the warning print every
+        # invocation - annoying but not broken. Stay silent here.
+        pass
 
 
 def check_docker_reachable(client, proxy_url: str) -> None:
