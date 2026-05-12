@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naiw_tasks"
+version = "0.1.0"
+description = "NAIW controller — start/attach/finish hardened per-task Docker sessions."
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+dependencies = [
+    # 8.3 removed CliRunner(mix_stderr=...) from the public API; pin >=8.3
+    # so CI / pipx installs match the API used by tests and runtime.
+    "click>=8.3,<9",
+    "docker>=7.1,<8",
+    "PyYAML>=6.0,<7",
+    # In-repo wire-format library. naiw_common is NOT published to any index;
+    # operators install via `scripts/install-controller.sh` which provisions
+    # both packages into the same pipx/uv tool venv via --pip-args / --with.
+    # A bare `pipx install -e ./src/naiw_tasks` would fail to resolve this dep
+    # — that's by design; the script enforces the correct multi-editable
+    # install path. See README "Controller contract" for details.
+    "naiw_common>=0.1.0",
+]
+
+[project.scripts]
+naiw-tasks = "naiw_tasks.cli:cli"
+
+[tool.setuptools]
+packages = ["naiw_tasks"]

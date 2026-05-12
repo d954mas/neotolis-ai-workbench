@@ -8,9 +8,11 @@ version = "0.1.0"
 description = "NAIW signal CLI — append done/fail/wait events to /io/.naiw/events.jsonl."
 requires-python = ">=3.11"
 license = { text = "MIT" }
-readme = "../../README.md"
 dependencies = [
-    "click>=8.2,<9",
+    # 8.3 removed CliRunner(mix_stderr=...) from the public API and made
+    # stderr always-separate. Tests use the new shape; pin >=8.3 so a
+    # mismatched 8.2 install does not silently break TypeError'ing under CI.
+    "click>=8.3,<9",
     "naiw_common>=0.1.0",
 ]
 

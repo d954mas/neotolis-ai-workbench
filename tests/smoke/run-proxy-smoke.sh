@@ -59,9 +59,31 @@ for i in $(seq 1 30); do
 done
 [[ "$ready" -eq 1 ]] || fail "proxy did not accept allowed requests within 30s"
 
-# Verify no host port is published — inspect compose-rendered config for `ports:`.
-if docker compose -f "$compose_file" config | grep -E '^\s*ports:'; then
-    fail "compose has 'ports:' mapping (host port leaked)"
+# Verify the proxy IS reachable on 127.0.0.1:2375 (host CLI contract) but NOT
+# on any non-localhost address (LAN exposure regression).
+echo "[proxy-smoke] verifying host-side localhost binding"
+host_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+    http://127.0.0.1:2375/v1.43/containers/json 2>/dev/null || echo "000")"
+[[ "$host_code" == "200" ]] \
+    || fail "proxy not reachable from host on 127.0.0.1:2375 (got $host_code); the host CLI contract requires this binding"
+
+# Negative: any `ports:` entry that publishes to a non-localhost address is a
+# security regression. Accepts only 127.0.0.1 / [::1] prefixes.
+# awk scopes the scan to the actual ports: block — a previous grep -A approach
+# ran past the block boundary and false-flagged the volumes mount entry.
+suspicious_ports="$(awk '
+    in_ports && /^[[:space:]]+-[[:space:]]/ {
+        line=$0
+        sub(/^[[:space:]]+-[[:space:]]*"?/, "", line)
+        sub(/"?[[:space:]]*$/, "", line)
+        if (line !~ /^127\.0\.0\.1:/ && line !~ /^\[::1\]:/) print line
+        next
+    }
+    in_ports { in_ports=0 }
+    /^[[:space:]]+ports:[[:space:]]*$/ { in_ports=1 }
+' "$compose_file" || true)"
+if [[ -n "$suspicious_ports" ]]; then
+    fail "compose has non-localhost port mapping (LAN leak): $suspicious_ports"
 fi
 
 # Sibling container on naiw-internal probes the proxy.

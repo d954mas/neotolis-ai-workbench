@@ -4,7 +4,7 @@ Tecnativa Docker socket proxy. Single point of Docker Engine access for the NAIW
 
 ## Why a proxy?
 
-Mounting `/var/run/docker.sock` directly into any container gives that container root-equivalent access on the host. The controller never mounts the host socket. Instead, controller and proxy share a private bridge network (`naiw-internal`) and the controller talks HTTP to `tcp://naiw-docker-proxy:2375`. The proxy gates every Engine API path; the locked allowlist below is the canonical security boundary.
+Mounting `/var/run/docker.sock` directly into any container or process gives that consumer root-equivalent access on the host. The controller never mounts the host socket. Instead, the proxy lives on a private bridge network (`naiw-internal`), reads the host socket itself (mounted read-only), and exposes a heavily-locked HTTP API. The proxy gates every Engine API path; the locked allowlist below is the canonical security boundary.
 
 See `CLAUDE.md` "What NOT to Use" — direct socket mount is a permanent reject.
 
@@ -14,8 +14,8 @@ Five env vars are set to `"1"`. Everything else (every documented Tecnativa env 
 
 | Env var | Gates | Why allowed |
 |---|---|---|
-| `CONTAINERS=1` | `GET /containers/*` (list, inspect, logs) | `list` and `output` (host-side reads); `inspect` for status reconciliation |
-| `POST=1` | ANY `POST`/`PUT`/`DELETE` (global gate) | Required for `start`/`stop`. Without this, even allow-listed actions fail. |
+| `CONTAINERS=1` | `GET` AND (via `POST=1`) any write method on `/containers/*` (list, inspect, logs, create, **delete**, exec-create) | `list` and `output` (host-side reads); `inspect` for status reconciliation; `create`/`delete` for task lifecycle |
+| `POST=1` | ANY `POST`/`PUT`/`DELETE` on every `*=1` endpoint group above (global gate) | Required for `start`/`stop`/`remove`. Combined with `CONTAINERS=1` it permits `DELETE /containers/<id>?force=true` (used by `container.remove(force=True)` in `finish`). Without this, even allow-listed actions fail. |
 | `ALLOW_START=1` | `POST /containers/<id>/start` | Task `start` |
 | `ALLOW_STOP=1` | `POST /containers/<id>/stop` | Task `finish` |
 | `ALLOW_RESTARTS=1` | stop/restart/kill paths | Task `finish` (graceful stop fallthrough) |
@@ -29,9 +29,29 @@ Flipping any of these to `"1"` is a security regression and MUST go through a do
 ## Network model
 
 - Proxy is on `naiw-internal` (private bridge).
-- **No `ports:` mapping** — proxy never publishes a host port.
-- The controller joins `naiw-internal` and reaches the proxy at `http://naiw-docker-proxy:2375`.
-- Task containers run on a SEPARATE network `naiw-task-net` and do NOT reach the proxy. Task containers have no Docker access.
+- **`ports: ["127.0.0.1:2375:2375"]`** — published to LOCALHOST ONLY. `0.0.0.0:2375` here is a security regression and MUST be rejected in code review.
+- The host-installed controller (`naiw-tasks` CLI via pipx / uv tool) reaches the proxy at `tcp://127.0.0.1:2375`.
+- Task containers run on a SEPARATE network `naiw-task-net` (created by the same compose file) and do NOT reach the proxy. Task containers have no Docker access.
+
+## Trust boundary (operator must read)
+
+TCP localhost on Linux is **not user-scoped** — any process running as **any user on this host** can connect to `127.0.0.1:2375`. Combined with the allowlist below, the effective trust boundary is "same-host processes", NOT "controller only".
+
+What a same-host caller can do via this proxy:
+
+- `POST /containers/create` with arbitrary `Image`, `HostConfig.Binds`, `HostConfig.Privileged: true` — the proxy enforces the endpoint allowlist but NOT the contents of the create request. A side-loaded `--privileged` container with `/:/host` mount is a complete bypass of NAIW's container isolation (which only applies to containers the controller itself builds).
+- `DELETE /containers/<id>?force=true` — `POST=1` is the global write-method gate (POST + PUT + DELETE). Combined with `CONTAINERS=1`, force-remove on any container is allowed. The controller uses this for `container.remove(force=True)` in `finish`; a same-host caller can use it to nuke arbitrary containers, including the operator's other NAIW tasks.
+- `POST /containers/<id>/exec` (CREATE) is under `/containers/*` and **allowed** — an exec instance can be created. Only `/exec/<id>/start` (and resize/json) is blocked by `EXEC=0`, so the instance never actually runs; this still does NOT make the exec surface "fully closed" as a simplified mental model would suggest.
+
+This is the same trust assumption as having the operator's user in the `docker` group: NAIW assumes the operator audits the code they run on this host (npm packages, IDE plugins, browser extensions with native messaging, etc.). The current proxy is **not** "attach/start/stop only" — it is "containers/* + POST + start/stop", which is substantial Docker control surface.
+
+If a deployment cannot make this assumption (multi-user host, untrusted local code), the proxy needs per-name/per-image/per-mount regex allowlisting (e.g., `wollomatic/socket-proxy` instead of `tecnativa/docker-socket-proxy`), or the controller has to move back into `naiw-internal` with no host port published — see "Alternatives Considered" in the project `CLAUDE.md`.
+
+## Locked allowlist — operational summary
+
+`CONTAINERS=1`, `POST=1`, `ALLOW_START=1`, `ALLOW_STOP=1`, `ALLOW_RESTARTS=1`. Everything else (`EXEC`, `IMAGES`, `VOLUMES`, `NETWORKS`, `BUILD`, `INFO`, `EVENTS`, `PING`, `VERSION`, `AUTH`, Swarm-family) is `0` paranoid-explicit. Adding any `=1` is a security regression and MUST go through a documented project-level decision change.
+
+> Note on `EXEC=0`: this gates `/exec/*` paths only — i.e., `POST /exec/<id>/start`, `/exec/<id>/resize`, `GET /exec/<id>/json`. It does **not** gate `POST /containers/<id>/exec` (the create endpoint), which lives under `/containers/*` and goes through `CONTAINERS+POST`. Effective behavior: a caller can create exec instances but cannot start them, so no in-container code execution actually runs — but the API surface is wider than "exec is closed".
 
 ## Healthcheck
 
