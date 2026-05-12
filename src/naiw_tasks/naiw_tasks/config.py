@@ -7,8 +7,14 @@ from pathlib import Path
 import yaml
 
 SCHEMA_VERSION: int = 1
-DEFAULT_DOCKER_PROXY_URL: str = "tcp://127.0.0.1:2375"
-DEFAULT_TASK_IMAGE: str = "naiw-task-image:latest"
+# Phase 3.5 D-N3: proxy is no longer published to 127.0.0.1; the controller runs
+# as a sibling service on `naiw-internal` and reaches the proxy via internal DNS.
+# Operator override path via $NAIW_DATA/config.yaml stays the same (Phase 3 D-18).
+DEFAULT_DOCKER_PROXY_URL: str = "tcp://naiw-docker-proxy:2375"
+# Phase 3.5 D-D3: task image is published to ghcr by .github/workflows/build-images.yml
+# (P05). Deploy story is symmetric: `docker compose pull` fetches both controller
+# and task image. Operator override path via $NAIW_DATA/config.yaml stays the same.
+DEFAULT_TASK_IMAGE: str = "ghcr.io/d954mas/naiw-task-image:latest"
 
 # Whitelist drives the typo-rejection error message — keep keys in sync with Config fields.
 ALLOWED_CONFIG_KEYS: frozenset[str] = frozenset(
