@@ -18,6 +18,7 @@ reclaims disk via `naiw-tasks finish <id> --delete-worktree`.
 
 import logging
 import logging.handlers
+import stat
 import sys
 from contextlib import suppress
 from dataclasses import replace
@@ -87,6 +88,44 @@ def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
         work.mkdir(exist_ok=True)
         work.chmod(0o1777)
     return task_dir
+
+
+def _make_worktree_writable_by_pi(work_path: Path) -> None:
+    """Recursively widen permissions on a freshly-checked-out git worktree
+    so the image's `pi` user (uid 1000, hardcoded in image/Dockerfile) can
+    edit files regardless of the operator's host uid.
+
+    `git worktree add` runs as the operator and lays out files with the
+    operator's umask — typically dirs 0755, files 0644 or 0755. When the
+    operator is not uid 1000 (LDAP boxes, second-user installs), pi inside
+    the container cannot modify the checked-out source. _make_skeleton
+    chmod's bind-mount sources for generic tasks, but project worktrees
+    are created HERE by git, not by _make_skeleton — they need the same
+    fix applied after the fact.
+
+    Mode policy:
+      - directories            → 1777 (sticky-writable, /tmp-style)
+      - regular files, no exec → 0666 (rw for all)
+      - regular files w/ exec  → 0777 (rwx for all; preserves any-exec-bit
+                                 so git sees the same 100755 vs 100644
+                                 mode as before — `git status` stays clean)
+      - symlinks / special     → skipped (chmod through symlink target may
+                                 leak outside the worktree)
+    """
+    work_path.chmod(0o1777)
+    for path in work_path.rglob("*"):
+        try:
+            st = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            with suppress(OSError):
+                path.chmod(0o1777)
+        elif stat.S_ISREG(st.st_mode):
+            new_mode = 0o777 if (st.st_mode & 0o111) else 0o666
+            with suppress(OSError):
+                path.chmod(new_mode)
+        # else: symlink, fifo, socket — leave alone
 
 
 def _attach_controller_log(task_dir: Path) -> logging.Handler:
@@ -243,6 +282,12 @@ def start(
             # work_path MUST NOT exist here — _make_skeleton intentionally
             # skipped it for project kind so git worktree add can create it.
             git_ops.worktree_add(project_repo, task_id, work_path, base_commit)
+            # Make the just-checked-out worktree writable by pi (uid 1000
+            # inside the container) regardless of the operator's host uid.
+            # Without this, project tasks on uid != 1000 hosts get a /work
+            # bind mount Pi can read but not edit — exactly the case
+            # _make_skeleton's chmod 1777 covers for generic tasks.
+            _make_worktree_writable_by_pi(work_path)
             branch = f"agent/{task_id}"
             worktree_path = str(work_path.resolve())
             project_repo_path = str(project_repo.resolve())

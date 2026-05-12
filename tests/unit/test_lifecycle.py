@@ -149,6 +149,106 @@ def test_make_skeleton_bind_mount_dirs_are_sticky_writable(tmp_naiw_data):
     sys.platform == "win32",
     reason="POSIX file modes are not meaningful on Windows-native Python",
 )
+def test_make_worktree_writable_by_pi_dirs_are_sticky(tmp_path):
+    """Directories inside a freshly-checked-out worktree must end up at
+    mode 1777 so pi (uid 1000) inside the container can create/modify
+    files regardless of the operator's host uid."""
+    work = tmp_path / "work"
+    (work / "src" / "deep").mkdir(parents=True)
+    (work / "tests").mkdir()
+    # Operator-default modes (0o755) before our fix
+    work.chmod(0o755)
+    (work / "src").chmod(0o755)
+    (work / "src" / "deep").chmod(0o755)
+    (work / "tests").chmod(0o755)
+
+    lifecycle._make_worktree_writable_by_pi(work)
+
+    for d in (work, work / "src", work / "src" / "deep", work / "tests"):
+        mode = d.stat().st_mode & 0o7777
+        assert mode == 0o1777, f"{d} expected 1777, got {oct(mode)}"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_worktree_writable_by_pi_files_get_world_write(tmp_path):
+    """Regular files become world-writable (0o666) so pi can edit them."""
+    work = tmp_path / "work"
+    work.mkdir()
+    f = work / "README.md"
+    f.write_text("hi", encoding="utf-8")
+    f.chmod(0o644)  # operator-default
+
+    lifecycle._make_worktree_writable_by_pi(work)
+
+    assert f.stat().st_mode & 0o7777 == 0o666
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_worktree_writable_by_pi_preserves_executable_bit(tmp_path):
+    """Executable files keep ANY exec bit so git's mode-tracking
+    (100644 vs 100755) still sees the same mode — `git status` stays
+    clean. Files without exec stay non-exec; files with exec get 0o777
+    (write for all + exec for all)."""
+    work = tmp_path / "work"
+    work.mkdir()
+
+    script = work / "build.sh"
+    script.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    script.chmod(0o755)  # operator-checkout default for shell script
+
+    plain = work / "README.md"
+    plain.write_text("plain", encoding="utf-8")
+    plain.chmod(0o644)
+
+    lifecycle._make_worktree_writable_by_pi(work)
+
+    script_mode = script.stat().st_mode & 0o7777
+    plain_mode = plain.stat().st_mode & 0o7777
+
+    # Executable file: 0o777 (some exec bit set → git mode stays 100755)
+    assert script_mode == 0o777, f"build.sh: expected 0o777, got {oct(script_mode)}"
+    assert script_mode & 0o111, "build.sh must keep AT LEAST one exec bit"
+    # Non-executable file: 0o666 (no exec → git mode stays 100644)
+    assert plain_mode == 0o666, f"README.md: expected 0o666, got {oct(plain_mode)}"
+    assert not (plain_mode & 0o111), "README.md must keep NO exec bits"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX symlinks differ on Windows",
+)
+def test_make_worktree_writable_by_pi_skips_symlinks(tmp_path):
+    """Symlinks in a worktree are NOT chmod'd — chmod through a symlink
+    follows the link and could leak outside the worktree boundary
+    (validate_bind_source already vetted the worktree path itself; we don't
+    re-validate every symlink target here)."""
+    work = tmp_path / "work"
+    work.mkdir()
+    # Target outside the worktree, owned by operator at strict mode
+    outside = tmp_path / "secret"
+    outside.write_text("secret", encoding="utf-8")
+    outside.chmod(0o600)
+
+    link = work / "shortcut"
+    link.symlink_to(outside)
+
+    lifecycle._make_worktree_writable_by_pi(work)
+
+    # The symlink TARGET'S mode must remain 0o600 — we did not follow
+    # the symlink and chmod the target.
+    assert outside.stat().st_mode & 0o7777 == 0o600
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
 def test_make_skeleton_project_io_is_sticky_no_work_yet(tmp_naiw_data):
     """Project tasks: same io/ stickiness, but work/ is NOT created here
     (git worktree add owns it later)."""
