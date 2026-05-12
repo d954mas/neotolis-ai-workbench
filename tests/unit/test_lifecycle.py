@@ -302,13 +302,13 @@ def test_start_project_happy(tmp_naiw_data, mock_subprocess_run, capsys):
     )
     assert task.base_branch == "origin/main"
     assert task.base_commit == "abc1234"
-    assert task.image_tag == "naiw-task-image:latest"
+    assert task.image_tag == cfg.task_image
     assert task.image_digest.startswith("sha256:")
 
     # containers.run called once
     assert client.containers.run.call_count == 1
     _, kwargs = client.containers.run.call_args
-    assert kwargs["image"] == "naiw-task-image:latest"
+    assert kwargs["image"] == cfg.task_image
     assert kwargs["name"] == "naiw-task-alpha-001"
     assert kwargs["labels"] == {
         "naiw.managed": "1",
