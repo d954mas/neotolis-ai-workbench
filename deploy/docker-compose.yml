@@ -33,14 +33,12 @@ services:
     container_name: naiw-docker-proxy
     restart: unless-stopped
     networks: [naiw-internal]
-    # Published to localhost ONLY (127.0.0.1, NOT 0.0.0.0).
-    # The host-installed naiw-tasks CLI reaches the proxy at tcp://127.0.0.1:2375.
-    # No LAN/external exposure — `0.0.0.0:2375` here WOULD be a security
-    # regression and MUST be rejected in code review.
-    # The proxy itself enforces the locked allowlist (see env block) regardless
-    # of the binding; localhost-only binding is defense-in-depth.
-    ports:
-      - "127.0.0.1:2375:2375"
+    # No host port published. Phase 3.5 (D-N2) reverts the localhost publish
+    # that briefly existed for the host-installed naiw-tasks CLI: the controller
+    # now runs as a sibling service on `naiw-internal` and reaches this proxy
+    # via internal DNS at tcp://naiw-docker-proxy:2375. Reachability is
+    # network-scoped, not host-scoped. See deploy/proxy/README.md (rewritten
+    # in this phase) for the new trust-boundary narrative.
     # Socket mounted READ-ONLY.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -83,3 +81,41 @@ services:
     # HTTP probe would conflict with the allowlist. Recovery is `restart: unless-stopped`.
     # If a downstream service needs `depends_on: { condition: service_healthy }`, use a
     # TCP-level probe (see deploy/proxy/README.md).
+
+  naiw-controller:
+    # Local-build tag for development; CI workflow .github/workflows/build-images.yml
+    # pushes ghcr.io/d954mas/naiw-controller:<tag> and P05 replaces this tag with
+    # an @sha256:<digest> pin once the first successful push lands.
+    image: naiw-controller:latest
+    container_name: naiw-controller
+    # Controller is one-shot per D-R1: every `naiw-tasks` call spawns a fresh
+    # container via `docker compose run --rm`. No `command:` here — the
+    # ENTRYPOINT in image/controller.Dockerfile is `naiw-tasks`; positional
+    # args from `compose run` become the subcommand.
+    networks: [naiw-internal]
+    depends_on:
+      - naiw-docker-proxy
+    volumes:
+      # Bind-mount source resolves via the operator's shell env. The wrapper
+      # script (scripts/install-wrapper.sh, P03) passes the same NAIW_DATA
+      # via `-e NAIW_DATA=...` so the in-container path stays /naiw-data.
+      - ${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data
+    environment:
+      # NAIW_DATA inside the container is always /naiw-data (the bind mount
+      # target). Operator's host-side $NAIW_DATA controls the SOURCE.
+      NAIW_DATA: /naiw-data
+      # Belt-and-braces: config.py default flips to this in P04, but the env
+      # var is the operator-visible override path (Phase 3 D-18).
+      NAIW_DOCKER_PROXY_URL: tcp://naiw-docker-proxy:2375
+    # D-H1 hardening (controller-scoped — smaller limits than task containers
+    # because the controller does not run Pi or build wheels at runtime).
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /run:size=32m,mode=755
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    restart: "no"
