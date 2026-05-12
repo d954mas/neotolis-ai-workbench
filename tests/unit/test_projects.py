@@ -140,6 +140,30 @@ def test_path_inside_workspace_repos_accepted(tmp_naiw_data):
     assert "alpha" in result
 
 
+@pytest.mark.parametrize(
+    "yaml_body, label",
+    [
+        ("projects:\n  alpha:\n    path: null\n", "null path"),
+        ("projects:\n  alpha:\n    path: 123\n", "int path"),
+        ('projects:\n  alpha:\n    path: ""\n', "empty string path"),
+        ("projects:\n  alpha:\n    path:\n      - /tmp/foo\n", "list path"),
+        ("projects:\n  alpha:\n    path:\n      sub: /tmp\n", "dict path"),
+    ],
+)
+def test_load_rejects_non_string_path_values(yaml_body, label, tmp_naiw_data):
+    """Non-string `path:` values (yaml null / int / empty / list / dict) must
+    raise ValueError from projects.load — NOT flow into Path(value) which
+    would raise raw TypeError that lifecycle.start does not catch."""
+    yaml_path = _write_yaml(tmp_naiw_data, yaml_body)
+
+    with pytest.raises(ValueError) as excinfo:
+        load(yaml_path, tmp_naiw_data)
+
+    msg = str(excinfo.value)
+    assert "alpha" in msg, f"{label}: alias name missing from error: {msg}"
+    assert "must be a non-empty string" in msg, label
+
+
 def test_tilde_path_is_expanded_before_validation(tmp_naiw_data, monkeypatch):
     """The shipped `scripts/projects.yaml.example` uses
     `path: ~/naiw-data/workspace/repos/<alias>`. Path.resolve() does NOT
