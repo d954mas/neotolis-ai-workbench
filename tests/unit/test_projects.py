@@ -194,6 +194,63 @@ def test_tilde_path_is_expanded_before_validation(tmp_naiw_data, monkeypatch):
     assert Path(result["alpha"]["path"]).resolve() == repo_under_home.resolve()
 
 
+def test_tilde_naiw_data_resolves_to_data_root_regardless_of_home(
+    tmp_naiw_data, monkeypatch
+):
+    """Containerized invocation: HOME points at the controller's tmpfs
+    (/tmp/naiw-home), NOT at the operator's host home. `~/naiw-data/...` must
+    still map to data_root — operator's intent is "wherever NAIW_DATA points",
+    not "wherever expanduser thinks ~ lives". Without this, every project
+    start inside the controller would fail because expanduser would expand
+    ~ to /tmp/naiw-home and validate_bind_source would not find the path."""
+    monkeypatch.setenv("HOME", "/tmp/naiw-home")
+    monkeypatch.setenv("USERPROFILE", "/tmp/naiw-home")
+
+    repo = tmp_naiw_data / "workspace" / "repos" / "alpha"
+    repo.mkdir()
+    yaml_path = _write_yaml(
+        tmp_naiw_data,
+        "projects:\n  alpha:\n    path: ~/naiw-data/workspace/repos/alpha\n",
+    )
+
+    result = load(yaml_path, tmp_naiw_data)
+    assert Path(result["alpha"]["path"]).resolve() == repo.resolve()
+
+
+def test_naiw_data_host_prefix_translated_to_data_root(tmp_naiw_data, monkeypatch):
+    """Operator may write absolute host paths in projects.yaml
+    (e.g. `/home/op/naiw-data/workspace/repos/<alias>`). The containerized
+    controller cannot see `/home/op/...`. When NAIW_DATA_HOST is set
+    (compose path), `_resolve_project_path` swaps the host-root prefix for
+    data_root so the in-container view resolves correctly."""
+    monkeypatch.setenv("NAIW_DATA_HOST", "/home/op/naiw-data")
+    repo = tmp_naiw_data / "workspace" / "repos" / "alpha"
+    repo.mkdir()
+    yaml_path = _write_yaml(
+        tmp_naiw_data,
+        "projects:\n  alpha:\n"
+        "    path: /home/op/naiw-data/workspace/repos/alpha\n",
+    )
+
+    result = load(yaml_path, tmp_naiw_data)
+    assert Path(result["alpha"]["path"]).resolve() == repo.resolve()
+
+
+def test_path_outside_naiw_data_host_not_translated(tmp_naiw_data, monkeypatch):
+    """Negative: a path NOT under NAIW_DATA_HOST must NOT be silently swapped.
+    The path passes through unchanged and validate_bind_source rejects it
+    (prefix mismatch / does not exist). Without this, the translation could
+    leak unrelated host paths into the operator's data_root."""
+    monkeypatch.setenv("NAIW_DATA_HOST", "/home/op/naiw-data")
+    yaml_path = _write_yaml(
+        tmp_naiw_data,
+        "projects:\n  alpha:\n    path: /etc/some-other-place\n",
+    )
+
+    with pytest.raises(BindMountEscapeError):
+        load(yaml_path, tmp_naiw_data)
+
+
 def test_nonexistent_path_rejected(tmp_naiw_data):
     missing = tmp_naiw_data / "workspace" / "repos" / "never-cloned"
     # Deliberately NOT created
