@@ -36,16 +36,18 @@ bash scripts/naiw-init-data.sh
 sudo install -d /etc/naiw
 sudo cp deploy/docker-compose.yml /etc/naiw/docker-compose.yml
 
-# 3. Pull both images (controller + task image) from ghcr
-docker compose -f /etc/naiw/docker-compose.yml pull
+# 3. Install the operator wrapper. This step creates the external
+#    naiw-task-net network, pulls the controller + proxy images via
+#    `docker compose pull`, and pulls the ghcr task image. Must run BEFORE
+#    any `docker compose up/run` because the compose file declares
+#    naiw-task-net as external — compose refuses to read the file if the
+#    network does not yet exist.
+bash scripts/install-wrapper.sh
 
 # 4. Start the proxy (controller is one-shot via `docker compose run`)
 docker compose -f /etc/naiw/docker-compose.yml up -d naiw-docker-proxy
 
-# 5. Install the operator wrapper to ~/.local/bin/naiw-tasks
-bash scripts/install-wrapper.sh   # also pre-pulls ghcr.io/d954mas/naiw-task-image:latest
-
-# 6. Verify
+# 5. Verify
 naiw-tasks doctor                                  # checks config, proxy, allowlist
 bash tests/smoke/run-containerized-smoke.sh        # full smoke (Linux only)
 ```
