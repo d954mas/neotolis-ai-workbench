@@ -302,13 +302,13 @@ def test_start_project_happy(tmp_naiw_data, mock_subprocess_run, capsys):
     )
     assert task.base_branch == "origin/main"
     assert task.base_commit == "abc1234"
-    assert task.image_tag == "naiw-task-image:latest"
+    assert task.image_tag == cfg.task_image
     assert task.image_digest.startswith("sha256:")
 
     # containers.run called once
     assert client.containers.run.call_count == 1
     _, kwargs = client.containers.run.call_args
-    assert kwargs["image"] == "naiw-task-image:latest"
+    assert kwargs["image"] == cfg.task_image
     assert kwargs["name"] == "naiw-task-alpha-001"
     assert kwargs["labels"] == {
         "naiw.managed": "1",
@@ -401,6 +401,47 @@ def test_start_generic_happy(tmp_naiw_data, mock_subprocess_run, capsys):
 
     captured = capsys.readouterr()
     assert "started naiw-task-task-001 (status=running)" in captured.out
+
+
+def test_start_translates_volumes_to_host_root_when_set(
+    tmp_naiw_data, mock_subprocess_run
+):
+    """When data_root_host is set (containerized controller path), the bind
+    sources passed to `containers.run` must be rooted at host_root, NOT at the
+    in-container data_root. The daemon resolves bind sources on the host's
+    filesystem — passing in-container paths makes the daemon mount nonexistent
+    host directories (silently creating empty ones) and breaks every task."""
+    from dataclasses import replace
+
+    client, _container = _fake_client(container_name="naiw-task-task-001")
+    base = _make_cfg(tmp_naiw_data)
+    # Simulate the containerized path: data_root is the in-container mount
+    # target; data_root_host is the operator's real filesystem path on the host.
+    cfg = replace(base, data_root_host=Path("/host/op/naiw-data"))
+
+    lifecycle.start(
+        cfg, client,
+        project=None, base_ref=None, finish_policy="ask", secrets=[],
+    )
+
+    _, kwargs = client.containers.run.call_args
+    vols = kwargs["volumes"]
+    binds = {spec["bind"]: src for src, spec in vols.items()}
+
+    # /work, /io, /pi-packages MUST all be rooted at host_root, not data_root.
+    expected_prefix = "/host/op/naiw-data"
+    for bind in ("/work", "/io", "/pi-packages"):
+        assert bind in binds, f"missing bind mount {bind}; got {binds!r}"
+        src = binds[bind]
+        assert src.startswith(expected_prefix), (
+            f"bind source for {bind} is {src!r}, expected prefix "
+            f"{expected_prefix!r}; daemon-side path translation broken"
+        )
+        # Also confirm the in-container path is NOT leaking through.
+        assert str(tmp_naiw_data) not in src, (
+            f"in-container data_root {tmp_naiw_data!r} leaking into host-side "
+            f"bind source {src!r}"
+        )
 
 
 # ---------- start — bind-source defence --------------------------------------

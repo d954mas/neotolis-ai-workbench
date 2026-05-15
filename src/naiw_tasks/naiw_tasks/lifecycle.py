@@ -111,6 +111,17 @@ def _make_worktree_writable_by_pi(work_path: Path) -> None:
                                  mode as before — `git status` stays clean)
       - symlinks / special     → skipped (chmod through symlink target may
                                  leak outside the worktree)
+
+    Trade-off: this gives every host user rw access to the worktree, which
+    is acceptable on the single-operator VPS this tool targets but is not
+    the tightest possible sandbox. Cleaner alternatives, none free:
+      - build task image with the operator's uid (requires a per-host image
+        rebuild and breaks the published-from-ghcr distribution story)
+      - run task containers with `--user $(id -u):$(id -g)` like the wrapper
+        does (requires Pi tooling to function without a passwd entry)
+      - chown the worktree to uid 1000 on Linux hosts (requires `sudo` or
+        capable setuid helper, complicates Windows/WSL2 portability)
+    Revisit when the single-user assumption stops holding.
     """
     work_path.chmod(0o1777)
     for path in work_path.rglob("*"):
@@ -152,15 +163,33 @@ def _build_volumes(
     data_root: Path,
     task_dir: Path,
     secrets: list[str],
+    host_root: Path | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Resolve every bind source under data_root before docker is touched."""
+    """Resolve every bind source under data_root before docker is touched.
+
+    Source paths in the returned dict are HOST-side (rooted at host_root) —
+    `client.containers.run(volumes=...)` is fielded by the Docker daemon, which
+    resolves bind sources on the host's filesystem, NOT inside the controller
+    container. When the controller runs under compose, data_root (`/naiw-data`)
+    and host_root (`${HOME}/naiw-data`) differ. Validation still uses data_root
+    so symlink-escape checks fire against the in-container filesystem the
+    controller can actually read.
+
+    host_root=None means host == container (direct host invocation, tests).
+    """
+    if host_root is None:
+        host_root = data_root
+
+    def _to_host(p: Path) -> str:
+        return str(host_root / p.relative_to(data_root))
+
     volumes: dict[str, dict[str, str]] = {}
     work_src = validate_bind_source(task_dir / "work", data_root)
     io_src = validate_bind_source(task_dir / "io", data_root)
     pi_pkgs_src = validate_bind_source(data_root / "pi-packages", data_root)
-    volumes[str(work_src)] = {"bind": "/work", "mode": "rw"}
-    volumes[str(io_src)] = {"bind": "/io", "mode": "rw"}
-    volumes[str(pi_pkgs_src)] = {"bind": "/pi-packages", "mode": "ro"}
+    volumes[_to_host(work_src)] = {"bind": "/work", "mode": "rw"}
+    volumes[_to_host(io_src)] = {"bind": "/io", "mode": "rw"}
+    volumes[_to_host(pi_pkgs_src)] = {"bind": "/pi-packages", "mode": "ro"}
     # Secrets MUST resolve under data_root/secrets/, NOT just under data_root.
     # Without narrowing the prefix, a name like "../config.yaml" passes the
     # broader data_root check (after `..` collapses) and the controller would
@@ -172,7 +201,7 @@ def _build_volumes(
         secret_src = validate_bind_source(
             secrets_dir / name, data_root, prefix=secrets_dir
         )
-        volumes[str(secret_src)] = {
+        volumes[_to_host(secret_src)] = {
             "bind": f"/run/secrets/{name}",
             "mode": "ro",
         }
@@ -314,7 +343,7 @@ def start(
                 updated_at=ts_meta,
             )
 
-        volumes = _build_volumes(cfg.data_root, task_dir, secrets)
+        volumes = _build_volumes(cfg.data_root, task_dir, secrets, cfg.host_root)
 
         container = client.containers.run(
             image=cfg.task_image,

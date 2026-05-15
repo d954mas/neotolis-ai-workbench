@@ -31,12 +31,13 @@ def patched_env(monkeypatch, tmp_path):
 # ---------- wiring -----------------------------------------------------------
 
 
-def test_cli_top_level_help_lists_three_subcommands():
+def test_cli_top_level_help_lists_subcommands():
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
     assert "start" in result.output
     assert "attach" in result.output
+    assert "doctor" in result.output
     assert "finish" in result.output
 
 
@@ -76,17 +77,36 @@ def test_cli_propagates_startup_check_failure(monkeypatch, tmp_path):
     assert "naiw-tasks: nope" in result.stderr
 
 
+def test_doctor_runs_startup_checks(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    cfg = Config(data_root=tmp_path / "naiw-data")
+    monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
+    monkeypatch.setattr(cli_mod, "make_client", lambda url: MagicMock())
+    monkeypatch.setattr(
+        cli_mod.startup_checks,
+        "run_all",
+        lambda cfg, client: calls.append("startup_checks"),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "doctor OK" in result.output
+    assert calls == ["startup_checks"]
+
+
 def test_cli_config_load_value_error_exits_2_with_clean_message(monkeypatch):
     """Bad config.yaml must surface as exit 2 + naiw-tasks: prefix, NOT a raw
     Python traceback."""
     def bad_load():
-        raise ValueError("naiw-tasks: config.yaml has unknown key ['weird']")
+        raise ValueError("config.yaml has unknown key ['weird']")
 
     monkeypatch.setattr(cli_mod.config, "load", bad_load)
     runner = CliRunner()
     result = runner.invoke(cli, ["start"])
     assert result.exit_code == 2
-    assert "naiw-tasks: " in result.stderr
+    assert result.stderr.count("naiw-tasks:") == 1
     assert "unknown key" in result.stderr
 
 

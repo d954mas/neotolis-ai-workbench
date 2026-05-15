@@ -37,6 +37,12 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 0
 fi
 
+# naiw-task-net is `external: true` in deploy/docker-compose.yml; compose may
+# refuse to read the file with an "external network not found" error before
+# even bringing up the proxy. Pre-create idempotently.
+docker network inspect naiw-task-net >/dev/null 2>&1 \
+    || docker network create naiw-task-net >/dev/null
+
 echo "[proxy-smoke] bringing up proxy"
 docker compose -f "$compose_file" up -d
 
@@ -59,18 +65,24 @@ for i in $(seq 1 30); do
 done
 [[ "$ready" -eq 1 ]] || fail "proxy did not accept allowed requests within 30s"
 
-# Verify the proxy IS reachable on 127.0.0.1:2375 (host CLI contract) but NOT
-# on any non-localhost address (LAN exposure regression).
-echo "[proxy-smoke] verifying host-side localhost binding"
-host_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
-    http://127.0.0.1:2375/v1.43/containers/json 2>/dev/null || echo "000")"
-[[ "$host_code" == "200" ]] \
-    || fail "proxy not reachable from host on 127.0.0.1:2375 (got $host_code); the host CLI contract requires this binding"
+# Verify the proxy publishes NO host port. Controller reaches the proxy via
+# the naiw-internal network, not a host-bound port; any host PortBinding
+# would re-expose Docker control surface to other same-host processes.
+echo "[proxy-smoke] verifying proxy has no published host port"
+proxy_ports="$(docker inspect naiw-docker-proxy --format '{{json .HostConfig.PortBindings}}' 2>/dev/null || echo 'null')"
+case "$proxy_ports" in
+    "{}"|"null"|"")
+        echo "[proxy-smoke] OK: PortBindings=$proxy_ports"
+        ;;
+    *)
+        fail "proxy has unexpected host PortBindings=$proxy_ports"
+        ;;
+esac
 
-# Negative: any `ports:` entry that publishes to a non-localhost address is a
-# security regression. Accepts only 127.0.0.1 / [::1] prefixes.
-# awk scopes the scan to the actual ports: block — a previous grep -A approach
-# ran past the block boundary and false-flagged the volumes mount entry.
+# Compose-source check: any non-localhost `ports:` entry on any service in
+# deploy/docker-compose.yml is a security regression. Accepts only 127.0.0.1 /
+# [::1] prefixes. The naiw-docker-proxy service has no `ports:` block;
+# this scan stays as defense-in-depth if a future service adds one.
 suspicious_ports="$(awk '
     in_ports && /^[[:space:]]+-[[:space:]]/ {
         line=$0

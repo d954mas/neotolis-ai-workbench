@@ -1,85 +1,76 @@
-# naiw-docker-proxy — locked Docker socket proxy.
-# Five Tecnativa env vars set to "1" (the allowlist); every other documented var
-# explicitly "0" (paranoid-explicit). Adding a new env var set to "1" requires
-# updating the rationale in deploy/proxy/README.md.
-#
-# Networks:
-#   naiw-internal — proxy lives here. Internal management network.
-#   naiw-task-net — task containers run here when started by the controller.
-#                   Defined here (not just created ad-hoc in smoke scripts) so
-#                   a fresh `docker compose up -d` provisions BOTH networks
-#                   and the first real `naiw-tasks start` cannot fail with
-#                   "network naiw-task-net not found".
+# NAIW management stack. The proxy never joins naiw-task-net.
 
 networks:
   naiw-internal:
     name: naiw-internal
     driver: bridge
   naiw-task-net:
-    # Task containers join this network. Proxy is NOT on it (task containers
-    # must never reach the docker daemon). Managed by this compose file so
-    # operators provision it via `docker compose up -d` rather than a separate
-    # `docker network create` step.
+    # Provisioned by scripts/install-wrapper.sh (and tests/smoke/*.sh) before
+    # compose runs. Declared external so compose references it by name without
+    # trying to manage it — a compose-managed declaration of the same name
+    # conflicts with the wrapper-created network (label mismatch on the
+    # `com.docker.compose.network` key) in current compose versions.
     name: naiw-task-net
-    driver: bridge
+    external: true
 
 services:
   naiw-docker-proxy:
-    # Pin by sha256, never by tag. To refresh:
-    #   docker pull tecnativa/docker-socket-proxy:v0.4.2
-    #   docker inspect --format='{{index .RepoDigests 0}}' tecnativa/docker-socket-proxy:v0.4.2
-    # then replace the digest below.
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     container_name: naiw-docker-proxy
     restart: unless-stopped
     networks: [naiw-internal]
-    # Published to localhost ONLY (127.0.0.1, NOT 0.0.0.0).
-    # The host-installed naiw-tasks CLI reaches the proxy at tcp://127.0.0.1:2375.
-    # No LAN/external exposure — `0.0.0.0:2375` here WOULD be a security
-    # regression and MUST be rejected in code review.
-    # The proxy itself enforces the locked allowlist (see env block) regardless
-    # of the binding; localhost-only binding is defense-in-depth.
-    ports:
-      - "127.0.0.1:2375:2375"
-    # Socket mounted READ-ONLY.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      # ── Locked allowlist. All five MUST stay "1". ──
-      CONTAINERS: "1"            # GET /containers/* (list, inspect, logs)
-      POST: "1"                  # gates ANY POST/PUT/DELETE; required for stop/start
-      ALLOW_START: "1"           # POST /containers/<id>/start
-      ALLOW_STOP: "1"            # POST /containers/<id>/stop
-      ALLOW_RESTARTS: "1"        # stop/restart/kill (controller `finish` path)
-      # ── Everything else explicit "0" (paranoid-explicit). Alphabetical. ──
-      # NOTE: pause/unpause are NOT gated by Tecnativa v0.4.2 — there are no
-      # ALLOW_PAUSE / ALLOW_UNPAUSE env-vars in this image; requests pass
-      # through to Docker. Acceptable here because the controller never pauses
-      # task containers (HARD-10: recovery is operator-driven). Revisit if we
-      # ever switch to wollomatic/socket-proxy, which supports regex allowlisting.
+      CONTAINERS: "1"
+      POST: "1"
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+      ALLOW_RESTARTS: "1"
       AUTH: "0"
       BUILD: "0"
       COMMIT: "0"
       CONFIGS: "0"
       DISTRIBUTION: "0"
-      EVENTS: "0"                # upstream default 1; we override.
-      EXEC: "0"                  # closed permanently. docker attach does NOT need EXEC.
+      EVENTS: "0"
+      EXEC: "0"
       GRPC: "0"
       IMAGES: "0"
       INFO: "0"
       NETWORKS: "0"
       NODES: "0"
-      PING: "0"                  # paranoid-explicit deny of the daemon ping passthrough.
+      PING: "0"
       PLUGINS: "0"
-      SECRETS: "0"               # Swarm /secrets/* — unrelated to BuildKit secrets.
+      SECRETS: "0"
       SERVICES: "0"
       SESSION: "0"
       SWARM: "0"
       SYSTEM: "0"
-      TASKS: "0"                 # Swarm tasks — unrelated to NAIW task containers.
-      VERSION: "0"               # may flip to "1" if docker-py negotiation fails.
+      TASKS: "0"
+      VERSION: "0"
       VOLUMES: "0"
-    # No healthcheck. PING=0 makes the proxy correctly return 403 to /_ping, so any
-    # HTTP probe would conflict with the allowlist. Recovery is `restart: unless-stopped`.
-    # If a downstream service needs `depends_on: { condition: service_healthy }`, use a
-    # TCP-level probe (see deploy/proxy/README.md).
+
+  naiw-controller:
+    image: ghcr.io/d954mas/naiw-controller:latest
+    networks: [naiw-internal]
+    depends_on:
+      - naiw-docker-proxy
+    volumes:
+      - ${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data
+    environment:
+      NAIW_DATA: /naiw-data
+      # Docker daemon resolves bind-mount sources on the HOST, not inside the
+      # controller. Without this, lifecycle._build_volumes would hand the daemon
+      # in-container paths (/naiw-data/tasks/...) that don't exist on the host,
+      # silently producing empty bind mounts in task containers.
+      NAIW_DATA_HOST: ${NAIW_DATA:-${HOME}/naiw-data}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /run:size=32m,mode=755
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    restart: "no"
