@@ -81,10 +81,12 @@ trap teardown EXIT
 
 # Step 01: bring up the stack. Controller is one-shot so `up -d` only creates it;
 # `compose run` is the operator path. Proxy starts and stays up.
+# naiw-task-net is `external: true` in compose — create BEFORE any compose call,
+# otherwise compose may refuse to read the file with "external network not found".
+docker network inspect naiw-task-net >/dev/null 2>&1 \
+    || docker network create naiw-task-net >/dev/null
 echo "[${LIB_LOG_PREFIX}] 01: docker compose up -d naiw-docker-proxy"
 docker compose "${COMPOSE_ARGS[@]}" up -d naiw-docker-proxy
-docker network inspect naiw-task-net >/dev/null 2>&1 \
-    || docker network create naiw-task-net 2>&1 | grep -v 'already exists' || true
 
 # Step 02: proxy must NOT have published ports.
 echo "[${LIB_LOG_PREFIX}] 02: proxy unpublished"

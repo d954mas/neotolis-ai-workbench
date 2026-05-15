@@ -37,6 +37,12 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 0
 fi
 
+# naiw-task-net is `external: true` in deploy/docker-compose.yml; compose may
+# refuse to read the file with an "external network not found" error before
+# even bringing up the proxy. Pre-create idempotently.
+docker network inspect naiw-task-net >/dev/null 2>&1 \
+    || docker network create naiw-task-net >/dev/null
+
 echo "[proxy-smoke] bringing up proxy"
 docker compose -f "$compose_file" up -d
 

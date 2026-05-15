@@ -46,6 +46,13 @@ def test_proxy_unpublished_via_inspect():
     """Spot-check: proxy has no HostConfig.PortBindings."""
     if not _docker_available():
         pytest.skip("docker CLI not on PATH")
+    # naiw-task-net is `external: true` in compose; compose may refuse to read
+    # the file with "external network not found" before bringing up the proxy.
+    # Pre-create idempotently (rc=1 on "already exists" is fine).
+    subprocess.run(
+        ["docker", "network", "create", "naiw-task-net"],
+        capture_output=True,
+    )
     try:
         subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "naiw-docker-proxy"],
