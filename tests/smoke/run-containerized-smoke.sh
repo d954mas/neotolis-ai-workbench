@@ -67,13 +67,14 @@ SMOKE_STATUS=FAIL
 tmp_data="$(mktemp -d)"
 
 teardown() {
-    rm -rf "$tmp_data"
     if [[ "$SMOKE_STATUS" == "PASS" ]]; then
+        rm -rf "$tmp_data"
         docker compose "${COMPOSE_ARGS[@]}" down >/dev/null 2>&1 || true
         echo "[${LIB_LOG_PREFIX}] PASS — stack torn down"
     else
         echo "[${LIB_LOG_PREFIX}] FAIL — preserving stack for inspection" >&2
         echo "[${LIB_LOG_PREFIX}] inspect: docker compose ${COMPOSE_ARGS[*]} ps -a" >&2
+        echo "[${LIB_LOG_PREFIX}] data: $tmp_data" >&2
     fi
 }
 trap teardown EXIT
@@ -82,6 +83,8 @@ trap teardown EXIT
 # `compose run` is the operator path. Proxy starts and stays up.
 echo "[${LIB_LOG_PREFIX}] 01: docker compose up -d naiw-docker-proxy"
 docker compose "${COMPOSE_ARGS[@]}" up -d naiw-docker-proxy
+docker network inspect naiw-task-net >/dev/null 2>&1 \
+    || docker network create naiw-task-net 2>&1 | grep -v 'already exists' || true
 
 # Step 02: proxy must NOT have published ports.
 echo "[${LIB_LOG_PREFIX}] 02: proxy unpublished"
@@ -100,7 +103,9 @@ esac
 echo "[${LIB_LOG_PREFIX}] 03: controller image labels"
 ctrl_image="$(docker compose "${COMPOSE_ARGS[@]}" config --format json | python3 -c \
     "import sys, json; d=json.load(sys.stdin); print(d['services']['naiw-controller']['image'])")"
-docker pull "$ctrl_image" >/dev/null 2>&1 || true
+if ! docker pull "$ctrl_image" >/dev/null 2>&1; then
+    echo "[${LIB_LOG_PREFIX}]     note: 'docker pull $ctrl_image' failed (image may be local-only); using on-daemon copy"
+fi
 labels="$(docker inspect "$ctrl_image" --format '{{json .Config.Labels}}')"
 for required in '"naiw.managed":"1"' '"naiw.role":"controller"' '"naiw.docker-api-version":"1.43"' '"org.opencontainers.image.source"'; do
     if [[ "$labels" != *"$required"* ]]; then
@@ -111,20 +116,55 @@ for required in '"naiw.managed":"1"' '"naiw.role":"controller"' '"naiw.docker-ap
 done
 echo "[${LIB_LOG_PREFIX}]     OK: required labels present"
 
-# Step 04: wrapper-equivalent `compose run` exits 0 and prints naiw-tasks help.
-echo "[${LIB_LOG_PREFIX}] 04: compose run --rm naiw-controller --help"
+# Step 04: `doctor` runs the real CLI callback and startup checks.
+echo "[${LIB_LOG_PREFIX}] 04: compose run --rm naiw-controller doctor"
 mkdir -p "$tmp_data/secrets" "$tmp_data/pi-packages" "$tmp_data/workspace/repos" "$tmp_data/tasks"
 chmod 0700 "$tmp_data/secrets"
-help_out="$(docker compose "${COMPOSE_ARGS[@]}" run --rm \
+doctor_out="$(docker compose "${COMPOSE_ARGS[@]}" run --rm \
+    -T \
     --user "$(id -u):$(id -g)" \
     -e "NAIW_DATA=/naiw-data" \
     -v "$tmp_data:/naiw-data" \
-    naiw-controller --help 2>&1)"
-if [[ "$help_out" != *"naiw-tasks"* ]]; then
-    echo "[${LIB_LOG_PREFIX}]     FAIL: --help output unexpected" >&2
-    echo "[${LIB_LOG_PREFIX}]     got: $help_out" >&2
+    naiw-controller doctor 2>&1)"
+if [[ "$doctor_out" != *"doctor OK"* ]]; then
+    echo "[${LIB_LOG_PREFIX}]     FAIL: doctor output unexpected" >&2
+    echo "[${LIB_LOG_PREFIX}]     got: $doctor_out" >&2
     exit 1
 fi
-echo "[${LIB_LOG_PREFIX}]     OK: --help reached the controller and returned"
+echo "[${LIB_LOG_PREFIX}]     OK: doctor reached the controller and proxy"
+
+# Step 05: generic start+finish exercises the real lifecycle path: task network,
+# task image, bind mounts, container create/start/stop/remove through the proxy.
+echo "[${LIB_LOG_PREFIX}] 05: generic start + finish"
+task_image="ghcr.io/d954mas/naiw-task-image:latest"
+if docker image inspect naiw-task-image:latest >/dev/null 2>&1; then
+    task_image="naiw-task-image:latest"
+fi
+cat >"$tmp_data/config.yaml" <<EOF
+schema_version: 1
+task_image: ${task_image}
+EOF
+start_out="$(docker compose "${COMPOSE_ARGS[@]}" run --rm \
+    -T \
+    --user "$(id -u):$(id -g)" \
+    -e "NAIW_DATA=/naiw-data" \
+    -v "$tmp_data:/naiw-data" \
+    naiw-controller start 2>&1)"
+if [[ "$start_out" != *"started naiw-task-task-001 (status=running)"* ]]; then
+    echo "[${LIB_LOG_PREFIX}]     FAIL: start output unexpected" >&2
+    echo "[${LIB_LOG_PREFIX}]     got: $start_out" >&2
+    exit 1
+fi
+docker compose "${COMPOSE_ARGS[@]}" run --rm \
+    -T \
+    --user "$(id -u):$(id -g)" \
+    -e "NAIW_DATA=/naiw-data" \
+    -v "$tmp_data:/naiw-data" \
+    naiw-controller finish task-001 >/dev/null
+if docker inspect naiw-task-task-001 >/dev/null 2>&1; then
+    echo "[${LIB_LOG_PREFIX}]     FAIL: task container still exists after finish" >&2
+    exit 1
+fi
+echo "[${LIB_LOG_PREFIX}]     OK: generic task lifecycle works"
 
 SMOKE_STATUS=PASS

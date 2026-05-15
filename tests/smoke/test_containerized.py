@@ -46,15 +46,26 @@ def test_proxy_unpublished_via_inspect():
     """Spot-check: proxy has no HostConfig.PortBindings."""
     if not _docker_available():
         pytest.skip("docker CLI not on PATH")
-    subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "naiw-docker-proxy"],
-        check=True, capture_output=True,
-    )
-    out = subprocess.run(
-        ["docker", "inspect", "naiw-docker-proxy",
-         "--format", "{{json .HostConfig.PortBindings}}"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    try:
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "naiw-docker-proxy"],
+            check=True, capture_output=True,
+        )
+        out = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "naiw-docker-proxy",
+                "--format",
+                "{{json .HostConfig.PortBindings}}",
+            ],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    finally:
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "down"],
+            capture_output=True,
+        )
     assert out in ("{}", "null", ""), (
         f"proxy must not publish a host port; got bindings: {out!r}"
     )

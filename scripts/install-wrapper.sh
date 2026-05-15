@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# install-wrapper.sh — provision the containerized controller wrapper.
-#
-# After this runs, `naiw-tasks <subcommand>` is on the operator's PATH and
-# delegates every call to:
-#     docker compose -f /etc/naiw/docker-compose.yml \
-#         run --rm -it \
-#         --user "$(id -u):$(id -g)" \
-#         -e NAIW_DATA -e NAIW_ACCEPT_WINDOWS_FS_RISK \
-#         naiw-controller \
-#         <subcommand> <args>
-#
-# Prereqs:
-#   - Docker + the docker-compose plugin; operator user in `docker` group on Linux.
-#   - /etc/naiw/docker-compose.yml installed:
-#         sudo install -d /etc/naiw
-#         sudo cp deploy/docker-compose.yml /etc/naiw/docker-compose.yml
-#   - `docker compose -f /etc/naiw/docker-compose.yml pull` once at install time
-#     (CI workflow build-images.yml publishes naiw-controller to ghcr).
-#
-# If you previously ran the host-CLI installer (deprecated, removed), uninstall
-# the pipx package: `pipx uninstall naiw_tasks` (or `uv tool uninstall`).
-
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,19 +11,16 @@ TASK_IMAGE_REF="ghcr.io/d954mas/naiw-task-image:latest"
 if [[ "${1:-}" == "--help" ]]; then
     cat <<EOF
 Usage: scripts/install-wrapper.sh
-  Installs ${WRAPPER_PATH} as a bash wrapper around 'docker compose run'.
-  Requires ${COMPOSE_FILE_SYSTEM} to exist (operator copies via sudo).
+  Installs ${WRAPPER_PATH} as a docker-compose wrapper.
+  Creates naiw-task-net if missing.
+  Requires ${COMPOSE_FILE_SYSTEM} to exist.
 EOF
     exit 0
 fi
 
-# Running under sudo would set HOME=/root and bake /root/.local/bin into the
-# operator's wrapper. Refuse.
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
     echo "[install] ERROR: do not run install-wrapper.sh as root" >&2
-    echo "[install]   The wrapper relies on \$HOME and \$NAIW_DATA from the" >&2
-    echo "[install]   invoking user's shell; running under sudo sets HOME=/root." >&2
-    echo "[install]   Re-run as the operator user; add yourself to the docker group instead." >&2
+    echo "[install] Re-run as the operator user; add that user to the docker group." >&2
     exit 2
 fi
 
@@ -54,7 +29,6 @@ if [[ ! -f "$COMPOSE_FILE_SYSTEM" ]]; then
     echo "[install] Install it first:" >&2
     echo "[install]   sudo install -d /etc/naiw" >&2
     echo "[install]   sudo cp $repo_root/deploy/docker-compose.yml $COMPOSE_FILE_SYSTEM" >&2
-    echo "[install] Then re-run scripts/install-wrapper.sh." >&2
     exit 2
 fi
 
@@ -67,13 +41,6 @@ if ! docker compose version >/dev/null 2>&1; then
     exit 2
 fi
 
-# Ensure naiw-task-net exists. deploy/docker-compose.yml declares it under
-# top-level networks: but no service in the compose file references it
-# (controller and proxy both live on naiw-internal). So `docker compose up -d
-# naiw-docker-proxy` — the install path in README — only creates naiw-internal.
-# Without this step, the first `naiw-tasks start` would call
-# `containers.run(network="naiw-task-net")` and fail because the network
-# does not yet exist on the daemon.
 if ! docker network inspect naiw-task-net >/dev/null 2>&1; then
     echo "[install] creating naiw-task-net (bridge)"
     docker network create naiw-task-net >/dev/null
@@ -81,28 +48,17 @@ fi
 
 mkdir -p "${HOME}/.local/bin"
 
-# Single-quoted heredoc — every $VAR resolves at the OPERATOR's shell-runtime,
-# never at install time. An unquoted <<WRAPPER would bake the installer's HOME
-# and NAIW_DATA into the wrapper, which is the critical bug this guards against.
 cat >"$WRAPPER_PATH" <<'WRAPPER'
 #!/usr/bin/env bash
-# ~/.local/bin/naiw-tasks — containerized controller wrapper.
-# Delegates every invocation to a one-shot `docker compose run --rm -it`
-# against the naiw-controller service in the system compose file.
-#
-# Env knobs the operator can set in their shell:
-#   NAIW_DATA                    bind-mount source on the host (default ~/naiw-data).
-#                                Consumed by COMPOSE'S volume substitution
-#                                (${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data),
-#                                NOT forwarded into the container — inside the
-#                                container NAIW_DATA stays /naiw-data per the
-#                                service-level env in deploy/docker-compose.yml.
-#   NAIW_ACCEPT_WINDOWS_FS_RISK  set to "1" to opt in on WSL2 /mnt/<letter>/ paths
-#   NAIW_DOCKER_PROXY_URL        override proxy URL (config.py reads this env)
-#   NAIW_COMPOSE_FILE            override the compose file path (default /etc/naiw/docker-compose.yml)
 set -euo pipefail
 
 COMPOSE_FILE="${NAIW_COMPOSE_FILE:-/etc/naiw/docker-compose.yml}"
+DATA_SRC="${NAIW_DATA:-${HOME}/naiw-data}"
+
+case "$DATA_SRC" in
+    "~") DATA_SRC="$HOME" ;;
+    "~/"*) DATA_SRC="$HOME/${DATA_SRC#~/}" ;;
+esac
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
     echo "naiw-tasks: compose file not found at $COMPOSE_FILE" >&2
@@ -110,25 +66,36 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
     exit 2
 fi
 
-# Compose reads $NAIW_DATA from the wrapper's env to resolve the bind-mount
-# source in `volumes:`. `exec docker compose` inherits this env transparently,
-# so the operator's `export NAIW_DATA=...` (or absence) flows through.
-#
-# CRITICAL: do NOT pass `-e NAIW_DATA=...` into the container. The container's
-# NAIW_DATA must stay `/naiw-data` (the mount target, set by the service-level
-# `environment:` block in deploy/docker-compose.yml). `compose run -e` OVERRIDES
-# service-level env, so forwarding the host path here would make naiw_tasks
-# look for /home/operator/naiw-data inside the container — which does not
-# exist (the mount lives at /naiw-data).
-#
-# Operator-tunable env vars forwarded via `-e VAR_NAME` (no `=value`): compose
-# reads the current value from the wrapper's env if set, or skips the var
-# entirely if unset, which lets the service-level defaults stand.
-#
-# TTY allocation: -it works only when stdin AND stdout are both terminals.
-# When invoked from cron, a pipe, systemd unit, or any non-interactive
-# context, -t would fail with "the input device is not a TTY". Detect once
-# and pick -T (no-TTY) for non-interactive callers.
+if [[ ! -d "$DATA_SRC" ]]; then
+    echo "naiw-tasks: data root not found at $DATA_SRC" >&2
+    echo "  run scripts/naiw-init-data.sh, or set NAIW_DATA to an existing directory" >&2
+    exit 2
+fi
+
+if [[ -L "$DATA_SRC" ]]; then
+    echo "naiw-tasks: ~/naiw-data/ must not be a symlink (got: $DATA_SRC)" >&2
+    exit 2
+fi
+
+if ! DATA_REAL="$(realpath -m -- "$DATA_SRC" 2>/dev/null)"; then
+    DATA_REAL="$DATA_SRC"
+fi
+
+if [[ "$(uname -s)" == "Linux" && "$DATA_REAL" =~ ^/mnt/[A-Za-z]/ ]]; then
+    if [[ "${NAIW_ACCEPT_WINDOWS_FS_RISK:-}" != "1" ]]; then
+        echo "naiw-tasks: ~/naiw-data/ on Windows-FS path '$DATA_REAL' is not supported" >&2
+        echo "  set NAIW_ACCEPT_WINDOWS_FS_RISK=1 only for single-task local dev" >&2
+        exit 2
+    fi
+    marker="$DATA_REAL/.naiw-winfs-acked"
+    if [[ ! -e "$marker" ]]; then
+        echo "naiw-tasks: WARNING - ~/naiw-data/ on Windows-FS path '$DATA_REAL'; local dev only" >&2
+        touch "$marker" 2>/dev/null || true
+    fi
+fi
+
+export NAIW_DATA="$DATA_REAL"
+
 if [[ -t 0 && -t 1 ]]; then
     tty_args=(-i -t)
 else
@@ -139,7 +106,6 @@ exec docker compose -f "$COMPOSE_FILE" \
     run --rm "${tty_args[@]}" \
     --user "$(id -u):$(id -g)" \
     -e NAIW_ACCEPT_WINDOWS_FS_RISK \
-    -e NAIW_DOCKER_PROXY_URL \
     naiw-controller \
     "$@"
 WRAPPER
@@ -147,16 +113,20 @@ WRAPPER
 chmod 0755 "$WRAPPER_PATH"
 echo "[install] wrote $WRAPPER_PATH"
 
-# Pre-pull task image so the first `naiw-tasks start` doesn't block on a cold
-# GHCR fetch. Non-fatal: GHCR may be unreachable (private repo, network policy,
-# CI not yet published) — the first start will retry the pull anyway.
-echo "[install] pulling $TASK_IMAGE_REF"
-if ! docker pull "$TASK_IMAGE_REF"; then
-    echo "[install] WARN: failed to pull $TASK_IMAGE_REF" >&2
-    echo "[install]   First 'naiw-tasks start' will retry the pull; ensure ghcr is reachable." >&2
+echo "[install] pulling controller + proxy images via docker compose"
+if ! docker compose -f "$COMPOSE_FILE_SYSTEM" pull; then
+    echo "[install] WARN: docker compose pull failed" >&2
+    echo "[install]   If GHCR is private, run 'docker login ghcr.io' and retry." >&2
 fi
 
-echo "[install] OK — ensure ${HOME}/.local/bin is on \$PATH"
+echo "[install] pulling task image $TASK_IMAGE_REF"
+if ! docker pull "$TASK_IMAGE_REF"; then
+    echo "[install] WARN: failed to pull $TASK_IMAGE_REF" >&2
+    echo "[install]   The task image must be present before 'naiw-tasks start'." >&2
+    echo "[install]   Retry once GHCR is reachable: docker pull $TASK_IMAGE_REF" >&2
+fi
+
+echo "[install] OK - ensure ${HOME}/.local/bin is on \$PATH"
 if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
     echo "[install] WARN: ${HOME}/.local/bin is not on \$PATH" >&2
     echo "[install]   add 'export PATH=\"\$HOME/.local/bin:\$PATH\"' to your shell rc" >&2

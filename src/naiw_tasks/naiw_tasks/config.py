@@ -7,8 +7,6 @@ from pathlib import Path
 import yaml
 
 SCHEMA_VERSION: int = 1
-# Default proxy URL. Internal DNS name from `naiw-internal`; operator override
-# via NAIW_DOCKER_PROXY_URL env or `docker_proxy_url` in ~/naiw-data/config.yaml.
 DEFAULT_DOCKER_PROXY_URL: str = "tcp://naiw-docker-proxy:2375"
 # Mutable :latest tag. Operator may pin to @sha256:<digest> via config.yaml.
 DEFAULT_TASK_IMAGE: str = "ghcr.io/d954mas/naiw-task-image:latest"
@@ -38,9 +36,10 @@ def _resolve_data_root() -> Path:
 
 
 def _resolve_docker_proxy_url(raw: dict) -> str:
-    # Precedence: NAIW_DOCKER_PROXY_URL env > config.yaml docker_proxy_url > default.
-    # Env-first lets the wrapper script (and ad-hoc debug shells) override without
-    # editing config.yaml; matches the NAIW_DATA contract.
+    # Operator override path is config.yaml. NAIW_DOCKER_PROXY_URL only matters
+    # for `docker compose run -e ...` debug — the wrapper does not forward
+    # host-side env (test_wrapper_does_not_forward_host_proxy_url_into_container
+    # locks this in).
     env = os.environ.get("NAIW_DOCKER_PROXY_URL")
     if env:
         return env
@@ -67,17 +66,17 @@ def load() -> Config:
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise ValueError(
-            f"naiw-tasks: config.yaml cannot be parsed at {cfg_path} ({exc})"
+            f"config.yaml cannot be parsed at {cfg_path} ({exc})"
         ) from exc
     if not isinstance(raw, dict):
         raise ValueError(
-            f"naiw-tasks: config.yaml must be a mapping, got {type(raw).__name__}"
+            f"config.yaml must be a mapping, got {type(raw).__name__}"
         )
 
     unknown = set(raw.keys()) - ALLOWED_CONFIG_KEYS
     if unknown:
         raise ValueError(
-            f"naiw-tasks: config.yaml has unknown key {sorted(unknown)!r} "
+            f"config.yaml has unknown key {sorted(unknown)!r} "
             f"(schema_version={SCHEMA_VERSION} supports: "
             f"{sorted(ALLOWED_CONFIG_KEYS)}); reject typos early"
         )
@@ -85,7 +84,7 @@ def load() -> Config:
     sv = raw.get("schema_version", SCHEMA_VERSION)
     if sv != SCHEMA_VERSION:
         raise ValueError(
-            f"naiw-tasks: unsupported config schema_version={sv} "
+            f"unsupported config schema_version={sv} "
             f"(controller supports schema_version={SCHEMA_VERSION})"
         )
 
@@ -96,7 +95,7 @@ def load() -> Config:
         not isinstance(raw["docker_proxy_url"], str) or not raw["docker_proxy_url"]
     ):
         raise ValueError(
-            f"naiw-tasks: config.yaml docker_proxy_url must be a non-empty "
+            f"config.yaml docker_proxy_url must be a non-empty "
             f"string, got {type(raw['docker_proxy_url']).__name__}: "
             f"{raw['docker_proxy_url']!r}"
         )
@@ -104,7 +103,7 @@ def load() -> Config:
     task_image = raw.get("task_image", DEFAULT_TASK_IMAGE)
     if not isinstance(task_image, str) or not task_image:
         raise ValueError(
-            f"naiw-tasks: config.yaml task_image must be a non-empty string, "
+            f"config.yaml task_image must be a non-empty string, "
             f"got {type(task_image).__name__}: {task_image!r}"
         )
 

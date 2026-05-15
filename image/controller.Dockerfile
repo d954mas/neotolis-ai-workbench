@@ -1,40 +1,23 @@
 # syntax=docker/dockerfile:1
-# Controller image. Multi-stage: builder produces wheels for naiw_common +
-# naiw_tasks; runtime installs them plus git and docker-ce-cli (for
-# `os.execvpe attach` from naiw_tasks/attach.py).
-#
-# Mirrors image/Dockerfile (task image) for internal consistency. Invoked
-# one-shot per `naiw-tasks` call by the host wrapper (scripts/install-wrapper.sh)
-# via `docker compose run --rm`. Hardening flags live on the compose service.
 
 ARG NAIW_VERSION=0.1.0
 ARG NAIW_GIT_SHA=unknown
+ARG DOCKER_CE_CLI_VERSION=5:27.3.1-1~debian.12~bookworm
 
-# ── Stage 1: builder — produce wheels for naiw_common and naiw_tasks ──
 FROM python:3.12-slim-bookworm AS builder
 WORKDIR /build
 RUN pip install --no-cache-dir build==1.2.*
 COPY src/naiw_common/ ./naiw_common/
 COPY src/naiw_tasks/ ./naiw_tasks/
-RUN python -m build --wheel --outdir /wheels ./naiw_common && \
-    python -m build --wheel --outdir /wheels ./naiw_tasks
+RUN python -m build --wheel --outdir /wheels ./naiw_common \
+    && python -m build --wheel --outdir /wheels ./naiw_tasks
 
-# ── Stage 2: runtime ──
-# Tag-only base. To refresh and pin by digest:
-#   docker pull python:3.12-slim-bookworm
-#   docker inspect --format='{{index .RepoDigests 0}}' python:3.12-slim-bookworm
 FROM python:3.12-slim-bookworm AS final
 
 ARG NAIW_VERSION
 ARG NAIW_GIT_SHA
+ARG DOCKER_CE_CLI_VERSION
 
-# HOME=/tmp/naiw-home — when wrapper passes `--user UID:GID`, /etc/passwd has
-# no entry for the operator UID; setting HOME explicitly makes Python's
-# expanduser('~') and git's ~/.gitconfig lookup work without a passwd entry.
-# /tmp is tmpfs-backed at runtime. DOCKER_API_VERSION pins the docker CLI to
-# API 1.43, matching naiw_tasks.docker_client.PINNED_DOCKER_API_VERSION.
-# PYTHONDONTWRITEBYTECODE=1 silences pyc-write failures under read_only:true
-# rootfs (compileall below installs them once at build time).
 ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     LANG=C.UTF-8 \
@@ -42,11 +25,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DOCKER_API_VERSION=1.43 \
     PYTHONDONTWRITEBYTECODE=1
 
-# git for naiw_tasks.git_ops subprocess calls; docker-ce-cli for
-# os.execvpe('docker', ..., 'attach', ...) from naiw_tasks/attach.py
-# (CLAUDE.md 'What NOT to Use' rejects docker-py's pseudo-TTY attach —
-# issues #247/#390/#983). docker-ce-cli installs from Docker's official
-# Debian apt repo (signed by /etc/apt/keyrings/docker.asc).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg git \
@@ -55,24 +33,17 @@ RUN apt-get update \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && apt-get install -y --no-install-recommends docker-ce-cli="${DOCKER_CE_CLI_VERSION}" \
+    && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install wheels from builder stage (no source files in final image), then
-# pre-compile site-packages bytecode so first-invocation latency under
-# read_only:true rootfs stays flat (Pitfall 7 from 03.5-RESEARCH.md).
 COPY --from=builder /wheels/*.whl /tmp/wheels/
 RUN pip install --no-cache-dir /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels \
-    && python -m compileall -q -j 0 /usr/local/lib/python3.12/site-packages/naiw_tasks /usr/local/lib/python3.12/site-packages/naiw_common
+    && python -m compileall -q -j 0 \
+        /usr/local/lib/python3.12/site-packages/naiw_tasks \
+        /usr/local/lib/python3.12/site-packages/naiw_common
 
-# Fallback identity if `docker compose run --user UID:GID` is bypassed. The
-# wrapper (scripts/install-wrapper.sh from P03) always passes --user so files
-# in /naiw-data land with the operator's UID. UID 1000 matches the common
-# host operator UID, same as the Phase 1 task image's `pi` user.
-# No -m / -s: HOME is overridden by ENV HOME=/tmp/naiw-home above (so a
-# /home/naiw under read_only:true rootfs would be dead weight), and ENTRYPOINT
-# is naiw-tasks (not a shell), so login-shell isn't relevant either.
 RUN useradd -u 1000 naiw
 
 USER 1000
@@ -83,10 +54,8 @@ LABEL naiw.managed="1" \
       naiw.version="${NAIW_VERSION}" \
       naiw.git-sha="${NAIW_GIT_SHA}" \
       naiw.docker-api-version="1.43" \
+      naiw.docker-ce-cli-version="${DOCKER_CE_CLI_VERSION}" \
       naiw.python-version="3.12" \
       org.opencontainers.image.source="https://github.com/d954mas/neotolis-ai-workbench"
 
-# naiw-tasks console script is registered by the naiw_tasks wheel
-# (pyproject.toml [project.scripts]). Exec-form propagates SIGTERM/SIGINT
-# from `docker compose run --rm`.
 ENTRYPOINT ["naiw-tasks"]

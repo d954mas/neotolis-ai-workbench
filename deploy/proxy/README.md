@@ -30,7 +30,7 @@ Flipping any of these to `"1"` is a security regression and MUST go through a do
 
 - Proxy is on `naiw-internal` (private bridge); **no host port published** (Phase 3.5 D-N2 / PROXY-04 revisited).
 - The `naiw-controller` service is a sibling on `naiw-internal` and reaches the proxy via internal DNS at `tcp://naiw-docker-proxy:2375`.
-- Task containers run on a SEPARATE network `naiw-task-net` (created by the same compose file) and do NOT reach the proxy. Task containers have no Docker access.
+- Task containers run on a SEPARATE network `naiw-task-net` (declared by compose, provisioned by `scripts/install-wrapper.sh`) and do NOT reach the proxy. Task containers have no Docker access.
 
 ## Trust boundary
 

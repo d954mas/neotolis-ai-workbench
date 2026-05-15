@@ -12,6 +12,7 @@ import yaml
 
 # tests/smoke/<this>.py -> parents[2] is repo root.
 COMPOSE_FILE = Path(__file__).resolve().parents[2] / "deploy" / "docker-compose.yml"
+INSTALL_WRAPPER = Path(__file__).resolve().parents[2] / "scripts" / "install-wrapper.sh"
 
 
 @pytest.fixture(scope="module")
@@ -107,3 +108,26 @@ def test_proxy_locked_allowlist_intact(compose):
         assert env.get(v) == "0", (
             f"proxy allowlist drift: {v} should be '0'; got {env.get(v)!r}"
         )
+
+
+@pytest.mark.smoke
+def test_wrapper_checks_host_data_source_before_compose_run():
+    src = INSTALL_WRAPPER.read_text(encoding="utf-8")
+    assert "DATA_REAL" in src
+    assert "^/mnt/[A-Za-z]/" in src
+    assert "NAIW_ACCEPT_WINDOWS_FS_RISK" in src
+    assert src.index("^/mnt/[A-Za-z]/") < src.index("exec docker compose")
+
+
+@pytest.mark.smoke
+def test_wrapper_does_not_forward_host_naiw_data_into_container():
+    src = INSTALL_WRAPPER.read_text(encoding="utf-8")
+    compose_run = src[src.index("exec docker compose") :]
+    assert "-e NAIW_DATA" not in compose_run
+
+
+@pytest.mark.smoke
+def test_wrapper_does_not_forward_host_proxy_url_into_container():
+    src = INSTALL_WRAPPER.read_text(encoding="utf-8")
+    compose_run = src[src.index("exec docker compose") :]
+    assert "-e NAIW_DOCKER_PROXY_URL" not in compose_run

@@ -22,7 +22,7 @@ The Phase 3 controller (`naiw-tasks` CLI) is implemented and ships in this repo.
 
 - **Image** — `naiw-task-image` bakes Pi (`@earendil-works/pi-coding-agent`) + tmux + git + gh + node + python + ffmpeg + ripgrep + the `naiw-signal` wheel. Runs as non-root `pi` user. Default `CMD ["tmux","new-session","-A","-s","main"]` — the controller attaches via `docker attach` (NOT `exec`).
 - **Proxy** — `tecnativa/docker-socket-proxy` pinned by sha256 on a private `naiw-internal` Docker bridge. **Publishes no host port** (Phase 3.5 D-N2). The containerized controller (`naiw-controller` service on `naiw-internal`) reaches it via internal DNS at `tcp://naiw-docker-proxy:2375`. Locked allowlist enforces the security boundary; see `deploy/proxy/README.md`.
-- **Task network** — Task containers run on a separate `naiw-task-net` bridge created by the same compose file. Tasks have NO route to the proxy or to `/var/run/docker.sock`.
+- **Task network** — Task containers run on a separate `naiw-task-net` bridge declared by compose and provisioned idempotently by `scripts/install-wrapper.sh`. Tasks have NO route to the proxy or to `/var/run/docker.sock`.
 - **Host data layout** — `~/naiw-data/` contains `projects.yaml`, `secrets/` (mode 0700), `pi-packages/`, `workspace/repos/`, and per-task `tasks/<id>/{meta,work,io}` directories. `meta/` is host-only (never mounted into the container).
 - **Signal CLI** — `naiw-signal done|fail|wait` runs inside the image as the `pi` user, appends one JSON event line to `/io/.naiw/events.jsonl`. Pure file-writer; no Docker access; never reads `meta/`.
 
@@ -46,7 +46,7 @@ docker compose -f /etc/naiw/docker-compose.yml up -d naiw-docker-proxy
 bash scripts/install-wrapper.sh   # also pre-pulls ghcr.io/d954mas/naiw-task-image:latest
 
 # 6. Verify
-naiw-tasks --help                                  # delegates to docker compose run
+naiw-tasks doctor                                  # checks config, proxy, allowlist
 bash tests/smoke/run-containerized-smoke.sh        # full smoke (Linux only)
 ```
 

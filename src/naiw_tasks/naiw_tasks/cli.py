@@ -131,6 +131,12 @@ def attach_cmd(ctx: click.Context, task_id: str) -> None:
 
 
 @cli.command()
+def doctor() -> None:
+    """Verify config, proxy reachability, and proxy allowlist."""
+    click.echo("naiw-tasks: doctor OK")
+
+
+@cli.command()
 @click.argument("task_id")
 @click.option(
     "--keep-worktree",

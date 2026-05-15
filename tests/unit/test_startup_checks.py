@@ -85,6 +85,7 @@ def test_check_not_on_windows_fs_passes_for_normal_linux_path(tmp_naiw_data, mon
     "windows_fs_path",
     [
         "/mnt/c/Users/foo/naiw-data",
+        "/mnt/C/Users/foo/naiw-data",
         "/mnt/d/data/naiw-data",
         "/mnt/e/foo",
         "/mnt/z/share/x",
@@ -175,11 +176,11 @@ def test_winfs_check_warn_with_ack(monkeypatch, capsys, tmp_path):
     )
     monkeypatch.setenv("NAIW_ACCEPT_WINDOWS_FS_RISK", "1")
     marker = tmp_path / ".naiw-winfs-acked"
-    monkeypatch.setattr("naiw_tasks.startup_checks._WINFS_ACK_MARKER", marker)
 
     class FakeRoot:
         def is_symlink(self): return False
         def resolve(self): return Path("/mnt/c/Users/foo/naiw-data")
+        def __truediv__(self, name): return marker
 
     assert check_not_on_windows_fs_on_linux(FakeRoot()) is None
 
@@ -198,11 +199,11 @@ def test_winfs_warn_marker_suppression(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("NAIW_ACCEPT_WINDOWS_FS_RISK", "1")
     marker = tmp_path / ".naiw-winfs-acked"
     marker.touch()  # pre-existing marker
-    monkeypatch.setattr("naiw_tasks.startup_checks._WINFS_ACK_MARKER", marker)
 
     class FakeRoot:
         def is_symlink(self): return False
         def resolve(self): return Path("/mnt/c/Users/foo/naiw-data")
+        def __truediv__(self, name): return marker
 
     assert check_not_on_windows_fs_on_linux(FakeRoot()) is None
     assert capsys.readouterr().err == ""
@@ -247,11 +248,35 @@ def test_check_docker_reachable_rejects_on_exception(capsys):
     fake_client = SimpleNamespace(containers=SimpleNamespace(list=raise_docker))
 
     with pytest.raises(SystemExit) as excinfo:
-        check_docker_reachable(fake_client, "tcp://127.0.0.1:2375")
+        check_docker_reachable(
+            fake_client, "tcp://127.0.0.1:2375", attempts=2, delay_s=0
+        )
 
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
     assert "cannot reach Docker via proxy at tcp://127.0.0.1:2375" in captured.err
+
+
+def test_check_docker_reachable_retries_before_failing(monkeypatch):
+    import docker
+
+    calls = {"count": 0}
+
+    def flaky(**kwargs):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise docker.errors.DockerException("proxy warming up")
+        return []
+
+    fake_client = SimpleNamespace(containers=SimpleNamespace(list=flaky))
+
+    assert (
+        check_docker_reachable(
+            fake_client, "tcp://127.0.0.1:2375", attempts=3, delay_s=0
+        )
+        is None
+    )
+    assert calls["count"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -259,16 +284,57 @@ def test_check_docker_reachable_rejects_on_exception(capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_check_proxy_allowlist_drift_passes_when_403(monkeypatch):
+def test_check_proxy_allowlist_drift_passes_when_proxy_contract_matches(monkeypatch):
     import urllib.error
 
-    def raise_403(req, timeout):
-        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+    def fake_urlopen(req, timeout):
+        url = req.full_url
+        method = req.get_method()
+        if method == "POST" and "/exec/naiw-probe-" in url and url.endswith("/start"):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+        if method == "POST" and (
+            ("/containers/naiw-probe-" in url and url.endswith("/start"))
+            or ("/containers/naiw-probe-" in url and url.endswith("/stop"))
+        ):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        raise AssertionError(f"unexpected probe: {method} {url}")
 
     monkeypatch.setattr(
-        "naiw_tasks.startup_checks.urllib.request.urlopen", raise_403
+        "naiw_tasks.startup_checks.urllib.request.urlopen", fake_urlopen
     )
     assert check_proxy_allowlist_drift("tcp://127.0.0.1:2375") is None
+
+
+def test_check_proxy_allowlist_drift_rejects_when_allowed_container_op_is_403(
+    monkeypatch, capsys
+):
+    import urllib.error
+
+    def fake_urlopen(req, timeout):
+        url = req.full_url
+        method = req.get_method()
+        if method == "POST" and "/exec/naiw-probe-" in url and url.endswith("/start"):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+        if (
+            method == "POST"
+            and "/containers/naiw-probe-" in url
+            and url.endswith("/start")
+        ):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+        raise AssertionError(f"unexpected probe: {method} {url}")
+
+    monkeypatch.setattr(
+        "naiw_tasks.startup_checks.urllib.request.urlopen", fake_urlopen
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        check_proxy_allowlist_drift("tcp://127.0.0.1:2375")
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "proxy allowlist drift" in captured.err
+    assert "POST /containers/naiw-probe-" in captured.err
+    assert "expected 404" in captured.err
 
 
 def test_check_proxy_allowlist_drift_rejects_when_200(monkeypatch, capsys):
