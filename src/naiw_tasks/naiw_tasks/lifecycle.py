@@ -163,7 +163,7 @@ def _build_volumes(
     data_root: Path,
     task_dir: Path,
     secrets: list[str],
-    host_root: Path,
+    host_root: Path | None = None,
 ) -> dict[str, dict[str, str]]:
     """Resolve every bind source under data_root before docker is touched.
 
@@ -174,7 +174,12 @@ def _build_volumes(
     and host_root (`${HOME}/naiw-data`) differ. Validation still uses data_root
     so symlink-escape checks fire against the in-container filesystem the
     controller can actually read.
+
+    host_root=None means host == container (direct host invocation, tests).
     """
+    if host_root is None:
+        host_root = data_root
+
     def _to_host(p: Path) -> str:
         return str(host_root / p.relative_to(data_root))
 
