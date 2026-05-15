@@ -5,8 +5,13 @@ networks:
     name: naiw-internal
     driver: bridge
   naiw-task-net:
+    # Provisioned by scripts/install-wrapper.sh (and tests/smoke/*.sh) before
+    # compose runs. Declared external so compose references it by name without
+    # trying to manage it — a compose-managed declaration of the same name
+    # conflicts with the wrapper-created network (label mismatch on the
+    # `com.docker.compose.network` key) in current compose versions.
     name: naiw-task-net
-    driver: bridge
+    external: true
 
 services:
   naiw-docker-proxy:

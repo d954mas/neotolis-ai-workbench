@@ -134,6 +134,20 @@ def test_wrapper_does_not_forward_host_proxy_url_into_container():
 
 
 @pytest.mark.smoke
+def test_naiw_task_net_is_external(compose):
+    """`naiw-task-net` is provisioned by scripts/install-wrapper.sh (no service
+    in this compose file joins it). Compose must NOT try to manage it — a
+    compose-managed declaration of the same name conflicts with the
+    wrapper-created network on the `com.docker.compose.network` label check
+    in modern compose versions, blocking the documented deploy path."""
+    net = compose["networks"]["naiw-task-net"]
+    assert net.get("external") is True, (
+        f"naiw-task-net must be `external: true` (provisioned by "
+        f"install-wrapper.sh); got {net!r}"
+    )
+
+
+@pytest.mark.smoke
 def test_controller_env_injects_naiw_data_host(compose):
     """Compose MUST inject NAIW_DATA_HOST on the controller service.
 
