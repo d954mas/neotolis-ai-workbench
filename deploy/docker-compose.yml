@@ -54,7 +54,6 @@ services:
       - ${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data
     environment:
       NAIW_DATA: /naiw-data
-      NAIW_DOCKER_PROXY_URL: tcp://naiw-docker-proxy:2375
     cap_drop: [ALL]
     security_opt: [no-new-privileges]
     read_only: true

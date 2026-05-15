@@ -131,3 +131,21 @@ def test_wrapper_does_not_forward_host_proxy_url_into_container():
     src = INSTALL_WRAPPER.read_text(encoding="utf-8")
     compose_run = src[src.index("exec docker compose") :]
     assert "-e NAIW_DOCKER_PROXY_URL" not in compose_run
+
+
+@pytest.mark.smoke
+def test_controller_env_does_not_inject_proxy_url(compose):
+    """Compose must NOT pre-set NAIW_DOCKER_PROXY_URL on the controller service.
+
+    If it does, the env branch in config._resolve_docker_proxy_url always wins
+    and the documented config.yaml docker_proxy_url override becomes dead code
+    (operator edits yaml → silently ignored, controller still talks to the
+    baked default). The default URL is owned by config.DEFAULT_DOCKER_PROXY_URL,
+    not the compose file.
+    """
+    env = compose["services"]["naiw-controller"].get("environment", {})
+    assert "NAIW_DOCKER_PROXY_URL" not in env, (
+        "compose injects NAIW_DOCKER_PROXY_URL on naiw-controller; this masks "
+        "config.yaml docker_proxy_url override. Remove the env entry — the "
+        "default lives in config.DEFAULT_DOCKER_PROXY_URL."
+    )
