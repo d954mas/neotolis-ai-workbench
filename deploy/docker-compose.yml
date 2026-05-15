@@ -54,6 +54,11 @@ services:
       - ${NAIW_DATA:-${HOME}/naiw-data}:/naiw-data
     environment:
       NAIW_DATA: /naiw-data
+      # Docker daemon resolves bind-mount sources on the HOST, not inside the
+      # controller. Without this, lifecycle._build_volumes would hand the daemon
+      # in-container paths (/naiw-data/tasks/...) that don't exist on the host,
+      # silently producing empty bind mounts in task containers.
+      NAIW_DATA_HOST: ${NAIW_DATA:-${HOME}/naiw-data}
     cap_drop: [ALL]
     security_opt: [no-new-privileges]
     read_only: true

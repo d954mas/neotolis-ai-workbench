@@ -134,6 +134,28 @@ def test_wrapper_does_not_forward_host_proxy_url_into_container():
 
 
 @pytest.mark.smoke
+def test_controller_env_injects_naiw_data_host(compose):
+    """Compose MUST inject NAIW_DATA_HOST on the controller service.
+
+    Without it, lifecycle._build_volumes hands `containers.run` paths like
+    `/naiw-data/tasks/...` — but Docker daemon resolves bind sources on the
+    HOST, where `/naiw-data` doesn't exist. Task containers silently end up
+    with empty bind mounts. The substitution must reference NAIW_DATA so the
+    host-side path the operator chose flows through to the controller's env."""
+    env = compose["services"]["naiw-controller"].get("environment", {})
+    assert "NAIW_DATA_HOST" in env, (
+        "compose must set NAIW_DATA_HOST on naiw-controller; without it, the "
+        "controller hands the daemon in-container bind paths that don't exist "
+        "on the host"
+    )
+    value = env["NAIW_DATA_HOST"]
+    assert "NAIW_DATA" in value, (
+        f"NAIW_DATA_HOST must derive from the host's NAIW_DATA (same path the "
+        f"volume mount uses); got {value!r}"
+    )
+
+
+@pytest.mark.smoke
 def test_controller_env_does_not_inject_proxy_url(compose):
     """Compose must NOT pre-set NAIW_DOCKER_PROXY_URL on the controller service.
 

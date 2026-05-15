@@ -148,6 +148,7 @@ start_out="$(docker compose "${COMPOSE_ARGS[@]}" run --rm \
     -T \
     --user "$(id -u):$(id -g)" \
     -e "NAIW_DATA=/naiw-data" \
+    -e "NAIW_DATA_HOST=$tmp_data" \
     -v "$tmp_data:/naiw-data" \
     naiw-controller start 2>&1)"
 if [[ "$start_out" != *"started naiw-task-task-001 (status=running)"* ]]; then
@@ -155,10 +156,33 @@ if [[ "$start_out" != *"started naiw-task-task-001 (status=running)"* ]]; then
     echo "[${LIB_LOG_PREFIX}]     got: $start_out" >&2
     exit 1
 fi
+
+# Verify bind sources on the task container resolve to host paths, not the
+# in-container /naiw-data path. If the daemon got /naiw-data/... it would
+# silently create empty host dirs and Pi would mount nothing.
+for bind in /work /io /pi-packages; do
+    src="$(docker inspect naiw-task-task-001 \
+        --format "{{range .Mounts}}{{if eq .Destination \"${bind}\"}}{{.Source}}{{end}}{{end}}")"
+    if [[ -z "$src" ]]; then
+        echo "[${LIB_LOG_PREFIX}]     FAIL: task container has no mount at ${bind}" >&2
+        exit 1
+    fi
+    case "$src" in
+        "$tmp_data"/*|"$tmp_data")
+            ;;
+        *)
+            echo "[${LIB_LOG_PREFIX}]     FAIL: ${bind} mount source = $src" >&2
+            echo "[${LIB_LOG_PREFIX}]     expected prefix: $tmp_data (host path)" >&2
+            exit 1
+            ;;
+    esac
+done
+
 docker compose "${COMPOSE_ARGS[@]}" run --rm \
     -T \
     --user "$(id -u):$(id -g)" \
     -e "NAIW_DATA=/naiw-data" \
+    -e "NAIW_DATA_HOST=$tmp_data" \
     -v "$tmp_data:/naiw-data" \
     naiw-controller finish task-001 >/dev/null
 if docker inspect naiw-task-task-001 >/dev/null 2>&1; then

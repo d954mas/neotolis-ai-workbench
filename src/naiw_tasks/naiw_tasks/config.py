@@ -22,6 +22,16 @@ class Config:
     data_root: Path
     docker_proxy_url: str = DEFAULT_DOCKER_PROXY_URL
     task_image: str = DEFAULT_TASK_IMAGE
+    # Host-side data root, set by compose's NAIW_DATA_HOST env to the operator's
+    # actual filesystem path (e.g. /home/op/naiw-data) when the controller runs
+    # inside a container. None on direct host invocation (tests, ad-hoc CLI use)
+    # — host_root then falls back to data_root.
+    data_root_host: Path | None = None
+
+    @property
+    def host_root(self) -> Path:
+        """Host-side path corresponding to data_root, for `containers.run` bind sources."""
+        return self.data_root_host if self.data_root_host is not None else self.data_root
 
 
 def _resolve_data_root() -> Path:
@@ -33,6 +43,16 @@ def _resolve_data_root() -> Path:
     if env:
         return Path(env).expanduser()
     return Path.home() / "naiw-data"
+
+
+def _resolve_data_root_host() -> Path | None:
+    # NAIW_DATA_HOST is injected by compose at service-level so the controller
+    # can hand the daemon bind sources resolvable on the HOST. None when the
+    # controller is not running under the documented compose path.
+    env = os.environ.get("NAIW_DATA_HOST")
+    if env:
+        return Path(env).expanduser()
+    return None
 
 
 def _resolve_docker_proxy_url(raw: dict) -> str:
@@ -55,11 +75,13 @@ def load() -> Config:
             callers (cli.py) do not need to depend on yaml internals.
     """
     data_root = _resolve_data_root()
+    data_root_host = _resolve_data_root_host()
     cfg_path = data_root / "config.yaml"
     if not cfg_path.exists():
         return Config(
             data_root=data_root,
             docker_proxy_url=_resolve_docker_proxy_url({}),
+            data_root_host=data_root_host,
         )
 
     try:
@@ -111,4 +133,5 @@ def load() -> Config:
         data_root=data_root,
         docker_proxy_url=docker_proxy_url,
         task_image=task_image,
+        data_root_host=data_root_host,
     )
