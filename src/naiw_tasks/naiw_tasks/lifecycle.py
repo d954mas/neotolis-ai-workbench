@@ -364,7 +364,7 @@ def start(
         # task.json must carry the resolved image digest as audit trail —
         # without it we cannot answer "which image actually ran task X" once
         # the tag is repointed (e.g., naiw-task-image:latest moves to a new
-        # build), and the Phase 4 recovery flow cannot verify image identity.
+        # build), and the recovery flow cannot verify image identity later.
         # Fail fast — the leftover container is cleaned via `naiw-tasks finish`.
         if not image_digest:
             raise StartFailed(
@@ -512,7 +512,7 @@ def _resolve_finish_policy(
     """CLI flag wins; otherwise task.json's stored policy; if 'ask', prompt
     in interactive contexts.
 
-    Non-interactive contexts (cron, systemd timers, shell pipes, Phase 4
+    Non-interactive contexts (cron, systemd timers, shell pipes,
     signal-driven auto_finish, pytest captured stdin) cannot answer input()
     and would either hang or raise EOFError. In those contexts the policy
     defaults to delete_worktree — matches the documented MVP default
@@ -541,40 +541,43 @@ def _resolve_finish_policy(
     return policy
 
 
-def finish(
+# Disk statuses that mean teardown already happened. The CLI surface
+# short-circuits on these; the shared helper does not.
+TERMINAL_STATUSES: frozenset[str] = frozenset({
+    str(Status.COMPLETED),
+    str(Status.FAILED),
+    str(Status.CANCELLED),
+})
+
+
+def _teardown_and_mark(
     cfg: Config,
     client,
     task_id: str,
-    policy_override: str | None = None,
+    task_dir: Path,
+    terminal_status: Status,
+    policy_override: str | None,
 ) -> None:
-    """Permissive finish: works on running/created/failed; idempotent on completed."""
-    validate_task_id(task_id)
-    task_dir = cfg.data_root / "tasks" / task_id
-    if not task_dir.exists():
-        print(
-            f"naiw-tasks: task {task_id!r} not found at {task_dir}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    """Stop+remove container, verify NotFound, apply finish policy if project
+    task, write task.json.status=terminal_status with finished_at + updated_at
+    atomically.
 
+    The caller is responsible for any "already done" short-circuit; this helper
+    always runs the full teardown sequence. Used by both the operator-facing
+    `finish` wrapper (terminal_status=COMPLETED) and the lazy-event tailer that
+    inline-finishes on `done`/`fail` events (terminal_status=COMPLETED/FAILED).
+    """
     log_handler = _attach_controller_log(task_dir)
     try:
         data = store.read_task(task_dir)
-        current_status = data.get("status")
-        if current_status == str(Status.COMPLETED):
-            print(
-                f"naiw-tasks: task {task_id} is already completed; nothing to do"
-            )
-            return
-
         container_name = data.get("container_name", _container_name(task_id))
 
         # Best-effort stop + remove. APIError is silently caught here because
-        # the verify step below is the source of truth — we mark completed
-        # only when the container is verifiably gone (or in a non-running
-        # terminal state). Silently marking completed despite docker errors
-        # would create a zombie container with no path back through the CLI
-        # (finish short-circuits on status=completed).
+        # the verify step below is the source of truth — we mark the terminal
+        # status only when the container is verifiably gone. Silently marking
+        # terminal despite docker errors would create a zombie container with
+        # no path back through the CLI (the wrapper short-circuits on terminal
+        # disk status).
         try:
             container = client.containers.get(container_name)
         except docker.errors.NotFound:
@@ -588,12 +591,12 @@ def finish(
             with suppress(docker.errors.NotFound, docker.errors.APIError):
                 container.remove(force=True)
 
-        # Verify teardown actually happened. ONLY NotFound counts as completed
+        # Verify teardown actually happened. ONLY NotFound counts as success
         # — even an exited/dead/created container leaves a record in
-        # `docker ps -a`, keeps the name reserved, and (because finish
-        # short-circuits on status=completed) cuts off the CLI path back to
-        # cleanup. Marking failed in those cases lets the operator retry once
-        # the daemon is healthy; force-remove typically succeeds on the
+        # `docker ps -a`, keeps the name reserved, and (because the wrapper
+        # short-circuits on terminal disk status) cuts off the CLI path back
+        # to cleanup. Marking failed in those cases lets the operator retry
+        # once the daemon is healthy; force-remove typically succeeds on the
         # second attempt against an exited container.
         try:
             survivor = client.containers.get(container_name)
@@ -622,7 +625,7 @@ def finish(
         # Worktree teardown — project tasks only. delete_worktree => git
         # worktree remove --force + prune (never raw recursive-delete).
         # Repo path comes from task.json (project_repo_path), NOT from projects.yaml —
-        # this makes finish robust against config edits between start and finish.
+        # this makes teardown robust against config edits between start and finish.
         if data.get("kind") == str(TaskKind.PROJECT):
             policy = _resolve_finish_policy(
                 policy_override,
@@ -663,7 +666,7 @@ def finish(
                         )
                     except git_ops.GitWorktreeError as exc:
                         # User asked for delete_worktree but git failed —
-                        # don't silently mark completed with a dirty disk.
+                        # don't silently mark terminal with a dirty disk.
                         first_line = (
                             exc.stderr.strip().splitlines()[0]
                             if exc.stderr and exc.stderr.strip()
@@ -687,13 +690,55 @@ def finish(
 
         ts_now = Event.now_iso()
 
-        def _to_completed(d: dict) -> dict:
+        def _to_terminal(d: dict) -> dict:
             d = dict(d)
-            d["status"] = str(Status.COMPLETED)
+            d["status"] = str(terminal_status)
             d["finished_at"] = ts_now
             d["updated_at"] = ts_now
             return d
 
-        store.update_task(task_dir, _to_completed)
+        store.update_task(task_dir, _to_terminal)
     finally:
         _detach_controller_log(log_handler)
+
+
+def finish(
+    cfg: Config,
+    client,
+    task_id: str,
+    policy_override: str | None = None,
+) -> None:
+    """Permissive finish (operator-facing). Idempotent on any terminal disk status.
+
+    The wrapper preserves the friendly "already <status>; nothing to do" message
+    for the human typing `naiw-tasks finish <id>` against a task that has already
+    reached a terminal state. Programmatic callers that need teardown regardless
+    of disk status (e.g., the lazy-event tailer applying a `done`/`fail` event
+    with auto_finish=true) should call `_teardown_and_mark` directly with the
+    desired terminal_status.
+    """
+    validate_task_id(task_id)
+    task_dir = cfg.data_root / "tasks" / task_id
+    if not task_dir.exists():
+        print(
+            f"naiw-tasks: task {task_id!r} not found at {task_dir}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    data = store.read_task(task_dir)
+    current_status = data.get("status")
+    if current_status in TERMINAL_STATUSES:
+        print(
+            f"naiw-tasks: task {task_id} is already {current_status}; nothing to do"
+        )
+        return
+
+    _teardown_and_mark(
+        cfg,
+        client,
+        task_id,
+        task_dir,
+        terminal_status=Status.COMPLETED,
+        policy_override=policy_override,
+    )

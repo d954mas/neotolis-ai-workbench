@@ -653,15 +653,18 @@ def test_start_failed_before_worktree_keeps_finish_recoverable(
     assert on_disk["status"] == "failed"
     assert "git worktree add failed" in on_disk["failure_reason"]
 
-    # finish must succeed without UnsupportedSchemaError (the bug we're fixing).
-    # Use policy_override to skip the interactive prompt (the failed task has
-    # worktree_path=None so policy is functionally irrelevant — pass keep_worktree
-    # to assert no git call is attempted).
+    # finish must succeed without UnsupportedSchemaError (the bug we are
+    # guarding against — store.read_task raises that on unknown schema).
+    # The wrapper now short-circuits on terminal disk status (`failed` is
+    # terminal), so finish prints "already failed; nothing to do" and the
+    # on-disk status stays `failed`. The point of this regression test is
+    # that finish() does NOT raise — schema-reading succeeded.
     lifecycle.finish(cfg, client, "alpha-001", policy_override="keep_worktree")
 
     on_disk2 = json.loads(tj.read_text(encoding="utf-8"))
-    assert on_disk2["status"] == "completed"
-    assert on_disk2["finished_at"] is not None
+    # Status preserved (idempotent on terminal); failure_reason preserved.
+    assert on_disk2["status"] == "failed"
+    assert "git worktree add failed" in on_disk2["failure_reason"]
 
 
 def test_start_failed_before_projects_load_keeps_finish_recoverable(tmp_naiw_data):
@@ -683,9 +686,10 @@ def test_start_failed_before_projects_load_keeps_finish_recoverable(tmp_naiw_dat
     assert on_disk["status"] == "failed"
     assert "unknown project" in on_disk["failure_reason"]
 
-    # finish reads, sees schema_version=1, marks completed — no UnsupportedSchemaError
+    # finish reads schema_version=1 successfully — no UnsupportedSchemaError.
+    # Under the broadened-terminal short-circuit, `failed` is idempotent.
     lifecycle.finish(cfg, client, "ghost-001", policy_override="keep_worktree")
-    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
 
 
 # ---------- start — failure rollback -----------------------------------------
@@ -1075,13 +1079,25 @@ def test_finish_created_marks_completed(tmp_naiw_data):
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
 
-def test_finish_failed_marks_completed(tmp_naiw_data):
+def test_finish_on_failed_short_circuits(tmp_naiw_data, capsys):
+    # Broadened terminal short-circuit: a task whose disk status is already
+    # `failed` (terminal) is left untouched by the wrapper. The operator's
+    # `naiw-tasks finish <id>` is idempotent on every terminal state, not just
+    # COMPLETED. This is the contract Phase 4 D-09 needs so the lazy-event
+    # tailer can pre-mark a task `failed` (via `_teardown_and_mark`) without
+    # the wrapper second-guessing the teardown that already happened.
     _pre_create_task(tmp_naiw_data, "task-001", "failed")
-    client, _ = _fake_client(container_name="naiw-task-task-001")
+    client, container = _fake_client(container_name="naiw-task-task-001")
     cfg = _make_cfg(tmp_naiw_data)
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    # No container ops attempted — short-circuit fired.
+    container.stop.assert_not_called()
+    container.remove.assert_not_called()
+    captured = capsys.readouterr()
+    assert "already failed" in captured.out
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
-    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+    # Disk status unchanged — wrapper did not rewrite to `completed`.
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
 
 
 def test_finish_completed_is_idempotent(tmp_naiw_data, capsys):
@@ -1517,10 +1533,11 @@ def test_finish_marks_failed_for_dead_and_created_states(tmp_naiw_data):
         assert f"state='{state}'" in on_disk["failure_reason"]
 
 
-def test_finish_failed_by_verify_step_can_be_retried(tmp_naiw_data, capsys):
-    """After a verify-step failure leaves task in 'failed', the next finish
-    invocation must NOT short-circuit (only 'completed' short-circuits) and
-    must succeed once the container is gone."""
+def test_finish_failed_by_verify_step_can_be_retried_via_helper(tmp_naiw_data, capsys):
+    """After a verify-step failure leaves task in 'failed', the operator-facing
+    wrapper is idempotent on terminal states (broadened short-circuit). The
+    retry path goes through the shared helper `_teardown_and_mark` directly,
+    which does NOT short-circuit and runs the full teardown sequence."""
     _pre_create_task(tmp_naiw_data, "task-001", "running")
     client, container = _fake_client(container_name="naiw-task-task-001")
 
@@ -1534,7 +1551,15 @@ def test_finish_failed_by_verify_step_can_be_retried(tmp_naiw_data, capsys):
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
 
-    # Second attempt: docker is healthy now. remove works; get raises NotFound after.
+    # Second attempt via wrapper: short-circuits (failed is terminal).
+    container.remove.reset_mock()
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    container.remove.assert_not_called()
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
+
+    # Third attempt via the shared helper: docker is healthy now, helper
+    # bypasses the short-circuit, full teardown completes, status flips
+    # to completed.
     container.remove.side_effect = None
     container.remove.reset_mock()
 
@@ -1544,7 +1569,15 @@ def test_finish_failed_by_verify_step_can_be_retried(tmp_naiw_data, capsys):
         return container
 
     client.containers.get.side_effect = _get_after_recovery
-    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    task_dir = tmp_naiw_data / "tasks" / "task-001"
+    lifecycle._teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.COMPLETED,
+        policy_override=None,
+    )
 
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
@@ -1842,3 +1875,321 @@ def test_finish_concurrent_serialise_under_flock(tmp_naiw_data):
 
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+# ---------- finish — broadened terminal short-circuit -----------------------
+
+
+def test_finish_already_completed_short_circuits_with_friendly_message(
+    tmp_naiw_data, capsys
+):
+    _pre_create_task(tmp_naiw_data, "task-001", "completed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    client.containers.get.assert_not_called()
+    container.stop.assert_not_called()
+    container.remove.assert_not_called()
+    captured = capsys.readouterr()
+    assert "already completed" in captured.out
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_already_failed_short_circuits_with_friendly_message(
+    tmp_naiw_data, capsys
+):
+    _pre_create_task(tmp_naiw_data, "task-001", "failed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    client.containers.get.assert_not_called()
+    container.stop.assert_not_called()
+    container.remove.assert_not_called()
+    captured = capsys.readouterr()
+    assert "already failed" in captured.out
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_finish_already_cancelled_short_circuits_with_friendly_message(
+    tmp_naiw_data, capsys
+):
+    _pre_create_task(tmp_naiw_data, "task-001", "cancelled")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    client.containers.get.assert_not_called()
+    container.stop.assert_not_called()
+    container.remove.assert_not_called()
+    captured = capsys.readouterr()
+    assert "already cancelled" in captured.out
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "cancelled"
+
+
+def test_finish_on_interrupted_runs_full_teardown(tmp_naiw_data):
+    # `interrupted` is NOT terminal — the operator can still finish an
+    # interrupted task (per the permissive matrix). The wrapper must NOT
+    # short-circuit; full stop+remove+verify+atomic mark-completed runs.
+    _pre_create_task(tmp_naiw_data, "task-001", "interrupted")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "completed"
+    assert on_disk["finished_at"] is not None
+
+
+def test_finish_on_waiting_for_user_runs_full_teardown(tmp_naiw_data):
+    _pre_create_task(tmp_naiw_data, "task-001", "waiting_for_user")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "completed"
+    assert on_disk["finished_at"] is not None
+
+
+# ---------- _teardown_and_mark — shared helper contract ----------------------
+
+
+def test_teardown_and_mark_writes_completed_status(tmp_naiw_data):
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle._teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.COMPLETED,
+        policy_override=None,
+    )
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = task_dir / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "completed"
+    assert on_disk["finished_at"] is not None
+    assert on_disk["updated_at"] is not None
+
+
+def test_teardown_and_mark_writes_failed_status(tmp_naiw_data):
+    # The same teardown sequence (stop+remove+verify+optional worktree) runs
+    # whether the caller asks for COMPLETED or FAILED as the terminal state.
+    # The lazy-event tailer will call with FAILED on a `fail` event with
+    # auto_finish=true.
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle._teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.FAILED,
+        policy_override=None,
+    )
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = task_dir / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert on_disk["finished_at"] is not None
+
+
+def test_teardown_and_mark_does_not_short_circuit_on_completed_disk_state(
+    tmp_naiw_data,
+):
+    # The helper is the lazy-event-tailer's entry point — its caller has
+    # already decided teardown is needed (e.g., the tailer pre-flipped status
+    # in a race with another process, or the helper is invoked unconditionally
+    # for a `done` event). The helper must NOT inspect the on-disk status to
+    # short-circuit; that decision belongs to the wrapper.
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "completed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle._teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.COMPLETED,
+        policy_override=None,
+    )
+
+    # Container ops DID run (proves no short-circuit).
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = task_dir / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_teardown_and_mark_applies_delete_worktree_policy(
+    tmp_naiw_data, mock_subprocess_run
+):
+    repo = _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    task_dir = _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "running",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+        project_repo_path=str(repo),
+    )
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle._teardown_and_mark(
+        cfg,
+        client,
+        "alpha-001",
+        task_dir,
+        terminal_status=Status.COMPLETED,
+        policy_override="delete_worktree",
+    )
+
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    git_calls = [c for c in cmds if c and c[0] == "git"]
+    remove_idx = None
+    prune_idx = None
+    for i, c in enumerate(git_calls):
+        if "worktree" in c and "remove" in c:
+            remove_idx = i
+        elif "worktree" in c and "prune" in c:
+            prune_idx = i
+    assert remove_idx is not None, f"no worktree remove call: {git_calls}"
+    assert prune_idx is not None, f"no worktree prune call: {git_calls}"
+    assert remove_idx < prune_idx, "remove must happen before prune"
+
+
+# ---------- source-level invariants -----------------------------------------
+
+
+def test_lifecycle_finish_delegates_to_teardown_and_mark():
+    import re as _re
+
+    src_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "lifecycle.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+
+    # _teardown_and_mark is defined at module scope.
+    assert _re.search(r"^def _teardown_and_mark\(", src, _re.MULTILINE), (
+        "_teardown_and_mark function definition missing from lifecycle.py"
+    )
+
+    # Extract finish() body — bytes from `^def finish(` up to the next
+    # top-level `^def `.
+    lines = src.splitlines()
+    finish_start = None
+    finish_end = len(lines)
+    for i, line in enumerate(lines):
+        if line.startswith("def finish("):
+            finish_start = i
+        elif finish_start is not None and line.startswith("def "):
+            finish_end = i
+            break
+    assert finish_start is not None, "finish() function missing from lifecycle.py"
+    finish_body = "\n".join(lines[finish_start:finish_end])
+
+    assert "_teardown_and_mark(" in finish_body, (
+        "finish() wrapper must call _teardown_and_mark(); body was:\n"
+        f"{finish_body}"
+    )
+    assert "terminal_status=Status.COMPLETED" in finish_body, (
+        "finish() wrapper must invoke _teardown_and_mark with "
+        "terminal_status=Status.COMPLETED"
+    )
+
+
+def test_lifecycle_terminal_statuses_set_has_three_values():
+    src_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "lifecycle.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+
+    # The constant exists.
+    assert "TERMINAL_STATUSES" in src, (
+        "TERMINAL_STATUSES constant missing from lifecycle.py"
+    )
+
+    # All three terminal Status members referenced (either via Status.X or as
+    # the literal string value — accept both shapes).
+    has_completed = (
+        "Status.COMPLETED" in src or '"completed"' in src or "'completed'" in src
+    )
+    has_failed = (
+        "Status.FAILED" in src or '"failed"' in src or "'failed'" in src
+    )
+    has_cancelled = (
+        "Status.CANCELLED" in src
+        or '"cancelled"' in src
+        or "'cancelled'" in src
+    )
+    assert has_completed and has_failed and has_cancelled, (
+        "TERMINAL_STATUSES must cover all three terminal states "
+        "(completed, failed, cancelled)"
+    )
+
+
+def test_lifecycle_module_has_no_gsd_refs():
+    import re as _re
+
+    src_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "lifecycle.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    forbidden = [
+        r"\bD-\d{2}\b",
+        r"\bPhase [0-9]",
+        r"\bRESEARCH\b",
+        r"\bPlan [0-9]",
+        r"\bLIST-\d{2}\b",
+        r"\bSIG-\d{2}\b",
+        r"\bDATA-\d{2}\b",
+        r"\bCTRL-\d{2}\b",
+    ]
+    for pattern in forbidden:
+        match = _re.search(pattern, src)
+        assert match is None, (
+            f"GSD/planning ref {match.group()!r} leaked into lifecycle.py — "
+            f"strip the comment (allowed-doc files only)"
+        )
