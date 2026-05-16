@@ -1,23 +1,55 @@
-"""Tests for naiw_tasks.model — Status (4 vals), TaskKind, FinishPolicy, Task."""
+"""Tests for naiw_tasks.model — Status (7 vals), TaskKind, FinishPolicy, Task."""
 
 import json
+import re
+from pathlib import Path
 
 from naiw_tasks.model import FinishPolicy, Status, Task, TaskKind
 
 from naiw_tasks import model as model_mod
 
 
-def test_status_enum_has_exactly_four_values() -> None:
-    assert set(Status) == {
-        Status.CREATED,
-        Status.RUNNING,
-        Status.COMPLETED,
-        Status.FAILED,
-    }
-    assert Status.CREATED.value == "created"
-    assert Status.RUNNING.value == "running"
-    assert Status.COMPLETED.value == "completed"
-    assert Status.FAILED.value == "failed"
+def test_status_enum_has_exactly_seven_values() -> None:
+    expected = [
+        ("CREATED", "created"),
+        ("RUNNING", "running"),
+        ("INTERRUPTED", "interrupted"),
+        ("WAITING_FOR_USER", "waiting_for_user"),
+        ("COMPLETED", "completed"),
+        ("FAILED", "failed"),
+        ("CANCELLED", "cancelled"),
+    ]
+    assert len(list(Status)) == 7
+    for name, value in expected:
+        assert hasattr(Status, name), f"Status.{name} missing"
+        assert str(getattr(Status, name)) == value, (
+            f"Status.{name} string value drift: got {str(getattr(Status, name))!r}, "
+            f"expected {value!r}"
+        )
+    assert {m.name for m in Status} == {n for n, _ in expected}
+
+
+def test_status_from_str_lenient_returns_enum_for_each_of_seven() -> None:
+    for value in (
+        "created",
+        "running",
+        "interrupted",
+        "waiting_for_user",
+        "completed",
+        "failed",
+        "cancelled",
+    ):
+        result = Status.from_str_lenient(value)
+        assert result is getattr(Status, value.upper()), (
+            f"from_str_lenient({value!r}) returned {result!r}, "
+            f"expected Status.{value.upper()}"
+        )
+
+
+def test_status_from_str_lenient_returns_raw_for_unknown() -> None:
+    # Forward-compat: unknown statuses (a future controller writes a string this
+    # binary does not know) must pass through as the raw string, never raise.
+    assert Status.from_str_lenient("future_status_xyz") == "future_status_xyz"
 
 
 def test_status_round_trips_through_json() -> None:
@@ -115,6 +147,78 @@ def test_task_full_field_set_present_in_asdict() -> None:
         "finish_policy", "auto_finish", "branch", "worktree_path",
         "base_branch", "base_commit", "project_repo_path",
         "labels", "secrets",
-        "events_offset", "recovery_count", "recovery_history",
+        "events_offset", "terminal_log_max_size",
+        "recovery_count", "recovery_history",
     }
     assert set(d.keys()) == expected
+
+
+def test_task_terminal_log_max_size_defaults_to_zero() -> None:
+    t = _minimal_task()
+    assert t.terminal_log_max_size == 0
+    assert t.as_dict()["terminal_log_max_size"] == 0
+
+
+def test_task_terminal_log_max_size_round_trips() -> None:
+    t = _minimal_task(terminal_log_max_size=12345)
+    assert t.terminal_log_max_size == 12345
+    assert t.as_dict()["terminal_log_max_size"] == 12345
+
+
+def test_task_constructs_from_legacy_dict_without_terminal_log_max_size() -> None:
+    # Legacy task.json written by Phase 3 controllers will not carry the
+    # terminal_log_max_size key. Constructing Task(**legacy) must succeed via
+    # the dataclass default, NOT raise TypeError — that preserves the
+    # "updates must not break in-flight task.json state" invariant.
+    legacy = {
+        "id": "neotolis-engine-001",
+        "kind": TaskKind.PROJECT,
+        "container_name": "naiw-task-neotolis-engine-001",
+        "image_tag": "naiw-task-image:latest",
+        "created_at": "2026-05-11T14:32:00.123Z",
+        "updated_at": "2026-05-11T14:32:00.123Z",
+        "status": Status.RUNNING,
+        "failure_reason": None,
+        "started_at": "2026-05-11T14:32:01.000Z",
+        "finished_at": None,
+        "image_digest": "sha256:abc",
+        "finish_policy": FinishPolicy.ASK,
+        "auto_finish": False,
+        "project": "neotolis-engine",
+        "branch": "agent/neotolis-engine-001",
+        "worktree_path": "/work",
+        "base_branch": "origin/main",
+        "base_commit": "abc1234",
+        "project_repo_path": "/repo",
+        "labels": {},
+        "secrets": [],
+        "events_offset": 0,
+        # terminal_log_max_size intentionally OMITTED — legacy schema.
+        "recovery_count": 0,
+        "recovery_history": [],
+        "schema_version": 1,
+    }
+    t = Task(**legacy)
+    assert t.terminal_log_max_size == 0
+
+
+def test_model_module_has_no_gsd_refs() -> None:
+    # No planning artifacts may leak into source. Allowed-doc files
+    # (CLAUDE.md, AGENTS.md, README.md, task.md) are exempt; model.py is not.
+    src = Path(model_mod.__file__).read_text(encoding="utf-8")
+    forbidden = [
+        r"\bD-\d{2}\b",
+        r"\bPhase [0-9]",
+        r"\bRESEARCH\b",
+        r"\bPlan [0-9]",
+        r"\bLIST-\d{2}\b",
+        r"\bSIG-\d{2}\b",
+        r"\bDATA-\d{2}\b",
+        r"\bCTRL-\d{2}\b",
+    ]
+    for pattern in forbidden:
+        match = re.search(pattern, src)
+        assert match is None, (
+            f"GSD/planning ref {match.group()!r} leaked into model.py — "
+            f"strip the comment (allowed-doc files only)"
+        )
