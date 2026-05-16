@@ -1,4 +1,4 @@
-"""Pure truth-table evaluation: derive computed status from task.json + container state + pending event.
+"""Pure truth-table evaluation: derive computed status from task.json + container + event.
 
 No I/O. No clock. No Docker. Same inputs always return the same ComputedRow.
 See tests/unit/test_reconcile.py for the canonical truth table.

@@ -12,6 +12,7 @@ terminal-state short-circuit does not block teardown. The helper writes
 the final status itself.
 """
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -198,17 +199,15 @@ def _reconcile_one(
         terminal_status = (
             Status.COMPLETED if latest_event_kind == "done" else Status.FAILED
         )
-        try:
+        # _teardown_and_mark raises SystemExit when verify-NotFound fails;
+        # _mark_finish_failed has already written task.json. Swallow and
+        # continue rendering — operator sees the failed row.
+        with contextlib.suppress(SystemExit):
             _teardown_and_mark(
                 cfg, client, task_id, task_dir,
                 terminal_status=terminal_status,
                 policy_override=None,
             )
-        except SystemExit:
-            # _teardown_and_mark raises SystemExit when verify-NotFound fails;
-            # _mark_finish_failed has already written task.json. Swallow and
-            # continue rendering — operator sees the failed row.
-            pass
 
     computed = reconcile.ComputedRow(
         status=computed.status,
@@ -299,10 +298,8 @@ def run(
         # Re-read task.json: _teardown_and_mark may have mutated it. Falling
         # back to the original task_dict on read error keeps the row visible
         # even if the post-teardown read fails (e.g. concurrent delete).
-        try:
+        with contextlib.suppress(FileNotFoundError, store.UnsupportedSchemaError):
             task_dict = store.read_task(task_dir)
-        except (FileNotFoundError, store.UnsupportedSchemaError):
-            pass
         rows.append((task_dir, task_dict, computed, ctr_state, exit_code))
 
     filtered = _apply_filters(
@@ -310,10 +307,7 @@ def run(
     )
     filtered = _sort_rows(filtered)
 
-    if show_all and not limit_was_explicit:
-        effective_rows = filtered
-    else:
-        effective_rows = filtered[:limit]
+    effective_rows = filtered if show_all and not limit_was_explicit else filtered[:limit]
 
     if as_json:
         payload = render.to_json_payload(

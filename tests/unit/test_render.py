@@ -11,7 +11,6 @@ from pathlib import Path
 
 from naiw_tasks import render
 
-
 # ---------- ComputedRow stand-in --------------------------------------------
 # Tests use a tiny structural stand-in instead of importing
 # naiw_tasks.reconcile.ComputedRow to keep this test file independent of the

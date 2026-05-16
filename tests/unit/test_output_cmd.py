@@ -7,15 +7,13 @@ bypass the regex check.
 
 import os
 import re
-import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import click
 import pytest
+from naiw_tasks.config import Config
 
 from naiw_tasks import output_cmd
-from naiw_tasks.config import Config
 
 
 def _cfg(data_root: Path) -> Config:

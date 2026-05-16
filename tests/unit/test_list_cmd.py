@@ -22,10 +22,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
-from naiw_tasks import list_cmd, store
 from naiw_tasks.config import Config
 
+from naiw_tasks import list_cmd, store
 
 # ---------- helpers ---------------------------------------------------------
 
@@ -555,7 +554,10 @@ def test_render_table_columns_match_d12(tmp_naiw_data, capsys):
     for col in ("ID", "STATUS", "CTR", "PROJECT", "STARTED", "IMAGE", "NOTES"):
         assert col in header
     # Order check: ID precedes STATUS precedes CTR ... precedes NOTES.
-    positions = [header.index(c) for c in ("ID", "STATUS", "CTR", "PROJECT", "STARTED", "IMAGE", "NOTES")]
+    positions = [
+        header.index(c)
+        for c in ("ID", "STATUS", "CTR", "PROJECT", "STARTED", "IMAGE", "NOTES")
+    ]
     assert positions == sorted(positions)
 
 
@@ -609,7 +611,12 @@ def test_malformed_line_appended_to_events_error_log(tmp_naiw_data, capsys):
     ) + "\n"
     bad = "not valid json\n"
     valid_wait = json.dumps(
-        {"ts": "2026-05-16T10:00:01.000Z", "kind": "wait", "payload": {"reason": "x"}, "schema_version": 1}
+        {
+            "ts": "2026-05-16T10:00:01.000Z",
+            "kind": "wait",
+            "payload": {"reason": "x"},
+            "schema_version": 1,
+        }
     ) + "\n"
     payload = (valid_done + bad + valid_wait).encode("utf-8")
     with open(events_path, "ab") as f:

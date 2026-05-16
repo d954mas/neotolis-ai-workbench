@@ -10,9 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
-
 from naiw_tasks.reconcile import ComputedRow, compute_status
-
 
 # ---------- truth-table parametrise -----------------------------------------
 

@@ -11,10 +11,7 @@ import json
 import re
 from pathlib import Path
 
-import pytest
-
 from naiw_tasks.events_tail import Malformed, tail_events
-
 
 # ---------- helpers ----------------------------------------------------------
 
