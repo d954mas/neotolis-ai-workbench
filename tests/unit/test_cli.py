@@ -393,6 +393,112 @@ def test_finish_neither_flag_falls_back_to_task_policy(monkeypatch, patched_env)
     assert kwargs["policy_override"] is None
 
 
+# ---------- list subcommand --------------------------------------------------
+
+
+def test_cli_list_command_invokes_list_cmd_run(patched_env, monkeypatch):
+    """`naiw-tasks list` with no flags wires through to list_cmd.run with
+    defaults: limit=10, no status filter, no project filter, etc."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["list"])
+    assert result.exit_code == 0, result.output
+    args, kwargs = fake.call_args
+    assert kwargs["limit"] == 10
+    assert kwargs["statuses"] == []
+    assert kwargs["project_filter"] is None
+    assert kwargs["show_all"] is False
+    assert kwargs["include_completed"] is False
+    assert kwargs["as_json"] is False
+    assert kwargs["limit_was_explicit"] is False
+
+
+def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "list",
+            "--limit", "5",
+            "--status", "running",
+            "--status", "interrupted",
+            "--project", "alpha",
+            "--all",
+            "--completed",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["limit"] == 5
+    assert kwargs["statuses"] == ["running", "interrupted"]
+    assert kwargs["project_filter"] == "alpha"
+    assert kwargs["show_all"] is True
+    assert kwargs["include_completed"] is True
+    assert kwargs["as_json"] is True
+    assert kwargs["limit_was_explicit"] is True
+
+
+def test_cli_list_rejects_unknown_status(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["list", "--status", "invalid_status"])
+    assert result.exit_code == 2
+    assert "invalid_status" in (result.output + result.stderr)
+    fake.assert_not_called()
+
+
+# ---------- output subcommand ------------------------------------------------
+
+
+def test_cli_output_command_invokes_output_cmd_run(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001"])
+    assert result.exit_code == 0, result.output
+    args, kwargs = fake.call_args
+    # output_cmd.run(cfg, task_id, lines=200)
+    assert "task-001" in args or kwargs.get("task_id") == "task-001"
+    assert kwargs.get("lines") == 200
+
+
+def test_cli_output_passes_lines_flag(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001", "--lines", "50"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs.get("lines") == 50
+
+
+def test_cli_output_rejects_invalid_task_id(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "Invalid Task!"])
+    assert result.exit_code == 3
+    fake.assert_not_called()
+
+
+def test_cli_output_lines_zero_returns_exit_2(patched_env, monkeypatch):
+    """output_cmd.run raises click.UsageError on lines<=0 → click exits 2."""
+    import click as _click
+
+    def boom(cfg, task_id, *, lines):
+        raise _click.UsageError("--lines must be positive")
+
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", boom)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001", "--lines", "0"])
+    assert result.exit_code == 2
+
+
 # ---------- source-policy guard ---------------------------------------------
 
 

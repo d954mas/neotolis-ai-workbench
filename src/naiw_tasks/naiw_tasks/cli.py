@@ -19,6 +19,8 @@ import click
 
 from naiw_tasks import attach as attach_mod
 from naiw_tasks import config, lifecycle, startup_checks
+from naiw_tasks import list_cmd as list_cmd_module
+from naiw_tasks import output_cmd as output_cmd_module
 from naiw_tasks.docker_client import make_client
 from naiw_tasks.ids import (
     validate_project_alias,
@@ -134,6 +136,115 @@ def attach_cmd(ctx: click.Context, task_id: str) -> None:
 def doctor() -> None:
     """Verify config, proxy reachability, and proxy allowlist."""
     click.echo("naiw-tasks: doctor OK")
+
+
+@cli.command("list")
+@click.option(
+    "--limit",
+    type=int,
+    default=10,
+    help="Max rows after filtering (default 10).",
+)
+@click.option(
+    "--status",
+    "statuses",
+    type=click.Choice(
+        [
+            "created",
+            "running",
+            "interrupted",
+            "waiting_for_user",
+            "completed",
+            "failed",
+            "cancelled",
+        ]
+    ),
+    multiple=True,
+    help="Filter by status (repeatable; OR within filter, AND across filters).",
+)
+@click.option(
+    "--project",
+    "project_filter",
+    default=None,
+    help="Filter to one project alias.",
+)
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    default=False,
+    help="Show every task; uncaps --limit unless --limit is given explicitly.",
+)
+@click.option(
+    "--completed",
+    "include_completed",
+    is_flag=True,
+    default=False,
+    help="Include terminal-state tasks (completed/failed/cancelled).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit JSON {as_of, tasks: [{id, status, container_state, "
+        "container_exit_code, project, started_at, image_digest, notes, "
+        "task_json}]} instead of the plain table."
+    ),
+)
+@click.pass_context
+def list_command(
+    ctx: click.Context,
+    limit: int,
+    statuses: tuple[str, ...],
+    project_filter: str | None,
+    show_all: bool,
+    include_completed: bool,
+    as_json: bool,
+) -> None:
+    """List tasks with reconciled status."""
+    # ParameterSource is how click distinguishes "operator typed --limit N"
+    # from "operator left the default in place". The --all + explicit --limit
+    # combination is what restores the row cap when the operator wanted both.
+    limit_was_explicit = (
+        ctx.get_parameter_source("limit")
+        == click.core.ParameterSource.COMMANDLINE
+    )
+    list_cmd_module.run(
+        ctx.obj["cfg"],
+        ctx.obj["client"],
+        limit=limit,
+        statuses=list(statuses),
+        project_filter=project_filter,
+        show_all=show_all,
+        include_completed=include_completed,
+        as_json=as_json,
+        limit_was_explicit=limit_was_explicit,
+    )
+
+
+@cli.command("output")
+@click.argument("task_id")
+@click.option(
+    "--lines",
+    "lines",
+    type=int,
+    default=200,
+    help="Number of trailing lines (default 200; must be positive).",
+)
+@click.pass_context
+def output_command(ctx: click.Context, task_id: str, lines: int) -> None:
+    """Print the last lines of terminal.log for TASK_ID (host-side read)."""
+    # CLI veneer validates id and translates ValueError → exit 3. The
+    # output_cmd.run first-statement validate_task_id is defense-in-depth
+    # for direct (non-CLI) callers that skip this veneer.
+    try:
+        validate_task_id(task_id)
+    except ValueError as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(3)
+    output_cmd_module.run(ctx.obj["cfg"], task_id, lines=lines)
 
 
 @cli.command()
