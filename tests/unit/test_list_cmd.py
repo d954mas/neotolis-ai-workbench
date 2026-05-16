@@ -559,6 +559,544 @@ def test_render_table_columns_match_d12(tmp_naiw_data, capsys):
     assert positions == sorted(positions)
 
 
+# =============================================================================
+# Task 2b extensions: lazy event apply, auto_finish, DATA-08, events-error.log
+# =============================================================================
+
+
+def _write_event_line(task_dir: Path, kind: str, ts: str = "2026-05-16T10:00:00.000Z") -> int:
+    """Append a single valid JSONL event line; return bytes written."""
+    events_path = task_dir / "io" / ".naiw" / "events.jsonl"
+    line = json.dumps(
+        {"ts": ts, "kind": kind, "payload": {}, "schema_version": 1}
+    ) + "\n"
+    encoded = line.encode("utf-8")
+    with open(events_path, "ab") as f:
+        f.write(encoded)
+    return len(encoded)
+
+
+# ---------- lazy event apply (LIST-06 / SIG-05/06/07) ----------------------
+
+
+def test_lazy_event_apply_advances_offset(tmp_naiw_data, capsys):
+    """auto_finish=false path: a `done` event flips status, leaves container."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=False
+    )
+    bytes_written = _write_event_line(task_dir, "done")
+    # Container is still running; status flip to completed.
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=True, as_json=False,
+        limit_was_explicit=False,
+    )
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["events_offset"] == bytes_written
+    assert data["status"] == "completed"
+
+
+def test_malformed_line_appended_to_events_error_log(tmp_naiw_data, capsys):
+    task_dir = _make_task(tmp_naiw_data, "alpha-001", status="running")
+    events_path = task_dir / "io" / ".naiw" / "events.jsonl"
+    # One valid done, one malformed, one valid wait.
+    valid_done = json.dumps(
+        {"ts": "2026-05-16T10:00:00.000Z", "kind": "done", "payload": {}, "schema_version": 1}
+    ) + "\n"
+    bad = "not valid json\n"
+    valid_wait = json.dumps(
+        {"ts": "2026-05-16T10:00:01.000Z", "kind": "wait", "payload": {"reason": "x"}, "schema_version": 1}
+    ) + "\n"
+    payload = (valid_done + bad + valid_wait).encode("utf-8")
+    with open(events_path, "ab") as f:
+        f.write(payload)
+
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=True, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    error_log = task_dir / "meta" / "events-error.log"
+    assert error_log.exists()
+    lines = error_log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert re.match(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\tjson:.*\tnot valid json$",
+        lines[0],
+    ), lines[0]
+    # Offset advanced past all 3 lines (full bytes consumed).
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["events_offset"] == len(payload)
+
+
+def test_events_error_log_appended_outside_flock():
+    """Source-text guard: _append_events_errors must NOT be inside the
+    mutator closure passed to store.update_task. Holding the diagnostic
+    write inside the per-task flock window would couple events-error.log
+    durability to the task.json mutation cadence."""
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "list_cmd.py"
+    ).read_text(encoding="utf-8")
+    # Locate _reconcile_one body. Verify _append_events_errors call comes
+    # BEFORE the store.update_task line in source order.
+    body = src
+    idx_append = body.find("_append_events_errors(")
+    idx_store = body.find("store.update_task(task_dir, _mutator)")
+    assert idx_append != -1, "missing _append_events_errors call"
+    assert idx_store != -1, "missing store.update_task call"
+    assert idx_append < idx_store, (
+        "events-error.log write must precede store.update_task (outside flock)"
+    )
+    # Also: the literal file-open for events-error.log must not appear inside
+    # the _mutator function body.
+    mutator_start = body.find("def _mutator(d: dict)")
+    mutator_end = body.find("return d", mutator_start)
+    if mutator_start != -1 and mutator_end != -1:
+        mutator_body = body[mutator_start:mutator_end]
+        assert "open(" not in mutator_body, (
+            "open() found inside mutator — events-error.log must not be "
+            "written under the flock"
+        )
+
+
+def test_idempotent_done_reapply_no_status_change(tmp_naiw_data, capsys):
+    task_dir = _make_task(tmp_naiw_data, "alpha-001", status="running")
+    _write_event_line(task_dir, "done")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    # First pass: flips to completed.
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=True, as_json=False,
+        limit_was_explicit=False,
+    )
+    data_after_first = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data_after_first["status"] == "completed"
+    updated_at_first = data_after_first["updated_at"]
+    offset_first = data_after_first["events_offset"]
+
+    # Second pass: offset is already past the event; compute_status receives
+    # pending_event_kind=None; container still running → leaked-ctr but
+    # status stays completed. updated_at should NOT advance because
+    # transitioned=False on the second pass for terminal statuses.
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=True, as_json=False,
+        limit_was_explicit=False,
+    )
+    data_after_second = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data_after_second["status"] == "completed"
+    assert data_after_second["events_offset"] == offset_first
+    assert data_after_second["updated_at"] == updated_at_first
+
+
+def test_partial_line_no_offset_advance(tmp_naiw_data, capsys):
+    """A partial trailing fragment (no \\n) is not parsed, not malformed,
+    and the byte offset stays at the last full-line boundary."""
+    task_dir = _make_task(tmp_naiw_data, "alpha-001", status="running")
+    events_path = task_dir / "io" / ".naiw" / "events.jsonl"
+    fragment = json.dumps(
+        {"ts": "2026-05-16T10:00:00.000Z", "kind": "done", "payload": {}, "schema_version": 1}
+    )  # NO \n
+    events_path.write_bytes(fragment.encode("utf-8"))
+
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["events_offset"] == 0
+    assert data["status"] == "running"
+    error_log = task_dir / "meta" / "events-error.log"
+    assert not error_log.exists(), "partial line must NOT be classified as malformed"
+
+
+# ---------- auto_finish path (the Q5 landmine fix) -------------------------
+
+
+def test_done_event_with_auto_finish_true_triggers_teardown(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    from naiw_tasks.model import Status
+
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "done")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    teardown_calls = []
+
+    def fake_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
+        teardown_calls.append(
+            {
+                "task_id": task_id,
+                "terminal_status": terminal_status,
+                "policy_override": policy_override,
+            }
+        )
+
+    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    assert len(teardown_calls) == 1
+    assert teardown_calls[0]["task_id"] == "alpha-001"
+    assert teardown_calls[0]["terminal_status"] == Status.COMPLETED
+    # Pre-call, events_offset was advanced but status was NOT flipped to
+    # completed — the helper writes status itself.
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["events_offset"] > 0
+    assert data["status"] == "running"
+
+
+def test_fail_event_with_auto_finish_true_triggers_teardown_failed(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    from naiw_tasks.model import Status
+
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "fail")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    teardown_calls = []
+
+    def fake_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
+        teardown_calls.append({"terminal_status": terminal_status})
+
+    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    assert len(teardown_calls) == 1
+    assert teardown_calls[0]["terminal_status"] == Status.FAILED
+
+
+def test_wait_event_flips_to_waiting_for_user_no_container_stop(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "wait")
+    container = _mock_container("alpha-001", state="running")
+    client = _mock_client([container])
+
+    teardown_calls = []
+    monkeypatch.setattr(
+        list_cmd,
+        "_teardown_and_mark",
+        lambda *a, **kw: teardown_calls.append(kw),
+    )
+
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["status"] == "waiting_for_user"
+    assert teardown_calls == []
+    container.stop.assert_not_called()
+
+
+def test_auto_finish_done_triggers_two_store_update_task_calls(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """Atomic-write boundary: 2 store.update_task calls for auto_finish + done.
+    One in _reconcile_one for offset+max_size advance; one inside
+    _teardown_and_mark for terminal status after teardown."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "done")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    real_update = store.update_task
+    calls = []
+
+    def spy(td, mutator):
+        calls.append("update_task")
+        return real_update(td, mutator)
+
+    monkeypatch.setattr(store, "update_task", spy)
+    monkeypatch.setattr(list_cmd.store, "update_task", spy)
+
+    # Mock _teardown_and_mark to perform exactly one store.update_task call
+    # writing terminal status — matches the Plan 04-01 contract.
+    def fake_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
+        def _to_terminal(d):
+            d = dict(d)
+            d["status"] = str(terminal_status)
+            d["finished_at"] = "2026-05-16T10:00:00.000Z"
+            d["updated_at"] = "2026-05-16T10:00:00.000Z"
+            return d
+        store.update_task(td, _to_terminal)
+
+    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    assert len(calls) == 2, f"expected 2 store.update_task calls, got {len(calls)}"
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["status"] == "completed"
+
+
+def test_auto_finish_fail_triggers_two_store_update_task_calls(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "fail")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    real_update = store.update_task
+    calls = []
+
+    def spy(td, mutator):
+        calls.append("update_task")
+        return real_update(td, mutator)
+
+    monkeypatch.setattr(store, "update_task", spy)
+    monkeypatch.setattr(list_cmd.store, "update_task", spy)
+
+    def fake_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
+        def _to_terminal(d):
+            d = dict(d)
+            d["status"] = str(terminal_status)
+            d["finished_at"] = "2026-05-16T10:00:00.000Z"
+            d["updated_at"] = "2026-05-16T10:00:00.000Z"
+            return d
+        store.update_task(td, _to_terminal)
+
+    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+
+    assert len(calls) == 2
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["status"] == "failed"
+    assert data["finished_at"] is not None
+
+
+# ---------- DATA-08 monotonic-growth (lstat-enforced) ----------------------
+
+
+@pytest.mark.parametrize(
+    "subcase",
+    ["first_run", "growth", "missing_file"],
+)
+def test_data08_terminal_log_max_size_tracked(subcase, tmp_naiw_data, capsys):
+    if subcase == "first_run":
+        task_dir = _make_task(
+            tmp_naiw_data, "alpha-001", status="running",
+            terminal_log_max_size=0,
+        )
+        (task_dir / "io" / "terminal.log").write_bytes(b"x" * 500)
+        client = _mock_client([_mock_container("alpha-001", state="running")])
+        list_cmd.run(
+            _cfg(tmp_naiw_data), client,
+            limit=10, statuses=[], project_filter=None,
+            show_all=False, include_completed=False, as_json=False,
+            limit_was_explicit=False,
+        )
+        data = json.loads(
+            (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+        )
+        assert data["terminal_log_max_size"] == 500
+
+    elif subcase == "growth":
+        task_dir = _make_task(
+            tmp_naiw_data, "alpha-001", status="running",
+            terminal_log_max_size=500,
+        )
+        (task_dir / "io" / "terminal.log").write_bytes(b"x" * 800)
+        client = _mock_client([_mock_container("alpha-001", state="running")])
+        list_cmd.run(
+            _cfg(tmp_naiw_data), client,
+            limit=10, statuses=[], project_filter=None,
+            show_all=False, include_completed=False, as_json=False,
+            limit_was_explicit=False,
+        )
+        data = json.loads(
+            (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+        )
+        assert data["terminal_log_max_size"] == 800
+
+    elif subcase == "missing_file":
+        task_dir = _make_task(
+            tmp_naiw_data, "alpha-001", status="running",
+            terminal_log_max_size=0,
+        )
+        # No terminal.log created.
+        client = _mock_client([_mock_container("alpha-001", state="running")])
+        list_cmd.run(
+            _cfg(tmp_naiw_data), client,
+            limit=10, statuses=[], project_filter=None,
+            show_all=False, include_completed=False, as_json=False,
+            limit_was_explicit=False,
+        )
+        out = _capture(capsys)
+        assert "(log shrunk)" not in out
+        data = json.loads(
+            (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+        )
+        assert data["terminal_log_max_size"] == 0
+
+
+def test_data08_uses_lstat_not_stat():
+    """Source-text guard: list_cmd MUST call .lstat() on terminal.log, NEVER
+    a symlink-following .stat() on it. A Pi-side symlink at io/terminal.log
+    pointing to a controller-side file would otherwise leak that file's size
+    into the monotonic-growth tracker."""
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "list_cmd.py"
+    ).read_text(encoding="utf-8")
+    # At least one lstat call on terminal_log path.
+    assert re.search(r"terminal_log\.lstat\(\)", src), (
+        "expected terminal_log.lstat() in list_cmd.py"
+    )
+    # No symlink-following .stat() on terminal_log.
+    assert not re.search(r"terminal_log\.stat\(\)", src), (
+        "list_cmd must NOT call terminal_log.stat() (symlink-following)"
+    )
+
+
+def test_data08_log_shrunk_marker_appears_on_shrink(tmp_naiw_data, capsys):
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running",
+        terminal_log_max_size=1000,
+    )
+    (task_dir / "io" / "terminal.log").write_bytes(b"x" * 300)
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(log shrunk)" in out
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["terminal_log_max_size"] == 1000  # not lowered
+
+
+def test_data08_marker_persists_until_size_returns_above_prior_max(
+    tmp_naiw_data, capsys
+):
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running",
+        terminal_log_max_size=1000,
+    )
+    # Grow to 1500 — no shrink marker; max updates.
+    (task_dir / "io" / "terminal.log").write_bytes(b"x" * 1500)
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(log shrunk)" not in out
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["terminal_log_max_size"] == 1500
+
+    # Shrink to 800 — marker appears; max stays 1500.
+    (task_dir / "io" / "terminal.log").write_bytes(b"x" * 800)
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(log shrunk)" in out
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["terminal_log_max_size"] == 1500
+
+    # Grow back to 1600 — marker clears; max updates.
+    (task_dir / "io" / "terminal.log").write_bytes(b"x" * 1600)
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(log shrunk)" not in out
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["terminal_log_max_size"] == 1600
+
+
 # ---------- module hygiene --------------------------------------------------
 
 
