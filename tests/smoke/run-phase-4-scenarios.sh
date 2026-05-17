@@ -152,34 +152,6 @@ start_and_capture_id() {
     return 1
 }
 
-# Truncate / append helpers that work whether or not the file is owned by
-# the host user. Pi inside the task container runs as uid=1000 and writes
-# terminal.log; the host script may run as a different uid (e.g., CI runner
-# uid=1001). Direct shell redirection then fails with Permission denied.
-#
-# Approach: run a transient root container with the bind mount. Sudo was
-# tried first but GHA runners deny `sudo bash -c "..."` even though
-# `sudo -n true` succeeds — turns out passwordless sudo is restricted to
-# specific commands. The docker approach is uniform across environments
-# (CI, local Linux, WSL2) and costs ~0.5s per call, acceptable for a
-# scenario harness that runs once per CI invocation.
-_host_truncate() {
-    local path="$1"
-    local rel="${path#"$tmp_data/"}"
-    docker run --rm --entrypoint=/bin/sh --user 0:0 \
-        -v "$tmp_data:/d" \
-        "$task_image" -c ": > /d/$rel"
-}
-
-_host_append_lines() {
-    local path="$1" count="$2"
-    local rel="${path#"$tmp_data/"}"
-    docker run --rm --entrypoint=/bin/sh --user 0:0 \
-        -v "$tmp_data:/d" \
-        "$task_image" -c \
-        "for i in \$(seq 1 $count); do echo \"recovery line \$i to grow log above prior max\"; done >> /d/$rel"
-}
-
 reset_state_between_scenarios() {
     # Forget every task and container so the next scenario starts from task-001
     # against a clean tmp_data. Files under tasks/ may be owned by Pi
@@ -380,15 +352,13 @@ scenario_3() {
     fi
     echo "${_lib_log_prefix}   OK: high-water mark = $max_before bytes"
 
+    # Truncate from INSIDE the still-running container — Pi (uid=1000) owns
+    # the file and can always truncate her own log. Host-side truncation (even
+    # via docker --user 0:0) hit Permission denied in CI for reasons we
+    # couldn't fully chase down; doing it from inside sidesteps the whole
+    # uid-mismatch class of issues entirely.
+    docker exec "naiw-task-$tid" sh -c ": > /io/terminal.log" || return 1
     docker stop "naiw-task-$tid" >/dev/null || return 1
-    # terminal.log is owned by Pi (uid=1000 inside the container); the host
-    # may run as a different uid (CI runner = 1001), so direct truncate fails
-    # with Permission denied. Use sudo when available (CI passwordless), else
-    # fall back to a transient root container with the bind mount.
-    if ! _host_truncate "$log_path"; then
-        echo "${_lib_log_prefix}   FAIL: could not truncate $log_path" >&2
-        return 1
-    fi
 
     # After docker stop the task may show interrupted OR failed (exit-code-
     # dependent). Both are non-terminal-default-hidden (interrupted) vs
@@ -404,10 +374,18 @@ scenario_3() {
     fi
     echo "${_lib_log_prefix}   OK: max preserved at $max_after bytes (D-14)"
 
-    if ! _host_append_lines "$log_path" 200; then
-        echo "${_lib_log_prefix}   FAIL: could not regrow $log_path" >&2
+    # Restart container to append from inside. The append needs to push the
+    # file size above the prior high-water mark; do enough lines for a healthy
+    # margin past $max_before bytes.
+    docker start "naiw-task-$tid" >/dev/null || return 1
+    if ! wait_for_tmux_session "naiw-task-$tid" main 10; then
+        echo "${_lib_log_prefix}   FAIL: tmux did not return after restart" >&2
         return 1
     fi
+    docker exec "naiw-task-$tid" sh -c \
+        "for i in \$(seq 1 500); do echo \"recovery line \$i to grow log above prior max ($max_before bytes)\" >> /io/terminal.log; done" \
+        || return 1
+
     out="$(naiw_tasks list --all 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     if [[ "$out" == *"log shrunk"* ]]; then
         echo "${_lib_log_prefix}   FAIL: '(log shrunk)' marker still present after regrowth" >&2
