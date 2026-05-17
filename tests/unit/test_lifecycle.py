@@ -1084,7 +1084,7 @@ def test_finish_on_failed_short_circuits(tmp_naiw_data, capsys):
     # `failed` (terminal) is left untouched by the wrapper. The operator's
     # `naiw-tasks finish <id>` is idempotent on every terminal state, not just
     # COMPLETED. This is the contract Phase 4 D-09 needs so the lazy-event
-    # tailer can pre-mark a task `failed` (via `_teardown_and_mark`) without
+    # tailer can pre-mark a task `failed` (via `teardown_and_mark`) without
     # the wrapper second-guessing the teardown that already happened.
     _pre_create_task(tmp_naiw_data, "task-001", "failed")
     client, container = _fake_client(container_name="naiw-task-task-001")
@@ -1536,7 +1536,7 @@ def test_finish_marks_failed_for_dead_and_created_states(tmp_naiw_data):
 def test_finish_failed_by_verify_step_can_be_retried_via_helper(tmp_naiw_data, capsys):
     """After a verify-step failure leaves task in 'failed', the operator-facing
     wrapper is idempotent on terminal states (broadened short-circuit). The
-    retry path goes through the shared helper `_teardown_and_mark` directly,
+    retry path goes through the shared helper `teardown_and_mark` directly,
     which does NOT short-circuit and runs the full teardown sequence."""
     _pre_create_task(tmp_naiw_data, "task-001", "running")
     client, container = _fake_client(container_name="naiw-task-task-001")
@@ -1570,7 +1570,7 @@ def test_finish_failed_by_verify_step_can_be_retried_via_helper(tmp_naiw_data, c
 
     client.containers.get.side_effect = _get_after_recovery
     task_dir = tmp_naiw_data / "tasks" / "task-001"
-    lifecycle._teardown_and_mark(
+    lifecycle.teardown_and_mark(
         cfg,
         client,
         "task-001",
@@ -2056,15 +2056,15 @@ def test_finish_force_default_false_preserves_short_circuit(tmp_naiw_data, capsy
     assert "already failed" in captured.out
 
 
-# ---------- _teardown_and_mark — shared helper contract ----------------------
+# ---------- teardown_and_mark — shared helper contract ----------------------
 
 
-def test_teardown_and_mark_writes_completed_status(tmp_naiw_data):
+def testteardown_and_mark_writes_completed_status(tmp_naiw_data):
     task_dir = _pre_create_task(tmp_naiw_data, "task-001", "running")
     client, container = _fake_client(container_name="naiw-task-task-001")
     cfg = _make_cfg(tmp_naiw_data)
 
-    lifecycle._teardown_and_mark(
+    lifecycle.teardown_and_mark(
         cfg,
         client,
         "task-001",
@@ -2082,7 +2082,7 @@ def test_teardown_and_mark_writes_completed_status(tmp_naiw_data):
     assert on_disk["updated_at"] is not None
 
 
-def test_teardown_and_mark_writes_failed_status(tmp_naiw_data):
+def testteardown_and_mark_writes_failed_status(tmp_naiw_data):
     # The same teardown sequence (stop+remove+verify+optional worktree) runs
     # whether the caller asks for COMPLETED or FAILED as the terminal state.
     # The lazy-event tailer will call with FAILED on a `fail` event with
@@ -2091,7 +2091,7 @@ def test_teardown_and_mark_writes_failed_status(tmp_naiw_data):
     client, container = _fake_client(container_name="naiw-task-task-001")
     cfg = _make_cfg(tmp_naiw_data)
 
-    lifecycle._teardown_and_mark(
+    lifecycle.teardown_and_mark(
         cfg,
         client,
         "task-001",
@@ -2108,7 +2108,7 @@ def test_teardown_and_mark_writes_failed_status(tmp_naiw_data):
     assert on_disk["finished_at"] is not None
 
 
-def test_teardown_and_mark_does_not_short_circuit_on_completed_disk_state(
+def testteardown_and_mark_does_not_short_circuit_on_completed_disk_state(
     tmp_naiw_data,
 ):
     # The helper is the lazy-event-tailer's entry point — its caller has
@@ -2120,7 +2120,7 @@ def test_teardown_and_mark_does_not_short_circuit_on_completed_disk_state(
     client, container = _fake_client(container_name="naiw-task-task-001")
     cfg = _make_cfg(tmp_naiw_data)
 
-    lifecycle._teardown_and_mark(
+    lifecycle.teardown_and_mark(
         cfg,
         client,
         "task-001",
@@ -2136,7 +2136,7 @@ def test_teardown_and_mark_does_not_short_circuit_on_completed_disk_state(
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
 
-def test_teardown_and_mark_applies_delete_worktree_policy(
+def testteardown_and_mark_applies_delete_worktree_policy(
     tmp_naiw_data, mock_subprocess_run
 ):
     repo = _make_fake_repo(tmp_naiw_data, "alpha")
@@ -2154,7 +2154,7 @@ def test_teardown_and_mark_applies_delete_worktree_policy(
     client, _ = _fake_client(container_name="naiw-task-alpha-001")
     cfg = _make_cfg(tmp_naiw_data)
 
-    lifecycle._teardown_and_mark(
+    lifecycle.teardown_and_mark(
         cfg,
         client,
         "alpha-001",
@@ -2192,9 +2192,9 @@ def test_lifecycle_finish_delegates_to_teardown_and_mark():
     )
     src = src_path.read_text(encoding="utf-8")
 
-    # _teardown_and_mark is defined at module scope.
-    assert _re.search(r"^def _teardown_and_mark\(", src, _re.MULTILINE), (
-        "_teardown_and_mark function definition missing from lifecycle.py"
+    # teardown_and_mark is defined at module scope.
+    assert _re.search(r"^def teardown_and_mark\(", src, _re.MULTILINE), (
+        "teardown_and_mark function definition missing from lifecycle.py"
     )
 
     # Extract finish() body — bytes from `^def finish(` up to the next
@@ -2211,8 +2211,8 @@ def test_lifecycle_finish_delegates_to_teardown_and_mark():
     assert finish_start is not None, "finish() function missing from lifecycle.py"
     finish_body = "\n".join(lines[finish_start:finish_end])
 
-    assert "_teardown_and_mark(" in finish_body, (
-        "finish() wrapper must call _teardown_and_mark(); body was:\n"
+    assert "teardown_and_mark(" in finish_body, (
+        "finish() wrapper must call teardown_and_mark(); body was:\n"
         f"{finish_body}"
     )
     # The wrapper must compute a terminal_status and forward it. The literal
@@ -2230,7 +2230,7 @@ def test_lifecycle_finish_delegates_to_teardown_and_mark():
         f"{finish_body}"
     )
     assert "terminal_status=" in finish_body, (
-        "finish() wrapper must forward terminal_status to _teardown_and_mark; "
+        "finish() wrapper must forward terminal_status to teardown_and_mark; "
         f"body was:\n{finish_body}"
     )
 

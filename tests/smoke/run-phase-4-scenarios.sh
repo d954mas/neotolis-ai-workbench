@@ -443,7 +443,7 @@ scenario_4() {
     assert_contains "completed" "$out" "task shows completed" || return 1
     assert_contains "notfound" "$out" "container shows notfound (torn down)" || return 1
 
-    # _teardown_and_mark removes the container; assert it's gone. Brief retry
+    # teardown_and_mark removes the container; assert it's gone. Brief retry
     # window because container.remove(force=True) returns before the daemon
     # finishes the unlink on slow filesystems.
     local removed=no

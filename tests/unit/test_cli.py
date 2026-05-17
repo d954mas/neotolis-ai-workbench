@@ -473,6 +473,20 @@ def test_cli_list_rejects_unknown_status(patched_env, monkeypatch):
     fake.assert_not_called()
 
 
+def test_cli_list_rejects_non_positive_limit(patched_env, monkeypatch):
+    """`--limit 0` and `--limit -1` MUST be usage errors. Python slice
+    semantics would otherwise turn `--limit -1` into "all rows except the
+    last," which is a confusing accidental API. click.IntRange(min=1) gives
+    the operator a clear error message instead."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    for bad in ("0", "-1", "-10"):
+        result = runner.invoke(cli, ["list", "--limit", bad])
+        assert result.exit_code == 2, f"--limit {bad}: {result.output}"
+        fake.assert_not_called()
+
+
 # ---------- output subcommand ------------------------------------------------
 
 

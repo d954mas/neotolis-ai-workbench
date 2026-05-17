@@ -7,7 +7,7 @@ terminal.log max size, atomically persist (events_offset + status + max_size
 event lines to meta/events-error.log OUTSIDE the per-task lock.
 
 On `done`/`fail` + auto_finish=true: advance events_offset ONLY (NOT status),
-then call lifecycle._teardown_and_mark directly so the wrapper's
+then call lifecycle.teardown_and_mark directly so the wrapper's
 terminal-state short-circuit does not block teardown. The helper writes
 the final status itself.
 """
@@ -23,7 +23,7 @@ from naiw_common.events import Event
 from naiw_tasks import events_tail, reconcile, render, store
 from naiw_tasks.config import Config
 from naiw_tasks.events_tail import Malformed
-from naiw_tasks.lifecycle import _teardown_and_mark
+from naiw_tasks.lifecycle import teardown_and_mark
 from naiw_tasks.model import Status
 
 _LOG = logging.getLogger("naiw_tasks")
@@ -120,7 +120,7 @@ def _reconcile_one(
     Returns (computed_row, container_state_for_render, exit_code_for_render).
     Handles the auto_finish inline-teardown path: when a `done`/`fail` event
     is pending AND auto_finish=true, the mutator advances events_offset ONLY
-    (no status flip), then `_teardown_and_mark` is called directly so the
+    (no status flip), then `teardown_and_mark` is called directly so the
     helper writes the terminal status after teardown succeeds. This bypasses
     the operator-facing finish wrapper's terminal-state short-circuit, which
     would otherwise block teardown if the disk status happened to already be
@@ -169,7 +169,7 @@ def _reconcile_one(
 
     # Inline auto_finish gate. When auto_finish=true AND a terminal event is
     # pending AND disk is not already terminal: advance events_offset ONLY
-    # (no status flip) so `_teardown_and_mark` writes the terminal status
+    # (no status flip) so `teardown_and_mark` writes the terminal status
     # itself after teardown succeeds. Disk-status guard avoids double-write
     # if a previous list pass already advanced offset + the helper wrote the
     # status.
@@ -199,15 +199,47 @@ def _reconcile_one(
         terminal_status = (
             Status.COMPLETED if latest_event_kind == "done" else Status.FAILED
         )
-        # _teardown_and_mark raises SystemExit when verify-NotFound fails;
+        # teardown_and_mark raises SystemExit when verify-NotFound fails;
         # _mark_finish_failed has already written task.json. Swallow and
-        # continue rendering — operator sees the failed row.
+        # re-derive — see the post-block re-read below.
         with contextlib.suppress(SystemExit):
-            _teardown_and_mark(
+            teardown_and_mark(
                 cfg, client, task_id, task_dir,
                 terminal_status=terminal_status,
                 policy_override=None,
             )
+        # Sync the rendered row with what the helper actually wrote. On
+        # success the helper removed the container AND wrote the terminal
+        # status to task.json; on suppressed SystemExit _mark_finish_failed
+        # wrote status=failed while the container survived. Either way the
+        # cached (task_dict, ctr_state, computed) trio is stale — without
+        # re-derivation the renderer would show the pre-teardown computed
+        # value (lying about `completed` when disk says `failed`) and the
+        # --status / --completed filters would route the row to the wrong
+        # bucket.
+        with contextlib.suppress(FileNotFoundError, store.UnsupportedSchemaError):
+            task_dict = store.read_task(task_dir)
+        try:
+            container = by_task_id.get(task_id)
+            if container is not None:
+                container.reload()
+                ctr_state, exit_code = _container_state(container)
+            else:
+                ctr_state, exit_code = ("notfound", None)
+        except docker.errors.NotFound:
+            ctr_state, exit_code = ("notfound", None)
+        computed = reconcile.compute_status(
+            task_dict=task_dict,
+            ctr_state=ctr_state,
+            ctr_exit_code=exit_code,
+            pending_event_kind=None,
+        )
+        # Merge: the reconciler may have added "leaked ctr" (terminal-status
+        # task with a surviving container) on top of any "log shrunk" we
+        # already recorded.
+        for n in computed.notes:
+            if n not in notes:
+                notes.append(n)
 
     computed = reconcile.ComputedRow(
         status=computed.status,
@@ -295,7 +327,7 @@ def run(
         computed, ctr_state, exit_code = _reconcile_one(
             cfg, client, task_dir, task_dict, by_task_id,
         )
-        # Re-read task.json: _teardown_and_mark may have mutated it. Falling
+        # Re-read task.json: teardown_and_mark may have mutated it. Falling
         # back to the original task_dict on read error keeps the row visible
         # even if the post-teardown read fails (e.g. concurrent delete).
         with contextlib.suppress(FileNotFoundError, store.UnsupportedSchemaError):

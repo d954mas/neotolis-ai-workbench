@@ -11,7 +11,7 @@ passthrough, leaked-ctr marker, column rendering.
 
 Task 2b extends this file with: lazy event apply, malformed-line append to
 meta/events-error.log outside flock, idempotent reapply, partial-line policy,
-auto_finish done/fail → _teardown_and_mark direct call, wait → status flip
+auto_finish done/fail → teardown_and_mark direct call, wait → status flip
 only (no container call), 2 store.update_task calls under auto_finish,
 DATA-08 monotonic-growth lstat + shrink marker behaviour.
 """
@@ -768,7 +768,7 @@ def test_done_event_with_auto_finish_true_triggers_teardown(
             }
         )
 
-    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", fake_teardown)
     list_cmd.run(
         _cfg(tmp_naiw_data), client,
         limit=10, statuses=[], project_filter=None,
@@ -804,7 +804,7 @@ def test_fail_event_with_auto_finish_true_triggers_teardown_failed(
     def fake_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
         teardown_calls.append({"terminal_status": terminal_status})
 
-    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", fake_teardown)
     list_cmd.run(
         _cfg(tmp_naiw_data), client,
         limit=10, statuses=[], project_filter=None,
@@ -829,7 +829,7 @@ def test_wait_event_flips_to_waiting_for_user_no_container_stop(
     teardown_calls = []
     monkeypatch.setattr(
         list_cmd,
-        "_teardown_and_mark",
+        "teardown_and_mark",
         lambda *a, **kw: teardown_calls.append(kw),
     )
 
@@ -853,7 +853,7 @@ def test_auto_finish_done_triggers_two_store_update_task_calls(
 ):
     """Atomic-write boundary: 2 store.update_task calls for auto_finish + done.
     One in _reconcile_one for offset+max_size advance; one inside
-    _teardown_and_mark for terminal status after teardown."""
+    teardown_and_mark for terminal status after teardown."""
     task_dir = _make_task(
         tmp_naiw_data, "alpha-001", status="running", auto_finish=True
     )
@@ -870,7 +870,7 @@ def test_auto_finish_done_triggers_two_store_update_task_calls(
     monkeypatch.setattr(store, "update_task", spy)
     monkeypatch.setattr(list_cmd.store, "update_task", spy)
 
-    # Mock _teardown_and_mark to perform exactly one store.update_task call
+    # Mock teardown_and_mark to perform exactly one store.update_task call
     # writing terminal status — matches the Plan 04-01 contract.
     def fake_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
         def _to_terminal(d):
@@ -881,7 +881,7 @@ def test_auto_finish_done_triggers_two_store_update_task_calls(
             return d
         store.update_task(td, _to_terminal)
 
-    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", fake_teardown)
 
     list_cmd.run(
         _cfg(tmp_naiw_data), client,
@@ -925,7 +925,7 @@ def test_auto_finish_fail_triggers_two_store_update_task_calls(
             return d
         store.update_task(td, _to_terminal)
 
-    monkeypatch.setattr(list_cmd, "_teardown_and_mark", fake_teardown)
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", fake_teardown)
 
     list_cmd.run(
         _cfg(tmp_naiw_data), client,
@@ -940,6 +940,66 @@ def test_auto_finish_fail_triggers_two_store_update_task_calls(
     )
     assert data["status"] == "failed"
     assert data["finished_at"] is not None
+
+
+def test_auto_finish_teardown_failure_renders_actual_status_not_intent(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """B1 P1 regression: when teardown_and_mark fails after auto_finish, the
+    rendered row must reflect what's actually on disk (`failed`, written by
+    `_mark_finish_failed`), NOT the pre-teardown intent (`completed` because
+    the event kind was `done`).
+
+    Without the post-teardown re-derivation: pre-teardown `computed.status`
+    was `completed` (reconcile saw a `done` event), the renderer used that,
+    and --status / --completed filters routed the row to the wrong bucket
+    even though disk said `failed`. Operator saw `completed` next to a
+    surviving container — broken trust.
+    """
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "done")
+    container = _mock_container("alpha-001", state="running")
+    client = _mock_client([container])
+
+    # Simulate _mark_finish_failed: write status=failed to disk then raise
+    # SystemExit. list_cmd suppresses the exit; the row must STILL render
+    # as failed.
+    def failing_teardown(cfg, client, task_id, td, *, terminal_status, policy_override):
+        def _to_failed(d):
+            d = dict(d)
+            d["status"] = "failed"
+            d["failure_reason"] = "finish: container still present after rm"
+            d["updated_at"] = "2026-05-16T10:00:00.000Z"
+            return d
+        store.update_task(td, _to_failed)
+        raise SystemExit(1)
+
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", failing_teardown)
+
+    # --all so the row stays visible regardless of which terminal bucket
+    # it lands in.
+    list_cmd.run(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=True, include_completed=False, as_json=True,
+        limit_was_explicit=False,
+    )
+    payload = json.loads(_capture(capsys))
+    assert len(payload["tasks"]) == 1
+    rendered = payload["tasks"][0]
+    assert rendered["status"] == "failed", (
+        "rendered status must reflect on-disk reality, not pre-teardown intent"
+    )
+    # leaked-ctr surfaces because reconcile sees terminal status + present container.
+    assert "leaked ctr" in rendered["notes"]
+    # Disk also says failed (sanity).
+    on_disk = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["status"] == "failed"
+
 
 
 # ---------- DATA-08 monotonic-growth (lstat-enforced) ----------------------

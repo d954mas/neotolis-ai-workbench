@@ -550,7 +550,7 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({
 })
 
 
-def _teardown_and_mark(
+def teardown_and_mark(
     cfg: Config,
     client,
     task_id: str,
@@ -715,7 +715,7 @@ def finish(
     for the human typing `naiw-tasks finish <id>` against a task that has already
     reached a terminal state. Programmatic callers that need teardown regardless
     of disk status (e.g., the lazy-event tailer applying a `done`/`fail` event
-    with auto_finish=true) should call `_teardown_and_mark` directly with the
+    with auto_finish=true) should call `teardown_and_mark` directly with the
     desired terminal_status.
 
     `force=True` is the operator recovery hatch when an earlier auto_finish (or
@@ -724,7 +724,7 @@ def finish(
     short-circuit then traps the operator: the disk says `failed`, but the
     container is still alive and the lazy event tailer will not re-fire because
     `events_offset` is already past the event. `--force` bypasses the
-    short-circuit and re-runs `_teardown_and_mark`, preserving the existing
+    short-circuit and re-runs `teardown_and_mark`, preserving the existing
     terminal status (`failed` stays `failed`, `cancelled` stays `cancelled`)
     so the audit trail of WHY the task is in that state survives the retry.
     """
@@ -755,7 +755,7 @@ def finish(
     else:
         terminal_status = Status.COMPLETED
 
-    _teardown_and_mark(
+    teardown_and_mark(
         cfg,
         client,
         task_id,

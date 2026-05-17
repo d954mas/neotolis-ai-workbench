@@ -141,9 +141,9 @@ def doctor() -> None:
 @cli.command("list")
 @click.option(
     "--limit",
-    type=int,
+    type=click.IntRange(min=1),
     default=10,
-    help="Max rows after filtering (default 10).",
+    help="Max rows after filtering (default 10; must be >= 1).",
 )
 @click.option(
     "--status",
