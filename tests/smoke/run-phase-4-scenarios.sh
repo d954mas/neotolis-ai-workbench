@@ -182,12 +182,15 @@ _host_append_lines() {
 
 reset_state_between_scenarios() {
     # Forget every task and container so the next scenario starts from task-001
-    # against a clean tmp_data. No-op if there's nothing to clean.
+    # against a clean tmp_data. Files under tasks/ may be owned by Pi
+    # (uid=1000) — direct host `rm` then fails silently — so do the cleanup
+    # from a root container that has the bind mount.
     for ctr in $(docker ps -a --filter "label=naiw.managed=1" --format '{{.Names}}' 2>/dev/null); do
         docker rm -f "$ctr" >/dev/null 2>&1 || true
     done
-    rm -rf "${tmp_data:?}"/tasks/* 2>/dev/null || true
-    rm -rf "${tmp_data:?}"/workspace/repos/* 2>/dev/null || true
+    docker run --rm --entrypoint=/bin/sh --user 0:0 \
+        -v "$tmp_data:/d" \
+        "$task_image" -c "rm -rf /d/tasks/* /d/workspace/repos/*" >/dev/null 2>&1 || true
 }
 
 # ─── Scenario 1 — list happy path + reconciliation ─────────────────
@@ -248,7 +251,11 @@ scenario_1() {
     out="$(naiw_tasks list --all 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     assert_contains "$tid" "$out" "--all finds task" || return 1
 
-    out="$(naiw_tasks list --all --json 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    # 2>/dev/null on the --json call: startup_checks.warn_uid_mismatch_with_image
+    # writes a multi-line uid-mismatch note to stderr which jq cannot parse.
+    # The note is informational, not an error — the command's exit code is the
+    # source of truth for whether the call succeeded.
+    out="$(naiw_tasks list --all --json 2>/dev/null)" || { printf '%s\n' "$out" >&2; return 1; }
     # Schema spot-check: top-level `tasks` array with at least one entry whose
     # `id` matches our task. events_offset is only populated when list_cmd
     # actually writes to task.json (transition / events / size change) — too
@@ -496,9 +503,9 @@ scenario_4() {
     if ! wait_for_tmux_session "naiw-task-$tid2" main 10; then
         echo "${_lib_log_prefix}   FAIL: tmux not up for $tid2" >&2; return 1
     fi
-    # ASCII-only reason: avoid Unicode quoting subtleties in tmux send-keys.
+    # naiw-signal fail takes `--reason TEXT`, not a positional arg.
     docker exec "naiw-task-$tid2" tmux send-keys -t main \
-        'naiw-signal fail "scenario 4b - simulated failure"' Enter || return 1
+        'naiw-signal fail --reason "scenario 4b - simulated failure"' Enter || return 1
 
     local events_path2="$tmp_data/tasks/$tid2/io/.naiw/events.jsonl"
     if ! wait_for_log_marker "$events_path2" '"kind":"fail"' 15; then
