@@ -156,47 +156,28 @@ start_and_capture_id() {
 # the host user. Pi inside the task container runs as uid=1000 and writes
 # terminal.log; the host script may run as a different uid (e.g., CI runner
 # uid=1001). Direct shell redirection then fails with Permission denied.
-# Strategy: prefer passwordless sudo (CI), fall back to a transient root
-# container with the bind mount (works anywhere docker does).
-_can_sudo=""
-_sudo_check() {
-    if [[ -n "$_can_sudo" ]]; then
-        return
-    fi
-    if sudo -n true 2>/dev/null; then
-        _can_sudo=yes
-    else
-        _can_sudo=no
-    fi
-}
-
+#
+# Approach: run a transient root container with the bind mount. Sudo was
+# tried first but GHA runners deny `sudo bash -c "..."` even though
+# `sudo -n true` succeeds — turns out passwordless sudo is restricted to
+# specific commands. The docker approach is uniform across environments
+# (CI, local Linux, WSL2) and costs ~0.5s per call, acceptable for a
+# scenario harness that runs once per CI invocation.
 _host_truncate() {
     local path="$1"
-    _sudo_check
-    if [[ "$_can_sudo" == "yes" ]]; then
-        sudo bash -c ": > $(printf '%q' "$path")"
-    else
-        # Mount $tmp_data into a one-shot root container and truncate from inside.
-        # Path mapping: $tmp_data → /d, so /tmp/xxx/tasks/T/io/terminal.log → /d/tasks/T/io/terminal.log.
-        local rel="${path#"$tmp_data/"}"
-        docker run --rm --entrypoint=/bin/sh --user 0:0 \
-            -v "$tmp_data:/d" \
-            "$task_image" -c ": > /d/$rel"
-    fi
+    local rel="${path#"$tmp_data/"}"
+    docker run --rm --entrypoint=/bin/sh --user 0:0 \
+        -v "$tmp_data:/d" \
+        "$task_image" -c ": > /d/$rel"
 }
 
 _host_append_lines() {
     local path="$1" count="$2"
-    _sudo_check
-    if [[ "$_can_sudo" == "yes" ]]; then
-        sudo bash -c "for i in \$(seq 1 $count); do echo \"recovery line \$i to grow log above prior max\"; done >> $(printf '%q' "$path")"
-    else
-        local rel="${path#"$tmp_data/"}"
-        docker run --rm --entrypoint=/bin/sh --user 0:0 \
-            -v "$tmp_data:/d" \
-            "$task_image" -c \
-            "for i in \$(seq 1 $count); do echo \"recovery line \$i to grow log above prior max\"; done >> /d/$rel"
-    fi
+    local rel="${path#"$tmp_data/"}"
+    docker run --rm --entrypoint=/bin/sh --user 0:0 \
+        -v "$tmp_data:/d" \
+        "$task_image" -c \
+        "for i in \$(seq 1 $count); do echo \"recovery line \$i to grow log above prior max\"; done >> /d/$rel"
 }
 
 reset_state_between_scenarios() {
@@ -268,13 +249,19 @@ scenario_1() {
     assert_contains "$tid" "$out" "--all finds task" || return 1
 
     out="$(naiw_tasks list --all --json 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
-    local offset
-    offset="$(printf '%s' "$out" | jq '.tasks[0].task_json.events_offset' 2>/dev/null || echo "MISSING")"
-    if [[ "$offset" == "MISSING" || "$offset" == "null" ]]; then
-        echo "${_lib_log_prefix}   FAIL: --json payload missing events_offset" >&2
+    # Schema spot-check: top-level `tasks` array with at least one entry whose
+    # `id` matches our task. events_offset is only populated when list_cmd
+    # actually writes to task.json (transition / events / size change) — too
+    # brittle to require it here. The presence of the documented shape is what
+    # downstream consumers actually rely on.
+    local id_in_json
+    id_in_json="$(printf '%s' "$out" | jq -r '.tasks[0].id // empty' 2>/dev/null || true)"
+    if [[ "$id_in_json" != "$tid" ]]; then
+        echo "${_lib_log_prefix}   FAIL: --json tasks[0].id=$id_in_json, expected $tid" >&2
+        printf '%s\n' "$out" | head -c 400 | sed 's/^/        /' >&2
         return 1
     fi
-    echo "${_lib_log_prefix}   OK: --json payload includes events_offset=$offset"
+    echo "${_lib_log_prefix}   OK: --json payload well-formed (tasks[0].id=$id_in_json)"
 
     naiw_tasks finish "$tid" --delete-worktree >/dev/null 2>&1 || true
     echo "${_lib_log_prefix} Scenario 1 PASS"
@@ -509,18 +496,31 @@ scenario_4() {
     if ! wait_for_tmux_session "naiw-task-$tid2" main 10; then
         echo "${_lib_log_prefix}   FAIL: tmux not up for $tid2" >&2; return 1
     fi
+    # ASCII-only reason: avoid Unicode quoting subtleties in tmux send-keys.
     docker exec "naiw-task-$tid2" tmux send-keys -t main \
-        'naiw-signal fail "scenario 4b — simulated failure"' Enter || return 1
+        'naiw-signal fail "scenario 4b - simulated failure"' Enter || return 1
 
     local events_path2="$tmp_data/tasks/$tid2/io/.naiw/events.jsonl"
     if ! wait_for_log_marker "$events_path2" '"kind":"fail"' 15; then
         echo "${_lib_log_prefix}   FAIL: fail event did not land" >&2
+        echo "${_lib_log_prefix}     path: $events_path2" >&2
         if [[ -f "$events_path2" ]]; then
-            echo "${_lib_log_prefix}     events.jsonl contents:" >&2
+            local sz
+            sz="$(stat -c %s "$events_path2" 2>/dev/null || echo "?")"
+            echo "${_lib_log_prefix}     events.jsonl size=${sz}; contents:" >&2
             cat "$events_path2" 2>/dev/null | sed 's/^/        /' >&2
         else
-            echo "${_lib_log_prefix}     events.jsonl does not exist (path: $events_path2)" >&2
+            echo "${_lib_log_prefix}     events.jsonl does not exist" >&2
+            if [[ -d "$tmp_data/tasks/$tid2/io" ]]; then
+                echo "${_lib_log_prefix}     io/ dir tree:" >&2
+                ls -la "$tmp_data/tasks/$tid2/io/" 2>&1 | sed 's/^/        /' >&2
+                ls -la "$tmp_data/tasks/$tid2/io/.naiw/" 2>&1 | sed 's/^/        /' >&2 || true
+            fi
         fi
+        # Dump tmux pane contents to see if naiw-signal printed an error.
+        echo "${_lib_log_prefix}     tmux pane snapshot:" >&2
+        docker exec "naiw-task-$tid2" tmux capture-pane -t main -p 2>&1 \
+            | tail -20 | sed 's/^/        /' >&2 || true
         return 1
     fi
     naiw_tasks list >/dev/null 2>&1 || return 1
