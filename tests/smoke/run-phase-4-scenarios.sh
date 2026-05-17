@@ -78,6 +78,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Restore the locally-built controller image under the ghcr.io tag the compose
+# file pins to. The existing `test_containerized_smoke_harness_passes` runs
+# `docker pull ghcr.io/d954mas/naiw-controller:latest`, which on CI replaces
+# the freshly-built image (with Phase 4 commands) with the published one from
+# master (no `list` / `output`). The pull cannot overwrite the local-only
+# `naiw-controller:latest` tag, so re-tagging from there is safe.
+if docker image inspect naiw-controller:latest >/dev/null 2>&1; then
+    docker tag naiw-controller:latest ghcr.io/d954mas/naiw-controller:latest >/dev/null 2>&1 || true
+fi
+
 # Bring up the proxy. Controller is one-shot via `compose run`.
 docker network inspect naiw-task-net >/dev/null 2>&1 \
     || docker network create naiw-task-net >/dev/null
