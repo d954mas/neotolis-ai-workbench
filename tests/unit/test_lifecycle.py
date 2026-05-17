@@ -1967,6 +1967,95 @@ def test_finish_on_waiting_for_user_runs_full_teardown(tmp_naiw_data):
     assert on_disk["finished_at"] is not None
 
 
+# ---------- finish(force=True) — operator recovery hatch --------------------
+
+
+def test_finish_force_on_failed_re_runs_teardown_preserving_failed_status(
+    tmp_naiw_data,
+):
+    # The B1 recovery scenario: auto_finish wrote `failed` to disk but the
+    # container survived. Operator types `naiw-tasks finish <id> --force`.
+    # Expected: teardown runs again; status stays `failed` (the operator's
+    # audit trail of WHY this task is failed is not overwritten with
+    # `completed`).
+    _pre_create_task(tmp_naiw_data, "task-001", "failed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None, force=True)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert on_disk["finished_at"] is not None
+
+
+def test_finish_force_on_cancelled_re_runs_teardown_preserving_cancelled(
+    tmp_naiw_data,
+):
+    _pre_create_task(tmp_naiw_data, "task-001", "cancelled")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None, force=True)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "cancelled"
+
+
+def test_finish_force_on_completed_re_runs_teardown_preserving_completed(
+    tmp_naiw_data,
+):
+    _pre_create_task(tmp_naiw_data, "task-001", "completed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None, force=True)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_force_on_running_behaves_like_normal_finish(tmp_naiw_data):
+    # `--force` is only meaningful for terminal statuses (where the short-
+    # circuit would otherwise trip). On a `running` task it is a no-op —
+    # full teardown runs and status flips to `completed` exactly as without
+    # the flag. Locking this in prevents future drift where `--force` might
+    # be interpreted as "preserve current status no matter what."
+    _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None, force=True)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_finish_force_default_false_preserves_short_circuit(tmp_naiw_data, capsys):
+    # Belt-and-braces: confirm the default value of `force` matches the
+    # pre-Phase-4-recovery behaviour. A call site that does not pass `force`
+    # must still hit the short-circuit on terminal statuses.
+    _pre_create_task(tmp_naiw_data, "task-001", "failed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    container.stop.assert_not_called()
+    container.remove.assert_not_called()
+    captured = capsys.readouterr()
+    assert "already failed" in captured.out
+
+
 # ---------- _teardown_and_mark — shared helper contract ----------------------
 
 

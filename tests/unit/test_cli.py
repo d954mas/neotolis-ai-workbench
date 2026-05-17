@@ -393,6 +393,27 @@ def test_finish_neither_flag_falls_back_to_task_policy(monkeypatch, patched_env)
     assert kwargs["policy_override"] is None
 
 
+def test_finish_force_flag_forwards_to_lifecycle(monkeypatch, patched_env):
+    """`naiw-tasks finish <id> --force` must propagate force=True to
+    lifecycle.finish so the operator recovery path actually fires. The
+    default (no flag) must propagate force=False — locking the contract
+    on both sides prevents drift where someone changes the click default."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "finish", fake)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["finish", "foo-001", "--force"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["force"] is True
+
+    fake.reset_mock()
+    result = runner.invoke(cli, ["finish", "foo-001"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["force"] is False
+
+
 # ---------- list subcommand --------------------------------------------------
 
 

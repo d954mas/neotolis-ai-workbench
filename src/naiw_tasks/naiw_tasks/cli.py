@@ -263,12 +263,25 @@ def output_command(ctx: click.Context, task_id: str, lines: int) -> None:
     default=False,
     help="Force delete_worktree (overrides task.json.finish_policy).",
 )
+@click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Re-run teardown even when task.json already records a terminal "
+        "status. Use when a previous auto_finish or finish wrote `failed` "
+        "but the container is still running (e.g., docker rm was rejected "
+        "by the proxy). The existing terminal status is preserved."
+    ),
+)
 @click.pass_context
 def finish(
     ctx: click.Context,
     task_id: str,
     keep_worktree: bool,
     delete_worktree: bool,
+    force: bool,
 ) -> None:
     """Stop+remove the container, apply worktree policy, mark completed."""
     # Conflict is a usage error, NOT silent last-flag-wins. Otherwise an
@@ -297,6 +310,7 @@ def finish(
         ctx.obj["client"],
         task_id,
         policy_override=policy_override,
+        force=force,
     )
 
 

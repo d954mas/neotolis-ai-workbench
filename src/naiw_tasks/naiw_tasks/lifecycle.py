@@ -707,8 +707,9 @@ def finish(
     client,
     task_id: str,
     policy_override: str | None = None,
+    force: bool = False,
 ) -> None:
-    """Permissive finish (operator-facing). Idempotent on any terminal disk status.
+    """Permissive finish (operator-facing). Idempotent on terminal disk status.
 
     The wrapper preserves the friendly "already <status>; nothing to do" message
     for the human typing `naiw-tasks finish <id>` against a task that has already
@@ -716,6 +717,16 @@ def finish(
     of disk status (e.g., the lazy-event tailer applying a `done`/`fail` event
     with auto_finish=true) should call `_teardown_and_mark` directly with the
     desired terminal_status.
+
+    `force=True` is the operator recovery hatch when an earlier auto_finish (or
+    a previous finish attempt) wrote a terminal status to task.json but failed
+    to tear down the container — e.g. `docker rm` rejected by the proxy. The
+    short-circuit then traps the operator: the disk says `failed`, but the
+    container is still alive and the lazy event tailer will not re-fire because
+    `events_offset` is already past the event. `--force` bypasses the
+    short-circuit and re-runs `_teardown_and_mark`, preserving the existing
+    terminal status (`failed` stays `failed`, `cancelled` stays `cancelled`)
+    so the audit trail of WHY the task is in that state survives the retry.
     """
     validate_task_id(task_id)
     task_dir = cfg.data_root / "tasks" / task_id
@@ -728,17 +739,27 @@ def finish(
 
     data = store.read_task(task_dir)
     current_status = data.get("status")
-    if current_status in TERMINAL_STATUSES:
+    if current_status in TERMINAL_STATUSES and not force:
         print(
             f"naiw-tasks: task {task_id} is already {current_status}; nothing to do"
         )
         return
+
+    # On force-retry of a task that is already terminal, preserve the recorded
+    # outcome — re-running teardown should not silently flip `failed` to
+    # `completed`. Status() raises on unknown strings; that is the right
+    # behaviour because we should not invent a terminal status the operator
+    # cannot see in the model.
+    if current_status in TERMINAL_STATUSES and force:
+        terminal_status = Status(current_status)
+    else:
+        terminal_status = Status.COMPLETED
 
     _teardown_and_mark(
         cfg,
         client,
         task_id,
         task_dir,
-        terminal_status=Status.COMPLETED,
+        terminal_status=terminal_status,
         policy_override=policy_override,
     )
