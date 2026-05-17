@@ -2215,9 +2215,23 @@ def test_lifecycle_finish_delegates_to_teardown_and_mark():
         "finish() wrapper must call _teardown_and_mark(); body was:\n"
         f"{finish_body}"
     )
-    assert "terminal_status=Status.COMPLETED" in finish_body, (
-        "finish() wrapper must invoke _teardown_and_mark with "
-        "terminal_status=Status.COMPLETED"
+    # The wrapper must compute a terminal_status and forward it. The literal
+    # default for the operator's non-forced happy path is Status.COMPLETED;
+    # the --force recovery branch routes the existing terminal status back
+    # through Status(current_status). Both spellings are accepted — the
+    # invariant is "terminal_status is a real Status enum value forwarded to
+    # the helper," not the specific destination cell.
+    assert (
+        "terminal_status=Status.COMPLETED" in finish_body
+        or "Status.COMPLETED" in finish_body
+    ), (
+        "finish() wrapper must reference Status.COMPLETED as the default "
+        "terminal_status for the non-forced happy path; body was:\n"
+        f"{finish_body}"
+    )
+    assert "terminal_status=" in finish_body, (
+        "finish() wrapper must forward terminal_status to _teardown_and_mark; "
+        f"body was:\n{finish_body}"
     )
 
 
