@@ -18,7 +18,9 @@ import sys
 import click
 
 from naiw_tasks import attach as attach_mod
+from naiw_tasks import clean as clean_mod
 from naiw_tasks import config, lifecycle, startup_checks
+from naiw_tasks import disk as disk_mod
 from naiw_tasks import list_cmd as list_cmd_module
 from naiw_tasks import output_cmd as output_cmd_module
 from naiw_tasks.docker_client import make_client
@@ -382,6 +384,57 @@ def finish(
         policy_override=policy_override,
         force=force,
     )
+
+
+@cli.command("clean")
+@click.option(
+    "--older-than",
+    "older_than",
+    required=True,
+    help="Duration: <int><unit> where unit is s, m, h, d, w (e.g. '30d').",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="List candidates and orphans; do not remove.",
+)
+@click.option(
+    "--yes",
+    "skip_prompt",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt (cron-friendly).",
+)
+@click.pass_context
+def clean_command(
+    ctx: click.Context,
+    older_than: str,
+    dry_run: bool,
+    skip_prompt: bool,
+) -> None:
+    """Remove terminal-state tasks older than DURATION; prune orphan containers."""
+    try:
+        td = clean_mod.parse_older_than(older_than)
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    rc = clean_mod.run(
+        ctx.obj["cfg"],
+        _client_for(ctx),
+        older_than=td,
+        dry_run=dry_run,
+        skip_prompt=skip_prompt,
+    )
+    sys.exit(rc)
+
+
+@cli.command("disk")
+@click.pass_context
+def disk_command(ctx: click.Context) -> None:
+    """Print per-subdirectory disk usage of ~/naiw-data/; warn at >80%."""
+    rc = disk_mod.run(ctx.obj["cfg"])
+    sys.exit(rc)
 
 
 if __name__ == "__main__":  # pragma: no cover
