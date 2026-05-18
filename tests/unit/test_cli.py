@@ -644,6 +644,49 @@ def test_cli_output_lines_zero_returns_exit_2(patched_env, monkeypatch):
     assert result.exit_code == 2
 
 
+# ---------- clean: graceful-degrade scope -----------------------------------
+
+
+def test_clean_degrades_on_docker_check_failed(monkeypatch, patched_env):
+    """clean must continue with client=None when Docker is unreachable."""
+    captured: dict = {}
+
+    def raising_run_all(cfg, client, **kwargs):
+        raise cli_mod.startup_checks.DockerCheckFailed("daemon unreachable")
+
+    def fake_clean_run(cfg, client, **kwargs):
+        captured["client"] = client
+        return 0
+
+    monkeypatch.setattr(cli_mod.startup_checks, "run_all", raising_run_all)
+    monkeypatch.setattr(cli_mod.clean_mod, "run", fake_clean_run)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["clean", "--older-than", "30d", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert captured["client"] is None, (
+        "DockerCheckFailed must degrade to client=None"
+    )
+
+
+def test_clean_propagates_non_docker_startup_failure(monkeypatch, patched_env):
+    """Local-safety checks (symlinked data root, Windows-FS gating) raise
+    StartupCheckFailed but NOT DockerCheckFailed. clean must propagate
+    these — they signal an unsafe config and disk-only mode would not
+    make the underlying issue safe.
+    """
+    fake_clean_run = MagicMock(return_value=0)
+
+    def raising_run_all(cfg, client, **kwargs):
+        raise StartupCheckFailed("~/naiw-data/ must not be a symlink")
+
+    monkeypatch.setattr(cli_mod.startup_checks, "run_all", raising_run_all)
+    monkeypatch.setattr(cli_mod.clean_mod, "run", fake_clean_run)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["clean", "--older-than", "30d", "--yes"])
+    assert result.exit_code == 2, result.output
+    fake_clean_run.assert_not_called()
+
+
 # ---------- source-policy guard ---------------------------------------------
 
 

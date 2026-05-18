@@ -467,16 +467,14 @@ def clean_command(
         td = clean_mod.parse_older_than(older_than)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    # Try to get a docker client; if startup checks fail (Docker unreachable
-    # or proxy drift), proceed in disk-only mode rather than exiting 2 —
-    # the whole point of clean is to free space, and disk reclaim must keep
-    # working even when the Docker daemon is down. StartupCheckFailed has
-    # already printed the underlying reason to stderr; clean.run prints a
-    # "(orphan-container scan skipped: docker unreachable)" line in its
-    # output so the operator understands the degraded mode.
+    # Graceful-degrade ONLY on Docker reachability / proxy-drift failures
+    # so disk reclaim still works when the daemon is down. Other
+    # StartupCheckFailed variants (symlinked data root, Windows-FS gating)
+    # signal an unsafe local config and MUST still hard-stop — they
+    # propagate untouched.
     try:
         client = _client_for(ctx)
-    except startup_checks.StartupCheckFailed:
+    except startup_checks.DockerCheckFailed:
         client = None
     rc = clean_mod.run(
         ctx.obj["cfg"],

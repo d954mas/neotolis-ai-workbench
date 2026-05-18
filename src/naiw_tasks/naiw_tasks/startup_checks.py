@@ -31,6 +31,15 @@ class StartupCheckFailed(SystemExit):
         super().__init__(2)
 
 
+class DockerCheckFailed(StartupCheckFailed):
+    """Docker daemon/proxy unreachable or proxy allowlist drift.
+
+    Distinct subclass so commands that can run disk-only (clean) can
+    catch ONLY Docker reachability failures, not local safety checks
+    (symlink-of-data-root, Windows-FS-on-Linux gating).
+    """
+
+
 def check_naiw_data_not_symlink(data_root: Path) -> None:
     if data_root.is_symlink():
         target = data_root.resolve()
@@ -85,7 +94,7 @@ def check_docker_reachable(
             last_exc = exc
             if attempt + 1 < attempts:
                 time.sleep(delay_s)
-    raise StartupCheckFailed(
+    raise DockerCheckFailed(
         f"cannot reach Docker via proxy at {proxy_url}; "
         f"is deploy/docker-compose.yml up? ({last_exc})"
     ) from last_exc
@@ -104,18 +113,18 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
         except urllib.error.HTTPError as exc:
             if exc.code == expected:
                 return
-            raise StartupCheckFailed(
+            raise DockerCheckFailed(
                 f"proxy allowlist drift - {label} returned {exc.code}; "
                 f"expected {expected} ({why}); cf. deploy/docker-compose.yml"
             ) from exc
         except urllib.error.URLError as exc:
-            raise StartupCheckFailed(
+            raise DockerCheckFailed(
                 f"proxy allowlist drift - {label} failed to reach the proxy "
                 f"at {proxy_url} ({exc}); expected {expected} ({why}); "
                 f"cf. deploy/docker-compose.yml"
             ) from exc
         else:
-            raise StartupCheckFailed(
+            raise DockerCheckFailed(
                 f"proxy allowlist drift - {label} returned 2xx; expected "
                 f"{expected} ({why}); cf. deploy/docker-compose.yml"
             )
