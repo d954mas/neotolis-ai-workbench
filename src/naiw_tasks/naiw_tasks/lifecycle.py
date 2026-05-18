@@ -111,6 +111,15 @@ def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
     storage = task_dir / "storage"
     storage.mkdir(exist_ok=True)
     storage.chmod(0o1777)
+    # Pre-create terminal.log mode 0666 so BOTH the in-container pi (uid 1000,
+    # appends via tmux pipe-pane) and the host operator (any uid, appends
+    # the recovery banner) can write. Without this, a host with uid != 1000
+    # cannot append the banner — _append_recovery_banner falls back to a
+    # silent WARN and the operator never sees the banner in the log.
+    terminal_log = task_dir / "io" / "terminal.log"
+    if not terminal_log.exists():
+        terminal_log.touch()
+    terminal_log.chmod(0o666)
     if kind is TaskKind.GENERIC:
         work = task_dir / "work"
         work.mkdir(exist_ok=True)
@@ -882,6 +891,16 @@ def recover(cfg: Config, client, task_id: str) -> None:
 
     # Display-only count; authoritative bump happens in the final mutator.
     banner_count = int(initial.get("recovery_count", 0)) + 1
+
+    # Legacy compat: tasks started before terminal.log was pre-created
+    # mode 0666 may have a pi-owned 0644 file. Widen to 0666 so the
+    # host-side banner append below does not fail on operator uid != 1000.
+    # Best-effort: only owner can chmod, so if the operator doesn't own it
+    # this no-ops and _append_recovery_banner falls back to its WARN path.
+    terminal_log = task_dir / "io" / "terminal.log"
+    if terminal_log.exists():
+        with suppress(OSError):
+            terminal_log.chmod(0o666)
 
     # Banner lands BEFORE container start so it appears even if start fails.
     _append_recovery_banner(

@@ -54,4 +54,11 @@ mkdir -p \
 # controller, so the shell helper covers the generic case here).
 chmod 1777 "$target/storage" "$target/io" "$target/io/.naiw" "$target/work"
 
+# Pre-create terminal.log mode 0666 so both pi (uid 1000, appends via
+# tmux pipe-pane) and the host (any uid, appends recovery banner) can
+# write. Without this, host append fails with EACCES when operator uid
+# differs from pi uid.
+touch "$target/io/terminal.log"
+chmod 0666 "$target/io/terminal.log"
+
 echo "naiw-new-task: created $target/{meta,work,io,io/.naiw,storage}"

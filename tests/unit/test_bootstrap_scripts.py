@@ -176,6 +176,13 @@ def test_new_task_chmods_all_bind_sources_1777(tmp_path):
     # meta/ stays at default (host-only, never bind-mounted into container).
     meta_mode = (td / "meta").stat().st_mode & 0o7777
     assert meta_mode != 0o1777, "meta/ must NOT be world-writable"
+    # terminal.log pre-created 0666 so host + container-pi can both append.
+    tl = td / "io" / "terminal.log"
+    assert tl.is_file(), "terminal.log must be pre-created"
+    tl_mode = tl.stat().st_mode & 0o7777
+    assert tl_mode == 0o666, (
+        f"terminal.log mode = {oct(tl_mode)}, expected 0o666"
+    )
 
 
 @pytest.mark.parametrize(

@@ -280,6 +280,25 @@ def test_make_skeleton_creates_storage_dir_mode_1777(tmp_naiw_data):
     assert (storage_p.stat().st_mode & 0o7777) == 0o1777
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_skeleton_precreates_terminal_log_mode_0666(tmp_naiw_data):
+    """terminal.log must be pre-created mode 0666 so both pi (uid 1000,
+    appends via tmux pipe-pane) AND the host operator (any uid, appends
+    the recovery banner host-side) can write. Regression for CI failure
+    where uid != 1000 runner could not append the banner.
+    """
+    td = lifecycle._make_skeleton(tmp_naiw_data, "task-tl-1", TaskKind.GENERIC)
+    tl = td / "io" / "terminal.log"
+    assert tl.is_file(), "terminal.log must be pre-created"
+    mode = tl.stat().st_mode & 0o777
+    assert mode == 0o666, (
+        f"terminal.log mode = {oct(mode)}, expected 0o666"
+    )
+
+
 def test_build_volumes_includes_storage_bind_mount(tmp_naiw_data):
     """_build_volumes maps tasks/<id>/storage/ -> /home/pi:rw so Pi's home
     survives container teardown (replaces the previous tmpfs /home/pi)."""
