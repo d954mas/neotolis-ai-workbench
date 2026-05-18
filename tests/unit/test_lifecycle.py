@@ -2021,6 +2021,43 @@ def test_finish_terminal_disk_with_surviving_container_auto_recovers(
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
 
+def test_finish_failed_start_with_policy_override_cleans_worktree(
+    tmp_naiw_data, mock_subprocess_run
+):
+    # The documented disk-reclaim path: when `start` fails after creating
+    # the worktree (containers.run errored) it writes status=failed and
+    # tells the operator to run `naiw-tasks finish <id> --delete-worktree`.
+    # The container was never created, so the new auto-recovery probe sees
+    # NotFound — but an explicit policy override must bypass the
+    # short-circuit and run the worktree teardown.
+    _make_fake_repo(tmp_naiw_data, "alpha")
+    work = tmp_naiw_data / "tasks" / "alpha-001" / "work"
+    work.mkdir(parents=True)
+    _pre_create_task(
+        tmp_naiw_data,
+        "alpha-001",
+        "failed",
+        kind="project",
+        project="alpha",
+        worktree_path=str(work),
+    )
+    client, _ = _fake_client(container_name="naiw-task-alpha-001")
+    client.containers.get.side_effect = docker.errors.NotFound("never created")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(
+        cfg, client, "alpha-001", policy_override="delete_worktree"
+    )
+
+    cmds = [list(c.args[0]) for c in mock_subprocess_run.call_args_list]
+    assert any("worktree" in c and "remove" in c for c in cmds), (
+        f"expected `git worktree remove` to run for failed-start cleanup; got {cmds}"
+    )
+    tj = tmp_naiw_data / "tasks" / "alpha-001" / "meta" / "task.json"
+    # Failed status preserved — we didn't overwrite with `completed`.
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
+
+
 def test_finish_on_interrupted_runs_full_teardown(tmp_naiw_data):
     # `interrupted` is NOT terminal — the operator can still finish an
     # interrupted task (per the permissive matrix). The wrapper must NOT
@@ -2219,11 +2256,11 @@ def test_teardown_and_mark_records_failure_reason(tmp_naiw_data):
     assert on_disk["failure_reason"] == "smoke test exited 1"
 
 
-def test_teardown_and_mark_preserves_existing_failure_reason(tmp_naiw_data):
-    # If task.json already carries a failure_reason (e.g., a prior verify-step
-    # failure wrote "finish: ..."), a subsequent teardown_and_mark call with
-    # a new failure_reason must NOT clobber it — the original cause is the
-    # load-bearing audit trail.
+def test_teardown_and_mark_caller_reason_replaces_stale_finish_reason(tmp_naiw_data):
+    # When a previous reap left `failure_reason: "finish: ..."` (a teardown
+    # plumbing error, not the task's actual outcome) and the retry surfaces
+    # a fresh signal reason from `naiw-signal fail --reason ...`, the new
+    # reason is authoritative and must replace the stale cleanup error.
     task_dir = _pre_create_task(tmp_naiw_data, "task-001", "failed")
 
     def set_existing_reason(d):
@@ -2245,11 +2282,74 @@ def test_teardown_and_mark_preserves_existing_failure_reason(tmp_naiw_data):
         task_dir,
         terminal_status=Status.FAILED,
         policy_override=None,
-        failure_reason="late-arrival reason from fail event",
+        failure_reason="smoke test exited 1",
     )
 
     on_disk = json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
-    assert on_disk["failure_reason"] == "finish: container survived stop+remove"
+    assert on_disk["failure_reason"] == "smoke test exited 1"
+
+
+def test_teardown_and_mark_clears_stale_finish_reason_on_completed(tmp_naiw_data):
+    # A `done` event whose first reap attempt failed teardown leaves
+    # `failure_reason: "finish: ..."`. When the retry succeeds with
+    # terminal_status=COMPLETED, the stale failure_reason must be cleared —
+    # a completed task should not carry any failure_reason.
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "failed")
+
+    def set_existing_reason(d):
+        d = dict(d)
+        d["failure_reason"] = "finish: container survived stop+remove"
+        return d
+
+    from naiw_tasks import store
+    store.update_task(task_dir, set_existing_reason)
+
+    client, _container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.COMPLETED,
+        policy_override=None,
+    )
+
+    on_disk = json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
+    assert "failure_reason" not in on_disk
+
+
+def test_teardown_and_mark_preserves_non_finish_failure_reason(tmp_naiw_data):
+    # A real failure_reason recorded by an earlier write (NOT a `finish:`
+    # plumbing error) must NOT be clobbered when teardown_and_mark is
+    # invoked with terminal_status=FAILED and no new caller reason.
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "failed")
+
+    def set_existing_reason(d):
+        d = dict(d)
+        d["failure_reason"] = "container exited with code 137"
+        return d
+
+    from naiw_tasks import store
+    store.update_task(task_dir, set_existing_reason)
+
+    client, _container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.FAILED,
+        policy_override=None,
+    )
+
+    on_disk = json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
+    assert on_disk["failure_reason"] == "container exited with code 137"
 
 
 def test_teardown_and_mark_preserves_existing_finished_at(tmp_naiw_data):

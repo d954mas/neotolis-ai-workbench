@@ -708,12 +708,21 @@ def teardown_and_mark(
             d["status"] = str(terminal_status)
             d["finished_at"] = d.get("finished_at") or ts_now
             d["updated_at"] = ts_now
-            # Preserve the diagnostic reason carried by `naiw-signal fail
-            # --reason ...`. Without this the auto_finish/reap path loses the
-            # reason payload — task.json says `failed` but no `failure_reason`
-            # and the operator has to grep events.jsonl by hand.
-            if failure_reason and not d.get("failure_reason"):
+            # failure_reason precedence on a successful retry:
+            #   1. A caller-provided reason (e.g., the Pi-side
+            #      `naiw-signal fail --reason ...` payload) is authoritative —
+            #      it replaces any stale `finish:` teardown error left by an
+            #      earlier reap that hit a transient docker hiccup.
+            #   2. Otherwise on COMPLETED, clear any leftover `finish:`
+            #      reason — a successfully completed task shouldn't carry a
+            #      failure reason from a previous teardown attempt.
+            #   3. On FAILED/CANCELLED without a new reason, preserve what's
+            #      there (might be the real cause from an earlier write).
+            existing = str(d.get("failure_reason") or "")
+            if failure_reason:
                 d["failure_reason"] = failure_reason
+            elif terminal_status == Status.COMPLETED and existing.startswith("finish:"):
+                d.pop("failure_reason", None)
             return d
 
         store.update_task(task_dir, _to_terminal)
@@ -767,28 +776,38 @@ def finish(
     data = store.read_task(task_dir)
     current_status = data.get("status")
     if current_status in TERMINAL_STATUSES and not force:
-        container_name = data.get("container_name", _container_name(task_id))
-        # Probe before short-circuit so a leaked container can't trap the
-        # operator. NotFound → genuine no-op; APIError → assume gone and
-        # short-circuit, operator can --force if needed.
-        try:
-            client.containers.get(container_name)
-            container_present = True
-        except docker.errors.NotFound:
-            container_present = False
-        except docker.errors.APIError as exc:
-            logging.getLogger("naiw_tasks").warning(
-                "finish: task %s: cannot inspect container before short-circuit: %s",
-                task_id, exc,
-            )
-            container_present = False
-        if not container_present:
-            print(
-                f"naiw-tasks: task {task_id} is already {current_status}; nothing to do"
-            )
-            return
-        # Fall through with terminal status preserved (auto-recovery).
-        force = True
+        # An explicit worktree-policy flag is the operator asking for a
+        # specific cleanup action — most commonly the documented
+        # `naiw-tasks finish <id> --delete-worktree` to reclaim disk from a
+        # failed start (status=failed, container never came up but worktree
+        # exists). Honor the request and bypass the short-circuit so the
+        # teardown sequence runs the policy branch even when the container
+        # is verifiably gone.
+        if policy_override is not None:
+            force = True
+        else:
+            container_name = data.get("container_name", _container_name(task_id))
+            # Probe before short-circuit so a leaked container can't trap the
+            # operator. NotFound → genuine no-op; APIError → assume gone and
+            # short-circuit, operator can --force if needed.
+            try:
+                client.containers.get(container_name)
+                container_present = True
+            except docker.errors.NotFound:
+                container_present = False
+            except docker.errors.APIError as exc:
+                logging.getLogger("naiw_tasks").warning(
+                    "finish: task %s: cannot inspect container before short-circuit: %s",
+                    task_id, exc,
+                )
+                container_present = False
+            if not container_present:
+                print(
+                    f"naiw-tasks: task {task_id} is already {current_status}; nothing to do"
+                )
+                return
+            # Fall through with terminal status preserved (auto-recovery).
+            force = True
 
     # On force-retry of a task that is already terminal, preserve the recorded
     # outcome — re-running teardown should not silently flip `failed` to
