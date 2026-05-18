@@ -183,6 +183,13 @@ def _enumerate_candidates(
     return out
 
 
+def _container_state(c) -> str:
+    """Return the docker State.Status string ('running', 'exited', etc.) or
+    '' on missing/malformed attrs.
+    """
+    return str(c.attrs.get("State", {}).get("Status") or "").lower()
+
+
 def _enumerate_orphans(client, data_root: Path) -> list:
     """Return docker.models.containers.Container instances labelled
     naiw.managed=1 whose task folder is missing.
@@ -248,14 +255,21 @@ def run(
                 f"{_humanize_bytes(c.size_bytes)}"
             )
         if orphans:
+            running_count = sum(1 for c in orphans if _container_state(c) == "running")
+            warn_suffix = (
+                f" — {running_count} STILL RUNNING; force-removal will kill them"
+                if running_count > 0 else ""
+            )
             click.echo(
                 f"DRY RUN -- would prune {len(orphans)} orphan "
-                f"container(s):"
+                f"container(s){warn_suffix}:"
             )
             for c in orphans:
                 labels = c.attrs.get("Config", {}).get("Labels") or {}
+                state = _container_state(c)
+                state_tag = f"  [RUNNING]" if state == "running" else f"  [{state}]"
                 click.echo(
-                    f"  {c.name} (task-id={labels.get('naiw.task-id')})"
+                    f"  {c.name} (task-id={labels.get('naiw.task-id')}){state_tag}"
                 )
         elif docker_skipped:
             click.echo(
@@ -309,9 +323,19 @@ def run(
     # orphans for this same invocation. Re-enumerate to capture both.
     final_orphans = _enumerate_orphans(client, cfg.data_root)
     for c in final_orphans:
+        state = _container_state(c)
+        labels = c.attrs.get("Config", {}).get("Labels") or {}
+        # Loud notice on stderr BEFORE the force-remove for a running orphan:
+        # this is destructive (kills a running process) and the operator may
+        # have intended to recover the task by recreating its folder.
+        if state == "running":
+            click.echo(
+                f"naiw-tasks: clean: orphan container {c.name} is still "
+                f"running — force-killing (task folder missing)",
+                err=True,
+            )
         try:
             c.remove(force=True)
-            labels = c.attrs.get("Config", {}).get("Labels") or {}
             click.echo(
                 f"removed orphan container {c.name} "
                 f"(task-id={labels.get('naiw.task-id')})"

@@ -217,6 +217,67 @@ def test_clean_no_candidates_no_client_notes_skip(tmp_path, capsys):
     )
 
 
+def _orphan_mock(name: str, task_id: str, state: str):
+    orphan = MagicMock()
+    orphan.name = name
+    orphan.attrs = {
+        "Config": {"Labels": {
+            "naiw.managed": "1", "naiw.task-id": task_id,
+        }},
+        "State": {"Status": state},
+    }
+    return orphan
+
+
+def test_dry_run_flags_running_orphan_with_warning(tmp_path, capsys):
+    """A running orphan (label naiw.managed=1, task folder missing, state=running)
+    is destructive to force-remove. Dry-run must call this out loudly so the
+    operator notices before adding --yes.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    client = MagicMock()
+    client.containers.list.return_value = [
+        _orphan_mock("naiw-task-t-zombie", "t-zombie", "running"),
+        _orphan_mock("naiw-task-t-dead", "t-dead", "exited"),
+    ]
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(cfg, client, dt.timedelta(days=365), dry_run=True)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "STILL RUNNING" in out, (
+        f"dry-run must shout about running orphans; got: {out!r}"
+    )
+    assert "[RUNNING]" in out, (
+        f"running orphan line must carry [RUNNING] tag; got: {out!r}"
+    )
+    assert "[exited]" in out, (
+        f"exited orphan line must carry [exited] tag; got: {out!r}"
+    )
+
+
+def test_real_run_prints_stderr_notice_before_force_kill(tmp_path, capsys):
+    """When real-running (not dry), the loud stderr notice happens
+    BEFORE force-remove so the operator can see what was killed even if
+    grep-ing only the success line.
+    """
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    client = MagicMock()
+    client.containers.list.return_value = [
+        _orphan_mock("naiw-task-t-zombie", "t-zombie", "running"),
+    ]
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(
+        cfg, client, dt.timedelta(days=365), skip_prompt=True,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "force-killing" in captured.err, (
+        f"running orphan must trigger stderr warning; got stderr: {captured.err!r}"
+    )
+
+
 def test_yes_skips_prompt(tmp_path, monkeypatch):
     confirm_calls: list = []
     monkeypatch.setattr(
