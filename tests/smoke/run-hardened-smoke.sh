@@ -493,7 +493,7 @@ fi
 # the token line through sed. Avoids confusing stale [REDACTED] matches
 # from Step 16, and avoids racing pipe-pane buffering.
 docker exec "$container" tmux send-keys -t main \
-    "printf 'ghp_TESTTOKEN1234567890abcdef\n'" Enter
+    "printf 'ghp_TESTTOKEN1234567890abcdefghij0123456789\n'" Enter
 docker exec "$container" tmux send-keys -t main \
     "printf 'POST_TOKEN_SENTINEL_REC\n'" Enter
 
