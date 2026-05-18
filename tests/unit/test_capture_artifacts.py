@@ -87,6 +87,41 @@ def test_capture_writes_all_six_artifacts_for_project_task(tmp_path):
     assert "new.txt" in (art / "changed-files.txt").read_text()
 
 
+def test_capture_includes_uncommitted_changes_and_untracked(tmp_path):
+    """Pi typically edits files without committing. `git diff <base>..HEAD`
+    would lose every uncommitted change; the artifact would only show
+    committed-on-top-of-base diffs. We compare base to working tree and
+    append untracked files via git ls-files --others.
+    """
+    td = _make_task_dir(tmp_path)
+    work = tmp_path / "work"
+    base = _make_git_repo(work)
+    # After the helper repo's second commit, modify a committed file
+    # WITHOUT committing, and create a brand-new untracked file.
+    (work / "README.md").write_text("base\nedit by Pi\n")
+    (work / "agent-scratch.txt").write_text("agent created me\n")
+    data = {
+        "kind": "project",
+        "base_commit": base,
+        "worktree_path": str(work),
+    }
+    _capture_artifacts(td, data, work)
+    art = td / "meta" / "artifacts"
+    diff = (art / "diff.patch").read_text()
+    changed = (art / "changed-files.txt").read_text()
+    # Uncommitted edit must show up in the patch.
+    assert "edit by Pi" in diff, (
+        f"uncommitted edit lost from diff.patch: {diff!r}"
+    )
+    # And in changed-files.txt as a modified line.
+    assert "README.md" in changed
+    # Untracked file is appended with the `??` tag.
+    assert "agent-scratch.txt" in changed
+    assert "??\tagent-scratch.txt" in changed, (
+        f"untracked must carry ?? tag: {changed!r}"
+    )
+
+
 def test_generic_task_skips_git_artifacts(tmp_path):
     td = _make_task_dir(tmp_path)
     data = {"kind": "generic"}

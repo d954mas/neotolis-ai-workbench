@@ -777,23 +777,38 @@ def _capture_artifacts(
         )
         return
 
+    # NOTE: `git diff <base>` (no `..HEAD`) — compares <base> to the
+    # working tree, capturing committed + staged + unstaged changes.
+    # `<base>..HEAD` would lose every uncommitted edit, which is the most
+    # common Pi/agent state at finish-time. Untracked files are appended
+    # to changed-files.txt with the `??` tag (matches git status porcelain
+    # convention) since `git diff` never emits them.
     try:
-        r = _run_git("diff", "--name-status", f"{base}..HEAD")
-        (artifacts / "changed-files.txt").write_text(
-            r.stdout, encoding="utf-8"
-        )
+        r = _run_git("diff", "--name-status", base)
+        changed = r.stdout
         if r.returncode != 0:
             logger.warning(
                 "artifact capture: git diff --name-status non-zero "
                 "(%d): %s", r.returncode, r.stderr.strip(),
             )
+        r_unt = _run_git("ls-files", "--others", "--exclude-standard")
+        if r_unt.returncode == 0 and r_unt.stdout:
+            untracked = "".join(
+                f"??\t{line}\n"
+                for line in r_unt.stdout.splitlines()
+                if line
+            )
+            changed = changed + untracked
+        (artifacts / "changed-files.txt").write_text(
+            changed, encoding="utf-8"
+        )
     except OSError as exc:
         logger.warning(
             "artifact capture: changed-files.txt write: %s", exc,
         )
 
     try:
-        r = _run_git("diff", f"{base}..HEAD")
+        r = _run_git("diff", "--binary", base)
         (artifacts / "diff.patch").write_text(
             r.stdout, encoding="utf-8"
         )
