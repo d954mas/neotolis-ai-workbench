@@ -8,6 +8,7 @@ future refactor cannot silently advance past a half-written event.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -322,6 +323,29 @@ def test_tail_events_does_not_write_events_error_log(tmp_path: Path):
     assert not sibling.exists()
     parent_meta = tmp_path / "meta"
     assert not parent_meta.exists()
+
+
+def test_tail_events_refuses_symlink_events_journal(tmp_path: Path):
+    """Pi could symlink events.jsonl to a host file; lstat + S_ISREG + O_NOFOLLOW
+    must refuse to read it, surfacing a single Malformed line and leaving
+    offset unchanged so no host bytes ever reach events-error.log."""
+    target = tmp_path / "host-secret"
+    target.write_bytes(b'{"ts":"2026-05-16T10:00:00.000Z","kind":"done","payload":{},"schema_version":1}\n')
+    events_path = tmp_path / "events.jsonl"
+    try:
+        os.symlink(target, events_path)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks not supported on this filesystem")
+
+    new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert new_offset == 0
+    assert events == []
+    assert len(malformed) == 1
+    assert "refused" in malformed[0].reason
+    assert "host-secret" not in malformed[0].raw_line
+    assert "done" not in malformed[0].raw_line
 
 
 # ---------- module hygiene --------------------------------------------------

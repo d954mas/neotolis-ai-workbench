@@ -3,9 +3,16 @@
 The reader has no write side effects: callers persist new_offset and decide
 where to log malformed lines. A trailing fragment without \\n is left unread
 so the next call can pick it up after the producer completes the line.
+
+Pi has rw on /io/.naiw and could replace events.jsonl with a symlink to a
+host file. Defense: lstat + S_ISREG + O_NOFOLLOW (same pattern as
+output_cmd.py). Non-regular files surface as a single Malformed line so the
+operator sees it in meta/events-error.log; no host bytes are ever read.
 """
 
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,9 +69,18 @@ def tail_events(
 ) -> tuple[int, list[Event], list[Malformed]]:
     """Return (new_offset, valid_events, malformed_lines) from `offset` to EOF."""
     try:
-        size = events_path.stat().st_size
+        st = events_path.lstat()
     except FileNotFoundError:
         return (offset, [], [])
+    if not stat.S_ISREG(st.st_mode):
+        # Pi tried to substitute a symlink/fifo/socket for events.jsonl.
+        # Surface as a single Malformed line; don't follow, don't advance offset.
+        return (
+            offset,
+            [],
+            [Malformed(raw_line="", reason=f"refused: not a regular file (mode={oct(st.st_mode)})")],
+        )
+    size = st.st_size
 
     if offset > size:
         # File shrank/recreated; re-parse so existing events are not dropped.
@@ -73,9 +89,21 @@ def tail_events(
     if offset == size:
         return (offset, [], [])
 
-    with open(events_path, "rb") as f:
-        f.seek(offset)
-        chunk = f.read(size - offset)
+    try:
+        fd = os.open(str(events_path), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        # ELOOP if events.jsonl became a symlink between lstat and open
+        # (TOCTOU). Treat like the non-regular branch above.
+        return (
+            offset,
+            [],
+            [Malformed(raw_line="", reason=f"refused: open failed ({exc})")],
+        )
+    try:
+        os.lseek(fd, offset, os.SEEK_SET)
+        chunk = os.read(fd, size - offset)
+    finally:
+        os.close(fd)
 
     # Leave a trailing partial line for the next pass.
     lines = chunk.split(b"\n")
