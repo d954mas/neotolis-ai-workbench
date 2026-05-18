@@ -48,7 +48,10 @@ mkdir -p \
     "$target/storage"
 
 # Sticky-writable on every bind-mount source so pi uid 1000 inside the
-# container can write regardless of the operator's host uid.
-chmod 1777 "$target/storage" "$target/io" "$target/io/.naiw"
+# container can write regardless of the operator's host uid. work/ is the
+# /work bind-mount source for generic tasks (project tasks have it
+# managed by `git worktree add` + a separate widen step in the
+# controller, so the shell helper covers the generic case here).
+chmod 1777 "$target/storage" "$target/io" "$target/io/.naiw" "$target/work"
 
 echo "naiw-new-task: created $target/{meta,work,io,io/.naiw,storage}"
