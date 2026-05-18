@@ -82,6 +82,40 @@ _hardened_cleanup() {
 }
 trap _hardened_cleanup EXIT INT TERM
 
+# ─── Helper: start_smoke_container ──────────────────────────────────────
+# Lifts the main hardened-container run+wait block into a function so the
+# REC-IMG-06 redaction probe can re-run it after a host-side recover
+# (docker rm + re-run with the same flags + same name + same mounts +
+# same labels). Used by the main start AND by the recover-boundary probe.
+start_smoke_container() {
+    docker run -d --init --name "$container" \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        --read-only \
+        --tmpfs /tmp:rw,size=512m,mode=1777 \
+        --tmpfs /run:rw,size=64m,mode=755 \
+        --pids-limit=512 \
+        --memory=4g \
+        --memory-swap=4g \
+        --cpus=2 \
+        --network naiw-task-net \
+        --restart=no \
+        -t \
+        --label naiw.managed=1 \
+        --label naiw.task-id=smoke-test \
+        --label naiw.role=task-container \
+        -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
+        -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
+        -v "$TMP/naiw-data/tasks/smoke-test/storage:/home/pi:rw" \
+        -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
+        -v "$TMP/naiw-data/secrets/test_token:/run/secrets/test_token:ro" \
+        "$image" >/dev/null
+    wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 30 \
+        || fail "container not ready"
+    wait_for_tmux_session "$container" main 10 \
+        || fail "tmux 'main' session not online within 10s"
+}
+
 # ─── Step 01: platform check ───────────────────────────────────────────
 step_check "" "Step 01: platform check (Linux + non-/mnt/c \$HOME)"
 if ! [[ "$(uname -s)" == "Linux" && ! "$HOME" =~ ^/mnt/c ]]; then
@@ -225,36 +259,7 @@ step_check "" "Starting main hardened container"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/storage"
 chmod 1777 "$TMP/naiw-data/tasks/smoke-test/storage"
 
-docker run -d --init --name "$container" \
-    --cap-drop=ALL \
-    --security-opt=no-new-privileges \
-    --read-only \
-    --tmpfs /tmp:rw,size=512m,mode=1777 \
-    --tmpfs /run:rw,size=64m,mode=755 \
-    --pids-limit=512 \
-    --memory=4g \
-    --memory-swap=4g \
-    --cpus=2 \
-    --network naiw-task-net \
-    --restart=no \
-    -t \
-    --label naiw.managed=1 \
-    --label naiw.task-id=smoke-test \
-    --label naiw.role=task-container \
-    -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
-    -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
-    -v "$TMP/naiw-data/tasks/smoke-test/storage:/home/pi:rw" \
-    -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
-    -v "$TMP/naiw-data/secrets/test_token:/run/secrets/test_token:ro" \
-    "$image" >/dev/null
-
-wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 30 \
-    || fail "main container not ready"
-# terminal.log existing doesn't mean tmux is accepting send-keys yet — the
-# server needs to bind /tmp/tmux-1000/default. Wait for it explicitly to
-# avoid a 'no such file or directory' race in later send-keys probes.
-wait_for_tmux_session "$container" main 10 \
-    || fail "tmux 'main' session not online within 10s of container start"
+start_smoke_container
 log_path="$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
 events_path="$TMP/naiw-data/tasks/smoke-test/io/.naiw/events.jsonl"
 step_ok "" "Main hardened container ready"
@@ -441,6 +446,54 @@ if (( size_after < size_before )); then
 fi
 step_ok "HARD-restart" "terminal.log appended through stop+start (before=$size_before after=$size_after)"
 
+# ─── Step 17b: REC-IMG-06 redaction filter across recover boundary ─────
+# Simulates a host-side recover (docker rm + re-run with the same name,
+# mounts, and labels) and asserts the pipe-pane redaction filter still
+# catches a Pi-shaped token in the NEW container — the filter is re-issued
+# by the entrypoint on every container start.
+step_check "REC-IMG-06" "Step 17b: IMG-06 redaction filter active across recover boundary"
+
+# Capture pre-recover size to assert monotonic growth across the boundary.
+pre_size_rec=$(stat -c%s "${log_path}")
+
+# Simulate operator interrupt: stop the container.
+docker stop --time 10 "$container" >/dev/null
+
+# Host-side recovery banner write (matches lifecycle._append_recovery_banner).
+{
+    printf '\n===== RECOVERED #1 AT %sZ =====\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%S.000')"
+} >> "${log_path}"
+
+# docker rm + re-run with the same flags via the extracted helper.
+docker rm -f "$container" >/dev/null
+
+start_smoke_container
+
+# Print a Pi-shaped token inside the recovered container.
+docker exec "$container" tmux send-keys -t main \
+    "printf 'ghp_TESTTOKEN1234567890abcdef\n'" Enter
+
+# Poll for the [REDACTED] marker — pipe-pane writes terminal.log asynchronously.
+if ! wait_for_log_marker "${log_path}" '[REDACTED]' 3; then
+    step_fail "REC-IMG-06" "[REDACTED] marker missing from terminal.log after recover (waited 3s)"
+    fail "REC-IMG-06 redaction not active post-recover"
+fi
+if grep -q 'ghp_TESTTOKEN' "${log_path}"; then
+    step_fail "REC-IMG-06" "raw token ghp_TESTTOKEN leaked into terminal.log post-recover"
+    fail "REC-IMG-06 raw token leaked"
+fi
+if ! grep -q 'RECOVERED #1' "${log_path}"; then
+    step_fail "REC-IMG-06" "recovery banner missing from terminal.log"
+    fail "REC-IMG-06 banner missing"
+fi
+post_size_rec=$(stat -c%s "${log_path}")
+if (( post_size_rec < pre_size_rec )); then
+    step_fail "REC-IMG-06" "terminal.log shrunk across recover (${pre_size_rec} -> ${post_size_rec})"
+    fail "REC-IMG-06 terminal.log shrunk"
+fi
+step_ok "REC-IMG-06" "redaction filter green post-recover; banner present; terminal.log grew ${pre_size_rec} -> ${post_size_rec}"
+
 # ─── Step 18: signal cycle — naiw-signal done → events.jsonl ───────────
 step_check "SIG-cycle" "Step 18: naiw-signal done appends valid event to events.jsonl"
 docker exec -u pi "$container" naiw-signal done --summary "hardened-smoke ok" \
@@ -535,10 +588,10 @@ fi
 # probed (step_check "ID" in script). Narrative mentions in headers/comments
 # don't count — that's what makes this an honest coverage check.
 step_check "" "Step 45: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
-checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+)' tests/smoke/HARDENED-CHECKLIST.md \
-    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
-script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+)"' tests/smoke/run-hardened-smoke.sh \
-    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
+checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND)' tests/smoke/HARDENED-CHECKLIST.md \
+    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND' | sort -u)"
+script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND)"' tests/smoke/run-hardened-smoke.sh \
+    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND' | sort -u)"
 set +e
 drift="$(diff <(echo "$checklist_ids") <(echo "$script_ids"))"
 set -e
