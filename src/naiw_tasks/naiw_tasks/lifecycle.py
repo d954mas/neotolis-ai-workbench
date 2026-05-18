@@ -16,9 +16,13 @@ cause and a cleanup hint to stderr, then raise StartFailed. The operator
 reclaims disk via `naiw-tasks finish <id> --delete-worktree`.
 """
 
+import errno
 import logging
 import logging.handlers
+import os
+import shutil
 import stat
+import subprocess
 import sys
 from contextlib import suppress
 from dataclasses import replace
@@ -568,6 +572,224 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({
 })
 
 
+def _replicate_output_tree(src_root: Path, dst_root: Path) -> None:
+    """Mirror src_root at dst_root using hard-links with copy-fallback.
+
+    Walks src_root with followlinks=False (Pi-planted directory symlinks like
+    io/output/loop -> .. would otherwise cause an unbounded walk). For each
+    regular file, prefers os.link (zero disk overhead, instant) and falls back
+    to a copy via an O_NOFOLLOW-defended fd on EXDEV/EPERM/EMLINK. Symlinks
+    and non-regular files are skipped with a warning — io/ is Pi-territory and
+    a Pi-planted symlink output/secret.txt -> /etc/passwd MUST NOT exfiltrate.
+    """
+    logger = logging.getLogger("naiw_tasks")
+    if not src_root.exists():
+        return
+    for dirpath, _dirnames, filenames in os.walk(
+        src_root, topdown=True, followlinks=False
+    ):
+        rel = Path(dirpath).relative_to(src_root)
+        target_dir = dst_root / rel
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for fname in filenames:
+            src = Path(dirpath) / fname
+            dst = target_dir / fname
+            try:
+                st = src.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                logger.warning(
+                    "artifact capture: %s not a regular file "
+                    "(mode=%o); skipping",
+                    src, st.st_mode,
+                )
+                continue
+            try:
+                os.link(str(src), str(dst))
+                continue
+            except OSError as exc:
+                if exc.errno not in (
+                    errno.EXDEV, errno.EPERM, errno.EMLINK,
+                ):
+                    logger.warning(
+                        "artifact capture: os.link failed for %s: %s; "
+                        "skipping",
+                        src, exc,
+                    )
+                    continue
+            # Copy fallback. The O_NOFOLLOW-defended fd ensures a TOCTOU swap
+            # (Pi replacing the regular file with a symlink between lstat and
+            # open) raises ELOOP instead of resolving to the symlink target.
+            try:
+                fd = os.open(str(src), os.O_RDONLY | os.O_NOFOLLOW)
+            except OSError as exc:
+                logger.warning(
+                    "artifact capture: O_NOFOLLOW open failed "
+                    "for %s: %s; skipping",
+                    src, exc,
+                )
+                continue
+            try:
+                with os.fdopen(fd, "rb") as fsrc:
+                    dst.write_bytes(fsrc.read())
+                shutil.copystat(
+                    str(src), str(dst), follow_symlinks=False
+                )
+            except OSError as exc:
+                logger.warning(
+                    "artifact capture: copy fallback failed "
+                    "for %s: %s",
+                    src, exc,
+                )
+
+
+def _safe_copy_io_file(src: Path, dst: Path) -> None:
+    """Copy a single io/ regular file to dst with O_NOFOLLOW defense.
+
+    Used for terminal.log and summary.md captures where hard-link is not
+    desired — terminal.log is treated as append-only by pipe-pane even
+    after teardown by image conventions, and a copy decouples the artifact
+    from any post-finish Pi behaviour.
+    """
+    logger = logging.getLogger("naiw_tasks")
+    try:
+        st = src.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        logger.warning(
+            "artifact capture: %s not a regular file "
+            "(mode=%o); skipping",
+            src, st.st_mode,
+        )
+        return
+    try:
+        fd = os.open(str(src), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: cannot open %s: %s; skipping",
+            src, exc,
+        )
+        return
+    try:
+        with os.fdopen(fd, "rb") as fsrc:
+            dst.write_bytes(fsrc.read())
+        shutil.copystat(str(src), str(dst), follow_symlinks=False)
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: write/copystat failed for %s: %s",
+            src, exc,
+        )
+
+
+def _capture_artifacts(
+    task_dir: Path, task_data: dict, work_path: Path | None,
+) -> None:
+    """Bundle the six artifact items into meta/artifacts/.
+
+    Best-effort: any failure here is logged WARN and swallowed so the caller
+    can still flip terminal status. Repeated calls overwrite — there is no
+    historical artifact versioning.
+
+    Bundle contents (per task kind):
+      - terminal.log      (always; copied, not hard-linked)
+      - summary.md        (if present in io/; copied)
+      - output/...        (if present in io/; per-file hard-link, copy fallback)
+      - git-status.txt    (project tasks only)
+      - changed-files.txt (project tasks only; needs base_commit)
+      - diff.patch        (project tasks only; needs base_commit)
+    """
+    logger = logging.getLogger("naiw_tasks")
+    artifacts = task_dir / "meta" / "artifacts"
+    try:
+        artifacts.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: cannot create %s: %s; aborting capture",
+            artifacts, exc,
+        )
+        return
+
+    io_dir = task_dir / "io"
+    _safe_copy_io_file(io_dir / "terminal.log", artifacts / "terminal.log")
+    _safe_copy_io_file(io_dir / "summary.md", artifacts / "summary.md")
+    _replicate_output_tree(io_dir / "output", artifacts / "output")
+
+    # Git captures — project tasks only, gated by task.json.kind (NOT by
+    # .git/ existence). A Pi-corrupted .git on a project task surfaces the
+    # git error rather than being silently mistaken for a generic task.
+    if task_data.get("kind") != "project":
+        return
+    if work_path is None or not work_path.exists():
+        logger.warning(
+            "artifact capture: project task missing work_path %r; "
+            "skipping git captures",
+            work_path,
+        )
+        return
+
+    def _run_git(*args: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            ["git", "-C", str(work_path), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    base = task_data.get("base_commit")
+
+    try:
+        r = _run_git("status", "--porcelain=v2", "--branch")
+        (artifacts / "git-status.txt").write_text(
+            r.stdout, encoding="utf-8"
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "artifact capture: git status non-zero (%d): %s",
+                r.returncode, r.stderr.strip(),
+            )
+    except OSError as exc:
+        logger.warning("artifact capture: git status write: %s", exc)
+
+    if not base:
+        logger.warning(
+            "artifact capture: no base_commit on project task; "
+            "skipping diff captures",
+        )
+        return
+
+    try:
+        r = _run_git("diff", "--name-status", f"{base}..HEAD")
+        (artifacts / "changed-files.txt").write_text(
+            r.stdout, encoding="utf-8"
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "artifact capture: git diff --name-status non-zero "
+                "(%d): %s", r.returncode, r.stderr.strip(),
+            )
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: changed-files.txt write: %s", exc,
+        )
+
+    try:
+        r = _run_git("diff", f"{base}..HEAD")
+        (artifacts / "diff.patch").write_text(
+            r.stdout, encoding="utf-8"
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "artifact capture: git diff non-zero (%d): %s",
+                r.returncode, r.stderr.strip(),
+            )
+    except OSError as exc:
+        logger.warning("artifact capture: diff.patch write: %s", exc)
+
+
 def teardown_and_mark(
     cfg: Config,
     client,
@@ -646,6 +868,22 @@ def teardown_and_mark(
                 f"(state={survivor_state!r}) after stop+remove",
             )
             raise SystemExit(1)
+
+        # Artifact capture runs BEFORE worktree teardown so git diff/status
+        # can still read work/. Failures are best-effort and never block the
+        # terminal-status write — the helper swallows its own errors; the
+        # outer guard is defense in depth.
+        worktree_path_value = data.get("worktree_path")
+        capture_work_path = (
+            Path(worktree_path_value) if worktree_path_value else None
+        )
+        try:
+            _capture_artifacts(task_dir, data, capture_work_path)
+        except Exception as exc:  # pragma: no cover
+            logging.getLogger("naiw_tasks").warning(
+                "artifact capture: unexpected error (suppressed): %s",
+                exc,
+            )
 
         # Worktree teardown — project tasks only. delete_worktree => git
         # worktree remove --force + prune (never raw recursive-delete).
