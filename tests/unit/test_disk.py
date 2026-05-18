@@ -144,7 +144,7 @@ def test_no_partial_means_no_note(tmp_path, capsys):
     )
 
 
-def test_check_threshold_returns_used_max_pct(tmp_path):
+def test_threshold_returns_used_max_pct(tmp_path):
     _seed_naiw_data(tmp_path, {"tasks": 500 * 1024})
     cfg = Config(data_root=tmp_path, max_data_size=1024 * 1024)
     used, mx, pct = disk.threshold(cfg)
