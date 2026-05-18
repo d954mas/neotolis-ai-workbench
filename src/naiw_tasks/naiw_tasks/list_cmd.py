@@ -53,11 +53,17 @@ class ListResult:
 def _container_state(container) -> tuple[str, int | None]:
     """Return (state_literal, ExitCode | None).
 
-    Conditionally calls .reload() only when the containers.list summary lacks
-    ExitCode for an exited container. The list endpoint sometimes omits
-    ExitCode on stopped containers, and the operator-visible exit code is
-    the load-bearing detail for the `failed` vs `interrupted` branch in
-    compute_status.
+    `attrs["State"]` is the INSPECT shape (dict with Status/ExitCode/...) here
+    even though we got the container from `client.containers.list()`. docker-py
+    7.x ContainerCollection.list() with the default `sparse=False` does
+    `self.get(r['Id'])` per row, which is an inspect call — so `attrs` is the
+    inspect payload, not the bare `GET /containers/json` summary where State
+    would be a plain string. We rely on this throughout.
+
+    Conditionally calls .reload() only when ExitCode is missing for an exited
+    container. The list endpoint sometimes omits ExitCode on stopped
+    containers, and the operator-visible exit code is the load-bearing detail
+    for the `failed` vs `interrupted` branch in compute_status.
     """
     state = container.attrs.get("State", {})
     status = state.get("Status", "notfound")
@@ -107,6 +113,21 @@ def _select_latest_event_kind(events: list) -> str | None:
     if not events:
         return None
     return events[-1].kind
+
+
+def _latest_fail_reason(events: list) -> str | None:
+    """Return the latest `fail` event's payload.reason, or None.
+
+    `naiw-signal fail --reason ...` requires a non-empty reason; events_tail
+    validates that. Propagating it through teardown_and_mark keeps the
+    operator-visible failure_reason in task.json so `naiw-tasks list` does
+    not need to grep events.jsonl to explain why a task failed.
+    """
+    if not events or events[-1].kind != "fail":
+        return None
+    payload = events[-1].payload
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    return reason if isinstance(reason, str) and reason else None
 
 
 def _auto_finish_can_run(task_dict: dict) -> bool:
@@ -242,6 +263,13 @@ def _reconcile_one(
         terminal_status = (
             Status.COMPLETED if latest_event_kind == "done" else Status.FAILED
         )
+        # `naiw-signal fail` carries a required reason; preserve it in
+        # task.json so reap doesn't strip the diagnostic.
+        fail_reason = (
+            _latest_fail_reason(valid_events)
+            if latest_event_kind == "fail"
+            else None
+        )
         # On failure, lifecycle has already written task.json.status=failed.
         teardown_failed = False
         try:
@@ -250,6 +278,7 @@ def _reconcile_one(
                 terminal_status=terminal_status,
                 policy_override=None,
                 allow_prompt=False,
+                failure_reason=fail_reason,
             )
         except SystemExit:
             teardown_failed = True

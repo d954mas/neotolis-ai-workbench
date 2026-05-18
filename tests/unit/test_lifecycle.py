@@ -1104,13 +1104,12 @@ def test_finish_created_marks_completed(tmp_naiw_data):
 
 def test_finish_on_failed_short_circuits(tmp_naiw_data, capsys):
     # Broadened terminal short-circuit: a task whose disk status is already
-    # `failed` (terminal) is left untouched by the wrapper. The operator's
-    # `naiw-tasks finish <id>` is idempotent on every terminal state, not just
-    # COMPLETED. This is the contract Phase 4 D-09 needs so the lazy-event
-    # tailer can pre-mark a task `failed` (via `teardown_and_mark`) without
-    # the wrapper second-guessing the teardown that already happened.
+    # `failed` is left untouched by the wrapper when the container is also
+    # gone. `naiw-tasks finish <id>` stays idempotent on every terminal
+    # state, not just COMPLETED.
     _pre_create_task(tmp_naiw_data, "task-001", "failed")
     client, container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
     cfg = _make_cfg(tmp_naiw_data)
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
     # No container ops attempted — short-circuit fired.
@@ -1126,6 +1125,7 @@ def test_finish_on_failed_short_circuits(tmp_naiw_data, capsys):
 def test_finish_completed_is_idempotent(tmp_naiw_data, capsys):
     _pre_create_task(tmp_naiw_data, "task-001", "completed")
     client, container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
     cfg = _make_cfg(tmp_naiw_data)
 
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
@@ -1578,10 +1578,10 @@ def test_finish_marks_failed_for_dead_and_created_states(tmp_naiw_data):
 
 
 def test_finish_failed_by_verify_step_can_be_retried_via_helper(tmp_naiw_data, capsys):
-    """After a verify-step failure leaves task in 'failed', the operator-facing
-    wrapper is idempotent on terminal states (broadened short-circuit). The
-    retry path goes through the shared helper `teardown_and_mark` directly,
-    which does NOT short-circuit and runs the full teardown sequence."""
+    """After a verify-step failure leaves task in 'failed', auto-recovery in
+    the wrapper detects the surviving container and runs full teardown without
+    requiring --force. The shared helper `teardown_and_mark` remains the
+    programmatic surface for callers that want teardown unconditionally."""
     _pre_create_task(tmp_naiw_data, "task-001", "running")
     client, container = _fake_client(container_name="naiw-task-task-001")
 
@@ -1595,10 +1595,16 @@ def test_finish_failed_by_verify_step_can_be_retried_via_helper(tmp_naiw_data, c
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
 
-    # Second attempt via wrapper: short-circuits (failed is terminal).
+    # Second attempt via wrapper: disk says failed BUT the container is still
+    # alive — auto-recovery probes Docker, sees the leak, and falls through to
+    # teardown_and_mark with the terminal status preserved. Docker is still
+    # broken (remove side_effect not cleared yet), so we expect SystemExit
+    # again; the assertion is that the wrapper ATTEMPTED teardown rather than
+    # short-circuiting on the failed disk status.
     container.remove.reset_mock()
-    lifecycle.finish(cfg, client, "task-001", policy_override=None)
-    container.remove.assert_not_called()
+    with pytest.raises(SystemExit):
+        lifecycle.finish(cfg, client, "task-001", policy_override=None)
+    container.remove.assert_called_once()
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "failed"
 
     # Third attempt via the shared helper: docker is healthy now, helper
@@ -1939,13 +1945,15 @@ def test_finish_concurrent_serialise_under_flock(tmp_naiw_data):
 def test_finish_already_completed_short_circuits_with_friendly_message(
     tmp_naiw_data, capsys
 ):
+    # Genuine idempotent path: task.json is terminal AND no surviving
+    # container. finish probes Docker first (NotFound) and short-circuits.
     _pre_create_task(tmp_naiw_data, "task-001", "completed")
     client, container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
     cfg = _make_cfg(tmp_naiw_data)
 
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
 
-    client.containers.get.assert_not_called()
     container.stop.assert_not_called()
     container.remove.assert_not_called()
     captured = capsys.readouterr()
@@ -1959,11 +1967,11 @@ def test_finish_already_failed_short_circuits_with_friendly_message(
 ):
     _pre_create_task(tmp_naiw_data, "task-001", "failed")
     client, container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
     cfg = _make_cfg(tmp_naiw_data)
 
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
 
-    client.containers.get.assert_not_called()
     container.stop.assert_not_called()
     container.remove.assert_not_called()
     captured = capsys.readouterr()
@@ -1977,17 +1985,40 @@ def test_finish_already_cancelled_short_circuits_with_friendly_message(
 ):
     _pre_create_task(tmp_naiw_data, "task-001", "cancelled")
     client, container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
     cfg = _make_cfg(tmp_naiw_data)
 
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
 
-    client.containers.get.assert_not_called()
     container.stop.assert_not_called()
     container.remove.assert_not_called()
     captured = capsys.readouterr()
     assert "already cancelled" in captured.out
     tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
     assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "cancelled"
+
+
+def test_finish_terminal_disk_with_surviving_container_auto_recovers(
+    tmp_naiw_data, capsys
+):
+    # The trap fix: task.json says `completed` (e.g. non-auto_finish task
+    # whose `done` event flipped disk forward in list) but the container
+    # is still alive. finish must probe Docker, detect the leak, and run
+    # teardown_and_mark with the existing terminal status preserved —
+    # without making the operator type `--force`.
+    _pre_create_task(tmp_naiw_data, "task-001", "completed")
+    client, container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    container.stop.assert_called_once()
+    container.remove.assert_called_once()
+    captured = capsys.readouterr()
+    assert "already completed" not in captured.out
+    tj = tmp_naiw_data / "tasks" / "task-001" / "meta" / "task.json"
+    # Terminal status preserved through auto-recovery teardown.
+    assert json.loads(tj.read_text(encoding="utf-8"))["status"] == "completed"
 
 
 def test_finish_on_interrupted_runs_full_teardown(tmp_naiw_data):
@@ -2097,11 +2128,12 @@ def test_finish_force_on_running_behaves_like_normal_finish(tmp_naiw_data):
 
 
 def test_finish_force_default_false_preserves_short_circuit(tmp_naiw_data, capsys):
-    # Belt-and-braces: confirm the default value of `force` matches the
-    # pre-Phase-4-recovery behaviour. A call site that does not pass `force`
-    # must still hit the short-circuit on terminal statuses.
+    # Default `force=False` still short-circuits when the container is
+    # genuinely gone (idempotent path). When the container survives,
+    # auto-recovery kicks in instead — covered by the dedicated test above.
     _pre_create_task(tmp_naiw_data, "task-001", "failed")
     client, container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
     cfg = _make_cfg(tmp_naiw_data)
 
     lifecycle.finish(cfg, client, "task-001", policy_override=None)
@@ -2162,6 +2194,62 @@ def testteardown_and_mark_writes_failed_status(tmp_naiw_data):
     on_disk = json.loads(tj.read_text(encoding="utf-8"))
     assert on_disk["status"] == "failed"
     assert on_disk["finished_at"] is not None
+
+
+def test_teardown_and_mark_records_failure_reason(tmp_naiw_data):
+    # `naiw-signal fail --reason ...` provides a required diagnostic. When
+    # reap invokes teardown_and_mark for a `fail` event, the reason must
+    # land in task.json.failure_reason so the operator sees it in `list`.
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, _container = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.FAILED,
+        policy_override=None,
+        failure_reason="smoke test exited 1",
+    )
+
+    on_disk = json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
+    assert on_disk["status"] == "failed"
+    assert on_disk["failure_reason"] == "smoke test exited 1"
+
+
+def test_teardown_and_mark_preserves_existing_failure_reason(tmp_naiw_data):
+    # If task.json already carries a failure_reason (e.g., a prior verify-step
+    # failure wrote "finish: ..."), a subsequent teardown_and_mark call with
+    # a new failure_reason must NOT clobber it — the original cause is the
+    # load-bearing audit trail.
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "failed")
+
+    def set_existing_reason(d):
+        d = dict(d)
+        d["failure_reason"] = "finish: container survived stop+remove"
+        return d
+
+    from naiw_tasks import store
+    store.update_task(task_dir, set_existing_reason)
+
+    client, _container = _fake_client(container_name="naiw-task-task-001")
+    client.containers.get.side_effect = docker.errors.NotFound("gone")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.FAILED,
+        policy_override=None,
+        failure_reason="late-arrival reason from fail event",
+    )
+
+    on_disk = json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
+    assert on_disk["failure_reason"] == "finish: container survived stop+remove"
 
 
 def test_teardown_and_mark_preserves_existing_finished_at(tmp_naiw_data):

@@ -842,7 +842,8 @@ def test_list_auto_finish_pending_defers_malformed_diagnostics_to_reap(
     assert not error_log.exists()
 
     def fake_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         pass
 
@@ -969,7 +970,8 @@ def test_done_event_with_auto_finish_true_triggers_teardown(
     teardown_calls = []
 
     def fake_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         teardown_calls.append(
             {
@@ -1016,7 +1018,8 @@ def test_fail_event_with_auto_finish_true_triggers_teardown_failed(
     teardown_calls = []
 
     def fake_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         teardown_calls.append({"terminal_status": terminal_status})
 
@@ -1031,6 +1034,83 @@ def test_fail_event_with_auto_finish_true_triggers_teardown_failed(
 
     assert len(teardown_calls) == 1
     assert teardown_calls[0]["terminal_status"] == Status.FAILED
+
+
+def test_reap_propagates_fail_event_reason_to_teardown(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """`naiw-signal fail --reason ...` carries a required reason. reap must
+    surface it to teardown_and_mark so task.json.failure_reason is set —
+    otherwise the operator sees `failed` with no diagnostic and has to grep
+    events.jsonl by hand."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    events_path = task_dir / "io" / ".naiw" / "events.jsonl"
+    line = json.dumps(
+        {
+            "ts": "2026-05-16T10:00:00.000Z",
+            "kind": "fail",
+            "payload": {"reason": "smoke test exited 1"},
+            "schema_version": 1,
+        }
+    ) + "\n"
+    events_path.write_bytes(line.encode("utf-8"))
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    teardown_calls = []
+
+    def fake_teardown(
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
+    ):
+        teardown_calls.append({
+            "terminal_status": terminal_status,
+            "failure_reason": failure_reason,
+        })
+
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", fake_teardown)
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=True, include_completed=True, as_json=False,
+        limit_was_explicit=False, apply_auto_finish=True,
+    )
+
+    assert len(teardown_calls) == 1
+    assert teardown_calls[0]["failure_reason"] == "smoke test exited 1"
+
+
+def test_reap_done_event_does_not_set_failure_reason(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """`done` events have no reason; teardown_and_mark must be called with
+    failure_reason=None so we don't accidentally label a completed task as
+    failed."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    _write_event_line(task_dir, "done")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    teardown_calls = []
+
+    def fake_teardown(
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
+    ):
+        teardown_calls.append({"failure_reason": failure_reason})
+
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", fake_teardown)
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=True, include_completed=True, as_json=False,
+        limit_was_explicit=False, apply_auto_finish=True,
+    )
+
+    assert len(teardown_calls) == 1
+    assert teardown_calls[0]["failure_reason"] is None
 
 
 def test_wait_event_flips_to_waiting_for_user_no_container_stop(
@@ -1091,7 +1171,8 @@ def test_auto_finish_done_triggers_two_store_update_task_calls(
     # Mock teardown_and_mark to perform exactly one store.update_task call
     # writing terminal status — matches the Plan 04-01 contract.
     def fake_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         def _to_terminal(d):
             d = dict(d)
@@ -1138,7 +1219,8 @@ def test_auto_finish_fail_triggers_two_store_update_task_calls(
     monkeypatch.setattr(list_cmd.store, "update_task", spy)
 
     def fake_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         def _to_terminal(d):
             d = dict(d)
@@ -1179,7 +1261,8 @@ def test_auto_finish_teardown_failure_renders_actual_status_not_intent(
 
     # Match lifecycle's failure path: write failed, then raise SystemExit.
     def failing_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         def _to_failed(d):
             d = dict(d)
@@ -1224,7 +1307,8 @@ def test_auto_finish_teardown_failure_can_be_retried_by_reap(
     calls = []
 
     def flaky_teardown(
-        cfg, client, task_id, td, *, terminal_status, policy_override, allow_prompt
+        cfg, client, task_id, td, *, terminal_status,
+        policy_override, allow_prompt, failure_reason=None
     ):
         calls.append(terminal_status)
         if len(calls) == 1:

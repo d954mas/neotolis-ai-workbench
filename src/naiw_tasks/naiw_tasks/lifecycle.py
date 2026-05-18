@@ -563,6 +563,7 @@ def teardown_and_mark(
     terminal_status: Status,
     policy_override: str | None,
     allow_prompt: bool = True,
+    failure_reason: str | None = None,
 ) -> None:
     """Stop+remove container, verify NotFound, apply finish policy if project
     task, write task.json.status=terminal_status with finished_at + updated_at
@@ -707,6 +708,12 @@ def teardown_and_mark(
             d["status"] = str(terminal_status)
             d["finished_at"] = d.get("finished_at") or ts_now
             d["updated_at"] = ts_now
+            # Preserve the diagnostic reason carried by `naiw-signal fail
+            # --reason ...`. Without this the auto_finish/reap path loses the
+            # reason payload — task.json says `failed` but no `failure_reason`
+            # and the operator has to grep events.jsonl by hand.
+            if failure_reason and not d.get("failure_reason"):
+                d["failure_reason"] = failure_reason
             return d
 
         store.update_task(task_dir, _to_terminal)
@@ -739,6 +746,14 @@ def finish(
     short-circuit and re-runs `teardown_and_mark`, preserving the existing
     terminal status (`failed` stays `failed`, `cancelled` stays `cancelled`)
     so the audit trail of WHY the task is in that state survives the retry.
+
+    Auto-recovery: when task.json already records a terminal status but a
+    container with the matching name still exists on Docker (e.g., a non-
+    auto_finish task whose `done`/`fail` event flipped task.json forward in
+    list, while the container kept running), the short-circuit would leave
+    the operator with a leaked container. To avoid that trap, probe Docker
+    first; if the container is still present, fall through to teardown_and_mark
+    as if `--force` had been passed — preserving the existing terminal status.
     """
     validate_task_id(task_id)
     task_dir = cfg.data_root / "tasks" / task_id
@@ -752,10 +767,28 @@ def finish(
     data = store.read_task(task_dir)
     current_status = data.get("status")
     if current_status in TERMINAL_STATUSES and not force:
-        print(
-            f"naiw-tasks: task {task_id} is already {current_status}; nothing to do"
-        )
-        return
+        container_name = data.get("container_name", _container_name(task_id))
+        # Probe before short-circuit so a leaked container can't trap the
+        # operator. NotFound → genuine no-op; APIError → assume gone and
+        # short-circuit, operator can --force if needed.
+        try:
+            client.containers.get(container_name)
+            container_present = True
+        except docker.errors.NotFound:
+            container_present = False
+        except docker.errors.APIError as exc:
+            logging.getLogger("naiw_tasks").warning(
+                "finish: task %s: cannot inspect container before short-circuit: %s",
+                task_id, exc,
+            )
+            container_present = False
+        if not container_present:
+            print(
+                f"naiw-tasks: task {task_id} is already {current_status}; nothing to do"
+            )
+            return
+        # Fall through with terminal status preserved (auto-recovery).
+        force = True
 
     # On force-retry of a task that is already terminal, preserve the recorded
     # outcome — re-running teardown should not silently flip `failed` to
