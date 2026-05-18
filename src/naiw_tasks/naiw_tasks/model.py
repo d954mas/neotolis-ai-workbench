@@ -1,4 +1,4 @@
-"""Task value objects: Task dataclass, Status (4 vals), TaskKind, FinishPolicy."""
+"""Task value objects: Task dataclass, Status (7 vals), TaskKind, FinishPolicy."""
 
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -8,13 +8,16 @@ SCHEMA_VERSION: int = 1
 
 
 class Status(StrEnum):
-    # Controller writes only these four. Future statuses (interrupted,
-    # waiting_for_user, cancelled) can arrive without a schema bump because
-    # status is stored as a string field and reads tolerate unknown values.
+    # Controller writes any of these seven. Unknown future values pass through
+    # `from_str_lenient` as raw strings so an older controller binary reading a
+    # newer task.json never raises.
     CREATED = "created"
     RUNNING = "running"
+    INTERRUPTED = "interrupted"
+    WAITING_FOR_USER = "waiting_for_user"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
     @classmethod
     def from_str_lenient(cls, value: str) -> "Status | str":
@@ -67,6 +70,10 @@ class Task:
     labels: dict[str, str] = field(default_factory=dict)
     secrets: list[str] = field(default_factory=list)
     events_offset: int = 0
+    # bytes; updated by `naiw-tasks list` per monotonic-growth check on
+    # io/terminal.log. Default 0 so legacy task.json files (written before the
+    # field existed) load without migration.
+    terminal_log_max_size: int = 0
     recovery_count: int = 0
     recovery_history: list[dict[str, Any]] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION

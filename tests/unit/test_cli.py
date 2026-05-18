@@ -220,6 +220,7 @@ def test_start_calls_lifecycle_with_project(monkeypatch, patched_env):
     assert kwargs["base_ref"] is None
     assert kwargs["finish_policy"] == "ask"
     assert kwargs["secrets"] == []
+    assert kwargs["auto_finish"] is False
 
 
 def test_start_no_arg_calls_lifecycle_with_project_none(monkeypatch, patched_env):
@@ -252,6 +253,16 @@ def test_start_passes_finish_policy(monkeypatch, patched_env):
     assert result.exit_code == 0, result.output
     _, kwargs = fake.call_args
     assert kwargs["finish_policy"] == "delete_worktree"
+
+
+def test_start_passes_auto_finish(monkeypatch, patched_env):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["start", "alpha", "--auto-finish"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["auto_finish"] is True
 
 
 def test_start_invalid_finish_policy_exits_2(monkeypatch, patched_env):
@@ -391,6 +402,244 @@ def test_finish_neither_flag_falls_back_to_task_policy(monkeypatch, patched_env)
     assert result.exit_code == 0, result.output
     _, kwargs = fake.call_args
     assert kwargs["policy_override"] is None
+
+
+def test_finish_force_flag_forwards_to_lifecycle(monkeypatch, patched_env):
+    """`naiw-tasks finish <id> --force` must propagate force=True to
+    lifecycle.finish so the operator recovery path actually fires. The
+    default (no flag) must propagate force=False — locking the contract
+    on both sides prevents drift where someone changes the click default."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "finish", fake)
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["finish", "foo-001", "--force"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["force"] is True
+
+    fake.reset_mock()
+    result = runner.invoke(cli, ["finish", "foo-001"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["force"] is False
+
+
+# ---------- list subcommand --------------------------------------------------
+
+
+def test_cli_list_command_invokes_list_cmd_run(patched_env, monkeypatch):
+    """`naiw-tasks list` with no flags wires through to list_cmd.run with
+    defaults: limit=10, no status filter, no project filter, etc."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["list"])
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.limit == 10
+    assert request.statuses == []
+    assert request.project_filter is None
+    assert request.show_all is False
+    # Default `list` now shows terminal statuses too (per task.md "latest 10
+    # tasks with their statuses"). Legacy `--completed` opt-in removed.
+    assert request.as_json is False
+    assert request.limit_was_explicit is False
+    assert request.apply_auto_finish is False
+
+
+def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "list",
+            "--limit", "5",
+            "--status", "running",
+            "--status", "interrupted",
+            "--project", "alpha",
+            "--all",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.limit == 5
+    assert request.statuses == ["running", "interrupted"]
+    assert request.project_filter == "alpha"
+    assert request.show_all is True
+    assert request.as_json is True
+    assert request.limit_was_explicit is True
+    assert request.apply_auto_finish is False
+
+
+def test_cli_list_status_accepts_comma_separated(patched_env, monkeypatch):
+    """task.md documents `--status running,interrupted,waiting_for_user`
+    as a comma-separated invocation — the CLI must split + validate each
+    piece rather than rejecting the whole joined string."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["list", "--status", "running,interrupted,waiting_for_user"],
+    )
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.statuses == ["running", "interrupted", "waiting_for_user"]
+
+
+def test_cli_list_status_mixes_comma_and_repeat(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["list", "--status", "running,interrupted", "--status", "failed"],
+    )
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.statuses == ["running", "interrupted", "failed"]
+
+
+def test_cli_list_status_rejects_bad_piece_in_comma_list(
+    patched_env, monkeypatch
+):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["list", "--status", "running,bogus"]
+    )
+    assert result.exit_code == 2
+    assert "bogus" in (result.output + result.stderr)
+    fake.assert_not_called()
+
+
+def test_cli_reap_invokes_list_cmd_with_auto_finish(patched_env, monkeypatch):
+    fake = MagicMock(return_value=cli_mod.list_cmd_module.ListResult(reaped=2))
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["reap", "--json"])
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.show_all is True
+    assert request.as_json is True
+    assert request.limit is None
+    assert request.apply_auto_finish is True
+    assert request.dry_run is False
+    assert "reaped 2 task(s)" in result.stderr
+
+
+def test_cli_reap_dry_run_invokes_list_cmd_without_teardown(patched_env, monkeypatch):
+    fake = MagicMock(return_value=cli_mod.list_cmd_module.ListResult(would_reap=3))
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["reap", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.limit is None
+    assert request.apply_auto_finish is True
+    assert request.dry_run is True
+    assert "would reap 3 task(s)" in result.stderr
+
+
+def test_cli_list_rejects_unknown_status(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["list", "--status", "invalid_status"])
+    assert result.exit_code == 2
+    assert "invalid_status" in (result.output + result.stderr)
+    fake.assert_not_called()
+
+
+def test_cli_list_rejects_non_positive_limit(patched_env, monkeypatch):
+    """`--limit 0` and `--limit -1` MUST be usage errors. Python slice
+    semantics would otherwise turn `--limit -1` into "all rows except the
+    last," which is a confusing accidental API. click.IntRange(min=1) gives
+    the operator a clear error message instead."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    for bad in ("0", "-1", "-10"):
+        result = runner.invoke(cli, ["list", "--limit", bad])
+        assert result.exit_code == 2, f"--limit {bad}: {result.output}"
+        fake.assert_not_called()
+
+
+# ---------- output subcommand ------------------------------------------------
+
+
+def test_cli_output_command_invokes_output_cmd_run(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001"])
+    assert result.exit_code == 0, result.output
+    args, kwargs = fake.call_args
+    # output_cmd.run(cfg, task_id, lines=200)
+    assert "task-001" in args or kwargs.get("task_id") == "task-001"
+    assert kwargs.get("lines") == 200
+
+
+def test_cli_output_does_not_create_docker_client(monkeypatch, tmp_path):
+    cfg = Config(data_root=tmp_path / "naiw-data")
+    make_client = MagicMock(side_effect=AssertionError("Docker not needed"))
+    run_all = MagicMock(side_effect=AssertionError("startup checks not needed"))
+    output = MagicMock()
+    monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
+    monkeypatch.setattr(cli_mod, "make_client", make_client)
+    monkeypatch.setattr(cli_mod.startup_checks, "run_all", run_all)
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", output)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001"])
+
+    assert result.exit_code == 0, result.output
+    output.assert_called_once()
+    make_client.assert_not_called()
+    run_all.assert_not_called()
+
+
+def test_cli_output_passes_lines_flag(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001", "--lines", "50"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs.get("lines") == 50
+
+
+def test_cli_output_rejects_invalid_task_id(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "Invalid Task!"])
+    assert result.exit_code == 3
+    fake.assert_not_called()
+
+
+def test_cli_output_lines_zero_returns_exit_2(patched_env, monkeypatch):
+    """output_cmd.run raises click.UsageError on lines<=0 → click exits 2."""
+    import click as _click
+
+    def boom(cfg, task_id, *, lines):
+        raise _click.UsageError("--lines must be positive")
+
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", boom)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001", "--lines", "0"])
+    assert result.exit_code == 2
 
 
 # ---------- source-policy guard ---------------------------------------------

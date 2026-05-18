@@ -238,10 +238,11 @@ This keeps `naiw-tasks` minimal. It manages lifecycle, not the creative or techn
 
 ```bash
 naiw-tasks start <project>
+naiw-tasks start <project> --auto-finish
 naiw-tasks start
 naiw-tasks list
 naiw-tasks list --all
-naiw-tasks list --completed
+naiw-tasks reap
 naiw-tasks attach <task-id>
 naiw-tasks output <task-id>
 naiw-tasks finish <task-id>
@@ -310,6 +311,8 @@ tmux pipe-pane -o -t main "cat >> /task/terminal.log"
 ```bash
 naiw-tasks attach neotolis-engine-001
 ```
+
+If started with `--auto-finish`, terminal `done` or `fail` events remain pending in `list` until the operator runs `naiw-tasks reap`.
 
 ## naiw-tasks start: generic task
 
@@ -415,6 +418,25 @@ cancelled
 If a task is marked `running`, but its container is missing or stopped, show it as `interrupted`.
 
 Sort by `updated_at` descending. If `updated_at` is missing, fall back to `created_at`.
+
+## naiw-tasks reap
+
+Example:
+
+```bash
+naiw-tasks reap
+naiw-tasks reap --dry-run
+```
+
+Expected behavior:
+
+Apply pending `auto_finish=true` terminal events and close ready task containers.
+
+`naiw-tasks list` must not close containers. It may show `auto_finish pending` so the operator can decide when to run `reap`.
+
+`naiw-tasks reap --dry-run` must not close containers or advance event offsets; it only reports what would be reaped.
+
+For tasks with `finish_policy=ask`, non-interactive `reap` uses the documented default: `delete_worktree`.
 
 ## naiw-tasks attach
 
