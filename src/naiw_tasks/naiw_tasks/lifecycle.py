@@ -16,7 +16,6 @@ cause and a cleanup hint to stderr, then raise StartFailed. The operator
 reclaims disk via `naiw-tasks finish <id> --delete-worktree`.
 """
 
-import errno
 import logging
 import logging.handlers
 import os
@@ -31,6 +30,7 @@ from pathlib import Path
 import docker.errors
 from naiw_common.events import Event
 
+from naiw_tasks import artifacts as artifacts_mod
 from naiw_tasks import git_ops, projects, store
 from naiw_tasks.config import Config
 from naiw_tasks.docker_client import (
@@ -588,90 +588,6 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({
 })
 
 
-def _replicate_output_tree(src_root: Path, dst_root: Path) -> None:
-    """Mirror src_root at dst_root.
-
-    Defenses:
-      - followlinks=False on os.walk: Pi-planted directory symlink like
-        io/output/loop -> .. would otherwise drive an unbounded walk.
-      - lstat + S_ISREG + os.link (or O_NOFOLLOW copy on EXDEV/EPERM/
-        EMLINK): a Pi-planted file symlink like output/secret.txt ->
-        /etc/passwd MUST NOT resolve and exfiltrate the host file.
-
-    Stale-state contract: dst_root is fully removed before replication so
-    a retry after a partial capture doesn't leave behind files that have
-    since been deleted from io/output/. _capture_artifacts runs inside
-    teardown_and_mark (under that helper's lifecycle scope), so the
-    temporary non-atomicity is invisible to other operations.
-    """
-    logger = logging.getLogger("naiw_tasks")
-    if not src_root.exists():
-        # Still wipe a leftover dst from a prior capture so subsequent
-        # `finish` retries don't surface stale artifacts.
-        if dst_root.exists():
-            shutil.rmtree(dst_root, ignore_errors=True)
-        return
-    if dst_root.exists():
-        shutil.rmtree(dst_root, ignore_errors=True)
-    for dirpath, _dirnames, filenames in os.walk(
-        src_root, topdown=True, followlinks=False
-    ):
-        rel = Path(dirpath).relative_to(src_root)
-        target_dir = dst_root / rel
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for fname in filenames:
-            src = Path(dirpath) / fname
-            dst = target_dir / fname
-            try:
-                st = src.lstat()
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISREG(st.st_mode):
-                logger.warning(
-                    "artifact capture: %s not a regular file "
-                    "(mode=%o); skipping",
-                    src, st.st_mode,
-                )
-                continue
-            try:
-                os.link(str(src), str(dst))
-                continue
-            except OSError as exc:
-                if exc.errno not in (
-                    errno.EXDEV, errno.EPERM, errno.EMLINK,
-                ):
-                    logger.warning(
-                        "artifact capture: os.link failed for %s: %s; "
-                        "skipping",
-                        src, exc,
-                    )
-                    continue
-            # Copy fallback. The O_NOFOLLOW-defended fd ensures a TOCTOU swap
-            # (Pi replacing the regular file with a symlink between lstat and
-            # open) raises ELOOP instead of resolving to the symlink target.
-            try:
-                fd = os.open(str(src), os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError as exc:
-                logger.warning(
-                    "artifact capture: O_NOFOLLOW open failed "
-                    "for %s: %s; skipping",
-                    src, exc,
-                )
-                continue
-            try:
-                with os.fdopen(fd, "rb") as fsrc:
-                    dst.write_bytes(fsrc.read())
-                shutil.copystat(
-                    str(src), str(dst), follow_symlinks=False
-                )
-            except OSError as exc:
-                logger.warning(
-                    "artifact capture: copy fallback failed "
-                    "for %s: %s",
-                    src, exc,
-                )
-
-
 def _safe_copy_io_file(src: Path, dst: Path) -> None:
     """Copy a single io/ regular file to dst with O_NOFOLLOW defense.
 
@@ -742,7 +658,7 @@ def _capture_artifacts(
     io_dir = task_dir / "io"
     _safe_copy_io_file(io_dir / "terminal.log", artifacts / "terminal.log")
     _safe_copy_io_file(io_dir / "summary.md", artifacts / "summary.md")
-    _replicate_output_tree(io_dir / "output", artifacts / "output")
+    artifacts_mod.replicate_output_tree(io_dir / "output", artifacts / "output")
 
     # Git captures — project tasks only, gated by task.json.kind (NOT by
     # .git/ existence). A Pi-corrupted .git on a project task surfaces the
