@@ -148,6 +148,43 @@ def doctor(ctx: click.Context) -> None:
     click.echo("naiw-tasks: doctor OK")
 
 
+_LIST_STATUSES: tuple[str, ...] = (
+    "created",
+    "running",
+    "interrupted",
+    "waiting_for_user",
+    "completed",
+    "failed",
+    "cancelled",
+)
+
+
+def _parse_statuses(
+    ctx: click.Context, param: click.Parameter, value: tuple[str, ...]
+) -> list[str]:
+    """Accept repeated `--status` AND comma-separated values per call.
+
+    task.md documents `naiw-tasks list --status running,interrupted,...` —
+    click.Choice can't validate a comma-joined string, so we split here and
+    validate each piece. Empty pieces are dropped so `--status running,`
+    is forgiving rather than a usage error.
+    """
+    out: list[str] = []
+    for item in value:
+        for piece in item.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if piece not in _LIST_STATUSES:
+                raise click.BadParameter(
+                    f"{piece!r} is not a valid status; "
+                    f"choose from {', '.join(_LIST_STATUSES)}"
+                )
+            if piece not in out:
+                out.append(piece)
+    return out
+
+
 @cli.command("list")
 @click.option(
     "--limit",
@@ -158,19 +195,13 @@ def doctor(ctx: click.Context) -> None:
 @click.option(
     "--status",
     "statuses",
-    type=click.Choice(
-        [
-            "created",
-            "running",
-            "interrupted",
-            "waiting_for_user",
-            "completed",
-            "failed",
-            "cancelled",
-        ]
-    ),
     multiple=True,
-    help="Filter by status (repeatable; OR within filter, AND across filters).",
+    callback=_parse_statuses,
+    help=(
+        "Filter by status (repeatable; OR within filter). Each occurrence "
+        "may carry one status or a comma-separated list, e.g. "
+        "'--status running,interrupted'."
+    ),
 )
 @click.option(
     "--project",
@@ -184,13 +215,6 @@ def doctor(ctx: click.Context) -> None:
     is_flag=True,
     default=False,
     help="Show every task; uncaps --limit unless --limit is given explicitly.",
-)
-@click.option(
-    "--completed",
-    "include_completed",
-    is_flag=True,
-    default=False,
-    help="Include terminal-state tasks (completed/failed/cancelled).",
 )
 @click.option(
     "--json",
@@ -207,13 +231,12 @@ def doctor(ctx: click.Context) -> None:
 def list_command(
     ctx: click.Context,
     limit: int,
-    statuses: tuple[str, ...],
+    statuses: list[str],
     project_filter: str | None,
     show_all: bool,
-    include_completed: bool,
     as_json: bool,
 ) -> None:
-    """List tasks with reconciled status."""
+    """List tasks with reconciled status (default shows terminal too)."""
     # --all uncaps rows unless the operator explicitly supplied --limit.
     limit_was_explicit = (
         ctx.get_parameter_source("limit")
@@ -224,10 +247,10 @@ def list_command(
         _client_for(ctx),
         list_cmd_module.ListRequest(
             limit=limit,
-            statuses=list(statuses),
+            statuses=statuses,
             project_filter=project_filter,
             show_all=show_all,
-            include_completed=include_completed,
+            include_completed=True,
             as_json=as_json,
             limit_was_explicit=limit_was_explicit,
             apply_auto_finish=False,

@@ -242,7 +242,6 @@ naiw-tasks start <project> --auto-finish
 naiw-tasks start
 naiw-tasks list
 naiw-tasks list --all
-naiw-tasks list --completed
 naiw-tasks reap
 naiw-tasks attach <task-id>
 naiw-tasks output <task-id>

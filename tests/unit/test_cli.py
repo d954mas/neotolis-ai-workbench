@@ -442,7 +442,9 @@ def test_cli_list_command_invokes_list_cmd_run(patched_env, monkeypatch):
     assert request.statuses == []
     assert request.project_filter is None
     assert request.show_all is False
-    assert request.include_completed is False
+    # CLI default now shows terminal statuses too (per task.md "latest 10
+    # tasks with their statuses"). Removed legacy `--completed` opt-in.
+    assert request.include_completed is True
     assert request.as_json is False
     assert request.limit_was_explicit is False
     assert request.apply_auto_finish is False
@@ -461,7 +463,6 @@ def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
             "--status", "interrupted",
             "--project", "alpha",
             "--all",
-            "--completed",
             "--json",
         ],
     )
@@ -476,6 +477,51 @@ def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
     assert request.as_json is True
     assert request.limit_was_explicit is True
     assert request.apply_auto_finish is False
+
+
+def test_cli_list_status_accepts_comma_separated(patched_env, monkeypatch):
+    """task.md documents `--status running,interrupted,waiting_for_user`
+    as a comma-separated invocation — the CLI must split + validate each
+    piece rather than rejecting the whole joined string."""
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["list", "--status", "running,interrupted,waiting_for_user"],
+    )
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.statuses == ["running", "interrupted", "waiting_for_user"]
+
+
+def test_cli_list_status_mixes_comma_and_repeat(patched_env, monkeypatch):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["list", "--status", "running,interrupted", "--status", "failed"],
+    )
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.statuses == ["running", "interrupted", "failed"]
+
+
+def test_cli_list_status_rejects_bad_piece_in_comma_list(
+    patched_env, monkeypatch
+):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["list", "--status", "running,bogus"]
+    )
+    assert result.exit_code == 2
+    assert "bogus" in (result.output + result.stderr)
+    fake.assert_not_called()
 
 
 def test_cli_reap_invokes_list_cmd_with_auto_finish(patched_env, monkeypatch):
