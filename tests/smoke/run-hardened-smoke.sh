@@ -189,15 +189,21 @@ else
     fi
 fi
 
+# pass2 uses a bind-mount for /home/pi (matching the production shape:
+# tasks/<id>/storage/ → /home/pi:rw). Re-create the source directory each
+# run with sticky-writable mode so pi (uid 1000) can write.
+mkdir -p "$TMP/naiw-data/tasks/smoke-test-pass2/storage"
+chmod 1777 "$TMP/naiw-data/tasks/smoke-test-pass2/storage"
+
 docker run -d --init --name "$pass2_container" \
     --cap-drop=ALL --security-opt=no-new-privileges --read-only \
     --tmpfs /tmp:rw,size=512m,mode=1777 \
     --tmpfs /run:rw,size=64m,mode=755 \
-    --tmpfs /home/pi:rw,size=128m,mode=1777 \
     --pids-limit=512 --memory=4g --memory-swap=4g --cpus=2 \
     --network naiw-task-net --restart=no -t \
     -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
     -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
+    -v "$TMP/naiw-data/tasks/smoke-test-pass2/storage:/home/pi:rw" \
     -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
     "$image" >/dev/null
 
@@ -205,20 +211,26 @@ wait_for_container_ready "$pass2_container" '[ -f /io/.naiw/events.jsonl ]' 30 \
     || fail "pass2 container not ready (pre-pip)"
 
 docker exec -u pi "$pass2_container" sh -c 'pip install --user --quiet pyyaml && python3 -c "import yaml"' \
-    || fail "pass2 pip install --user pyyaml failed even WITH /home/pi tmpfs — HARD-03 broken"
-step_ok "HARD-03" "pass2 pip succeeded with /home/pi tmpfs; yaml importable"
-echo "${_lib_log_prefix} [result] standard hardened run-flags MUST include --tmpfs /home/pi:rw,size=128m,mode=1777: $pip_result_note"
+    || fail "pass2 pip install --user pyyaml failed even WITH /home/pi bind-mount — HARD-03 broken"
+step_ok "HARD-03" "pass2 pip succeeded with /home/pi bind-mount; yaml importable"
+echo "${_lib_log_prefix} [result] standard hardened run-flags use bind-mount /home/pi from tasks/<id>/storage/: $pip_result_note"
 docker rm -f "$pass2_container" >/dev/null
 
 # ─── Main hardened container start ─────────────────────────────────────
 step_check "" "Starting main hardened container"
+# /home/pi is now provided as a per-task bind mount from tasks/<id>/storage/
+# (matches the controller's lifecycle._build_volumes wiring; the bind source
+# survives `docker rm` so Pi's home state persists across recover). Re-create
+# the source dir each run with sticky-writable mode.
+mkdir -p "$TMP/naiw-data/tasks/smoke-test/storage"
+chmod 1777 "$TMP/naiw-data/tasks/smoke-test/storage"
+
 docker run -d --init --name "$container" \
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
     --read-only \
     --tmpfs /tmp:rw,size=512m,mode=1777 \
     --tmpfs /run:rw,size=64m,mode=755 \
-    --tmpfs /home/pi:rw,size=128m,mode=1777 \
     --pids-limit=512 \
     --memory=4g \
     --memory-swap=4g \
@@ -231,6 +243,7 @@ docker run -d --init --name "$container" \
     --label naiw.role=task-container \
     -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
     -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
+    -v "$TMP/naiw-data/tasks/smoke-test/storage:/home/pi:rw" \
     -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
     -v "$TMP/naiw-data/secrets/test_token:/run/secrets/test_token:ro" \
     "$image" >/dev/null
@@ -505,11 +518,23 @@ if [[ "$mem_peak" =~ ^[0-9]+$ ]] && (( mem_peak > 2576980378 )); then
 fi
 step_ok "cgroup-peak" "peak evidence recorded (pids=$pids_peak mem=$mem_peak)"
 
-# ─── Step 44: drift gate (checklist ↔ script ID set must align) ────────
+# ─── Step 44: STORAGE-BIND — /home/pi sourced from tasks/<id>/storage/ ─
+# Confirms the bind-mount for /home/pi is actually in container mountinfo
+# (line containing ' /home/pi '). The bind source survives `docker rm`,
+# which is what makes recover able to resume Pi's home state.
+step_check "STORAGE-BIND" "Step 44: tasks/<id>/storage/ bind-mounted at /home/pi"
+if docker exec "$container" cat /proc/self/mountinfo | grep -qE ' /home/pi '; then
+    step_ok "STORAGE-BIND" "/home/pi appears in container mountinfo"
+else
+    step_fail "STORAGE-BIND" "/home/pi NOT in container mountinfo (expected bind-mount from tasks/smoke-test/storage)"
+    fail "STORAGE-BIND missing from mountinfo"
+fi
+
+# ─── Step 45: drift gate (checklist ↔ script ID set must align) ────────
 # Only count IDs that are actually claimed (checklist table rows) or actually
 # probed (step_check "ID" in script). Narrative mentions in headers/comments
 # don't count — that's what makes this an honest coverage check.
-step_check "" "Step 44: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
+step_check "" "Step 45: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
 checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+)' tests/smoke/HARDENED-CHECKLIST.md \
     | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
 script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+)"' tests/smoke/run-hardened-smoke.sh \
@@ -522,6 +547,6 @@ if [[ -n "$drift" ]]; then
     echo "$drift" >&2
     fail "drift gate"
 fi
-step_ok "" "Step 44: drift gate ok — IDs aligned"
+step_ok "" "Step 45: drift gate ok — IDs aligned"
 
 # Final PASS line is printed by the cleanup trap's success branch on exit 0.

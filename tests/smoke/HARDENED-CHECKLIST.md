@@ -2,7 +2,7 @@
 
 Contract for `tests/smoke/run-hardened-smoke.sh`. Every row below must
 correspond to a `step_check "<ID>"` line in the script; the script's
-drift gate (step 42) enforces this. Run:
+drift gate (step 45) enforces this. Run:
 
 ```bash
 bash tests/smoke/run-hardened-smoke.sh    # Linux host
@@ -19,7 +19,7 @@ inspection; on PASS they are torn down. `naiw-task-net` is always kept.
 |----------|--------------------------------------------------------------------------------------|---------------------|
 | HARD-01  | `--cap-drop=ALL`                                                                     | 04                  |
 | HARD-02  | `--security-opt=no-new-privileges`                                                   | 05                  |
-| HARD-03  | `--read-only` rootfs + tmpfs `/tmp` (512m), `/run` (64m), `/home/pi` (128m, mode=1777) writable | 03, 06, 07, 08 |
+| HARD-03  | `--read-only` rootfs + tmpfs `/tmp` (512m), `/run` (64m) writable; `/home/pi` provided as bind-mount from `tasks/<id>/storage/` (persistent) | 03, 06, 07, 08 |
 | HARD-04  | `--pids-limit=512`                                                                   | 09                  |
 | HARD-05  | `--memory=4g --memory-swap=4g --cpus=2`                                              | 10                  |
 | HARD-06  | `--network naiw-task-net` (no host net, no docker socket)                            | 11                  |
@@ -40,6 +40,7 @@ controller and is verified when that phase ships.
 | `terminal.log` survives stop+start; post-restart marker appears | 17 |
 | `naiw-signal done` appends valid event to `events.jsonl` | 18 |
 | cgroup `pids.peak` + `memory.peak` logged (WARN-only) | 43 |
+| Storage persistence: `/home/pi` bind-mounted from `tasks/<id>/storage/`; survives `docker rm` | STORAGE-BIND |
 
 ## Phase 3.5 — Containerized controller (manual gate)
 

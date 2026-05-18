@@ -1790,3 +1790,14 @@ def test_list_cmd_module_has_no_gsd_refs():
     assert bad is None, (
         f"forbidden token in list_cmd.py: {bad.group(0) if bad else None}"
     )
+
+
+# ---------- Wave 0 stubs — populated downstream when auto_finish artifact
+# capture lands in the reap path ---------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="auto_finish artifact capture not implemented yet", strict=False
+)
+def test_reap_auto_finish_captures_artifacts():
+    raise NotImplementedError

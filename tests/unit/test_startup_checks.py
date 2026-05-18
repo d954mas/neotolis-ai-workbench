@@ -474,3 +474,13 @@ def test_warn_uid_mismatch_is_non_fatal(monkeypatch):
     # Just call — anything raised here would surface as test failure.
     result = startup_checks.warn_uid_mismatch_with_image()
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Wave 0 stubs — populated downstream when the disk-threshold gate lands.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(reason="disk threshold gate not implemented yet", strict=False)
+def test_start_refuses_above_95_percent_data_threshold():
+    raise NotImplementedError
