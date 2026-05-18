@@ -1,6 +1,6 @@
 """Plain-ASCII table rendering + --json payload serialisation for `naiw-tasks list`.
 
-No external dependencies — str.ljust for column padding, json.dumps for JSON,
+No external dependencies: str.ljust for column padding, json.dumps for JSON,
 stdlib datetime for relative-time formatting. Keeps the surface tiny so the
 JSON shape is the bridge to any future web consumer.
 
@@ -14,7 +14,7 @@ from typing import Any
 
 from naiw_common.events import Event
 
-# Column order is the documented surface of `naiw-tasks list`. Keep stable —
+# Column order is the documented surface of `naiw-tasks list`. Keep stable:
 # operators (and any downstream `awk` / `cut` glue scripts) rely on the order.
 COLUMNS: tuple[str, ...] = (
     "ID",
@@ -36,6 +36,8 @@ def render_table(headers: list[str], rows: list[list[str]]) -> str:
     """
     if not headers:
         return "\n"
+    if not rows:
+        return "no tasks\n"
     all_rows = [headers, *rows]
     cols = list(zip(*all_rows, strict=False))
     widths = [max(len(cell) for cell in col) for col in cols]
@@ -44,22 +46,17 @@ def render_table(headers: list[str], rows: list[list[str]]) -> str:
         padded: list[str] = []
         for i, (cell, w) in enumerate(zip(row, widths, strict=False)):
             if i == len(widths) - 1:
-                padded.append(cell)  # last column — no trailing pad
+                padded.append(cell)  # last column: no trailing pad
             else:
                 padded.append(cell.ljust(w))
         lines.append("  ".join(padded).rstrip())
     return "\n".join(lines) + "\n"
 
 
-def _humanize_delta(now_iso: str, reference_iso: str | None) -> str:
-    """Human-relative time. None → em-dash. Thresholds: <60s 'just now',
-    <60m 'Nm ago', <24h 'Nh ago', else 'Nd ago'.
-
-    Malformed ISO strings pass through unchanged so the operator can spot the
-    bad value in their list output instead of getting a confusing exception.
-    """
+def humanize_delta(now_iso: str, reference_iso: str | None) -> str:
+    """Human-relative time; malformed values pass through unchanged."""
     if reference_iso is None:
-        return "—"
+        return "-"
     try:
         ref = datetime.fromisoformat(reference_iso.replace("Z", "+00:00"))
         now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
@@ -80,7 +77,7 @@ def _humanize_delta(now_iso: str, reference_iso: str | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _short_image_digest(digest: str | None) -> str:
+def short_image_digest(digest: str | None) -> str:
     """First 12 hex chars of the digest (after stripping `sha256:` prefix).
 
     Matches `docker images --no-trunc=false` truncation convention so an
@@ -94,7 +91,7 @@ def _short_image_digest(digest: str | None) -> str:
     return digest[:12]
 
 
-def _format_notes(notes: tuple[str, ...]) -> str:
+def format_notes(notes: tuple[str, ...]) -> str:
     """Join NOTES markers as `(marker), (marker)` for the NOTES column."""
     if not notes:
         return ""
@@ -107,7 +104,7 @@ def to_json_payload(
     """Serialise the rendered rows to the documented JSON shape.
 
     Input: list of (task_dict, computed_row, container_state_str, exit_code).
-    Output: {"as_of": iso-ts, "tasks": [...]} — flat per-task fields plus the
+    Output: {"as_of": iso-ts, "tasks": [...]}: flat per-task fields plus the
     full raw task.json under `task_json` so downstream consumers do not need
     to re-read the file.
     """

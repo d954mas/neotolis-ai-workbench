@@ -19,6 +19,8 @@ from naiw_tasks.config import Config
 from naiw_tasks.model import FinishPolicy, Status, TaskKind
 from naiw_tasks.path_validation import BindMountEscapeError
 
+from naiw_tasks import store
+
 # ---------- helpers ----------------------------------------------------------
 
 
@@ -401,6 +403,26 @@ def test_start_generic_happy(tmp_naiw_data, mock_subprocess_run, capsys):
 
     captured = capsys.readouterr()
     assert "started naiw-task-task-001 (status=running)" in captured.out
+
+
+def test_start_records_auto_finish_flag(tmp_naiw_data, mock_subprocess_run):
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    task = lifecycle.start(
+        cfg,
+        client,
+        project=None,
+        base_ref=None,
+        finish_policy="ask",
+        secrets=[],
+        auto_finish=True,
+    )
+
+    tj = tmp_naiw_data / "tasks" / task.id / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert task.auto_finish is True
+    assert on_disk["auto_finish"] is True
 
 
 def test_start_translates_volumes_to_host_root_when_set(
@@ -1013,6 +1035,7 @@ def _pre_create_task(
     kind: str = "generic",
     project: str | None = None,
     finish_policy: str = "ask",
+    auto_finish: bool = False,
     worktree_path: str | None = None,
     project_repo_path: str | None = None,
 ) -> Path:
@@ -1036,7 +1059,7 @@ def _pre_create_task(
         "finished_at": None,
         "image_digest": None,
         "finish_policy": finish_policy,
-        "auto_finish": False,
+        "auto_finish": auto_finish,
         "project": project,
         "branch": (f"agent/{task_id}" if project else None),
         "worktree_path": worktree_path,
@@ -1436,6 +1459,27 @@ def test_finish_marks_failed_when_container_still_running_after_remove(
     assert "retry: naiw-tasks finish task-001" in captured.err
 
 
+def test_finish_logs_initial_container_get_api_error(tmp_naiw_data, caplog):
+    _pre_create_task(tmp_naiw_data, "task-001", "running")
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+    calls = 0
+
+    def _get(name):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise docker.errors.APIError("proxy unavailable")
+        raise docker.errors.NotFound(f"{name} gone")
+
+    client.containers.get.side_effect = _get
+
+    lifecycle.finish(cfg, client, "task-001", policy_override=None)
+
+    assert "cannot inspect container before teardown" in caplog.text
+    assert "proxy unavailable" in caplog.text
+
+
 def test_finish_marks_failed_when_verify_call_itself_errors(
     tmp_naiw_data, capsys
 ):
@@ -1661,6 +1705,18 @@ def test_resolve_finish_policy_non_tty_ask_defaults_to_delete_with_warning(
     assert "non-interactive context" in captured.err
     assert "delete_worktree" in captured.err
     assert "--keep-worktree" in captured.err
+
+
+def test_resolve_finish_policy_disallow_prompt_defaults_to_delete(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt: (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    result = lifecycle._resolve_finish_policy(None, "ask", allow_prompt=False)
+
+    assert result is FinishPolicy.DELETE_WORKTREE
 
 
 def test_resolve_finish_policy_tty_ask_prompts_yes(monkeypatch):
@@ -2106,6 +2162,34 @@ def testteardown_and_mark_writes_failed_status(tmp_naiw_data):
     on_disk = json.loads(tj.read_text(encoding="utf-8"))
     assert on_disk["status"] == "failed"
     assert on_disk["finished_at"] is not None
+
+
+def test_teardown_and_mark_preserves_existing_finished_at(tmp_naiw_data):
+    task_dir = _pre_create_task(tmp_naiw_data, "task-001", "failed")
+    existing = "2026-05-10T00:00:00.000Z"
+
+    def set_finished_at(d):
+        d = dict(d)
+        d["finished_at"] = existing
+        return d
+
+    store.update_task(task_dir, set_finished_at)
+    client, _ = _fake_client(container_name="naiw-task-task-001")
+    cfg = _make_cfg(tmp_naiw_data)
+
+    lifecycle.teardown_and_mark(
+        cfg,
+        client,
+        "task-001",
+        task_dir,
+        terminal_status=Status.FAILED,
+        policy_override=None,
+    )
+
+    tj = task_dir / "meta" / "task.json"
+    on_disk = json.loads(tj.read_text(encoding="utf-8"))
+    assert on_disk["finished_at"] == existing
+    assert on_disk["updated_at"] != existing
 
 
 def testteardown_and_mark_does_not_short_circuit_on_completed_disk_state(

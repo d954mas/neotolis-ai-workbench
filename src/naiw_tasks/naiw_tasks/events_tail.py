@@ -1,20 +1,13 @@
 """Pure byte-mode tail of a JSONL event journal.
 
-No I/O side effects beyond reading the file. The caller decides what to do
-with the malformed list (typically: append to meta/events-error.log outside
-the per-task flock). The caller is also responsible for persisting the
-returned new_offset (via store.update_task on task.json).
-
-Partial-line policy: a trailing fragment with no \\n is NOT parsed and NOT
-counted as malformed. new_offset stays at the byte just past the last full
-line. The next call re-reads from that offset and naturally picks up the
-completed line once the producer flushes its \\n. This relies on POSIX
-O_APPEND atomicity for writes <= PIPE_BUF (4096) — naiw_signal's writer
-guarantees that.
+The reader has no write side effects: callers persist new_offset and decide
+where to log malformed lines. A trailing fragment without \\n is left unread
+so the next call can pick it up after the producer completes the line.
 """
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from naiw_common.events import SCHEMA_VERSION, Event
@@ -30,25 +23,51 @@ class Malformed:
     reason: str
 
 
+def _is_iso_datetime(value: str) -> bool:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_event(obj: dict, raw_line: str) -> Event | Malformed:
+    kind = obj.get("kind")
+    if kind not in _VALID_KINDS:
+        return Malformed(raw_line=raw_line, reason=f"bad kind: {kind!r}")
+
+    sv = obj.get("schema_version")
+    if sv != SCHEMA_VERSION:
+        return Malformed(raw_line=raw_line, reason=f"bad schema_version: {sv!r}")
+
+    ts = obj.get("ts")
+    if not isinstance(ts, str) or not _is_iso_datetime(ts):
+        return Malformed(raw_line=raw_line, reason=f"bad ts: {ts!r}")
+
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        return Malformed(raw_line=raw_line, reason="bad payload: not an object")
+
+    if kind in ("fail", "wait"):
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not reason:
+            return Malformed(raw_line=raw_line, reason=f"bad reason: {reason!r}")
+
+    return Event(ts=ts, kind=kind, payload=payload, schema_version=sv)
+
+
 def tail_events(
     events_path: Path,
     offset: int,
 ) -> tuple[int, list[Event], list[Malformed]]:
-    """Return (new_offset, valid_events, malformed_lines) from `offset` to EOF.
-
-    Returns (offset, [], []) when the file does not exist or is empty.
-    Resets offset to 0 when stored offset exceeds current size (file shrank
-    or was recreated — the only safe response is a full re-parse).
-    """
+    """Return (new_offset, valid_events, malformed_lines) from `offset` to EOF."""
     try:
         size = events_path.stat().st_size
     except FileNotFoundError:
         return (offset, [], [])
 
     if offset > size:
-        # File shrank or was recreated. Reset and re-parse from byte 0 — the
-        # alternative (returning empty) would silently drop events the producer
-        # has already written.
+        # File shrank/recreated; re-parse so existing events are not dropped.
         offset = 0
 
     if offset == size:
@@ -58,9 +77,7 @@ def tail_events(
         f.seek(offset)
         chunk = f.read(size - offset)
 
-    # Split on \n. If chunk ends with \n, the last element is b"" (consumed).
-    # Otherwise, the last element is a partial fragment that we must NOT
-    # parse and MUST leave for the next call to pick up.
+    # Leave a trailing partial line for the next pass.
     lines = chunk.split(b"\n")
     if chunk.endswith(b"\n"):
         complete = lines[:-1]
@@ -96,25 +113,10 @@ def tail_events(
             malformed.append(Malformed(raw_line=text, reason="not an object"))
             continue
 
-        kind = obj.get("kind")
-        if kind not in _VALID_KINDS:
-            malformed.append(Malformed(raw_line=text, reason=f"bad kind: {kind!r}"))
+        event = _validate_event(obj, text)
+        if isinstance(event, Malformed):
+            malformed.append(event)
             continue
-
-        sv = obj.get("schema_version")
-        if sv != SCHEMA_VERSION:
-            malformed.append(
-                Malformed(raw_line=text, reason=f"bad schema_version: {sv!r}")
-            )
-            continue
-
-        valid.append(
-            Event(
-                ts=obj.get("ts", ""),
-                kind=kind,
-                payload=obj.get("payload", {}),
-                schema_version=sv,
-            )
-        )
+        valid.append(event)
 
     return (new_offset, valid, malformed)

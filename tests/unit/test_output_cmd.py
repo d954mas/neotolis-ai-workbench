@@ -60,6 +60,18 @@ def test_output_supports_lines_N_override(tmp_naiw_data, capsys):
     assert "line 495\n" not in out
 
 
+def test_output_source_streams_tail_without_full_read():
+    src = (
+        Path(__file__).resolve().parent.parent.parent
+        / "src"
+        / "naiw_tasks"
+        / "naiw_tasks"
+        / "output_cmd.py"
+    ).read_text(encoding="utf-8")
+    assert "deque(" in src
+    assert ".read()" not in src
+
+
 def test_output_short_file_returns_all_lines(tmp_naiw_data, capsys):
     task_dir = _make_task_dir(tmp_naiw_data, "task-001")
     (task_dir / "io" / "terminal.log").write_text(

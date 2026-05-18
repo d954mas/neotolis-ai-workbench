@@ -18,7 +18,8 @@ from naiw_tasks.events_tail import Malformed, tail_events
 
 def _valid_event_bytes(kind: str = "done", ts: str = "2026-05-16T10:00:00.000Z") -> bytes:
     """Build one newline-terminated event line that the reader will accept."""
-    obj = {"ts": ts, "kind": kind, "payload": {}, "schema_version": 1}
+    payload = {"reason": "x"} if kind in ("fail", "wait") else {}
+    obj = {"ts": ts, "kind": kind, "payload": payload, "schema_version": 1}
     return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
 
 
@@ -198,6 +199,45 @@ def test_tail_events_rejects_bad_schema_version(tmp_path: Path):
     assert events == []
     assert len(malformed) == 1
     assert malformed[0].reason.startswith("bad schema_version:")
+
+
+def test_tail_events_rejects_missing_or_bad_ts(tmp_path: Path):
+    events_path = tmp_path / "events.jsonl"
+    bad = b'{"kind":"done","payload":{},"schema_version":1}\n'
+    events_path.write_bytes(bad)
+
+    new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert new_offset == len(bad)
+    assert events == []
+    assert len(malformed) == 1
+    assert malformed[0].reason.startswith("bad ts:")
+
+
+def test_tail_events_rejects_non_object_payload(tmp_path: Path):
+    events_path = tmp_path / "events.jsonl"
+    bad = b'{"ts":"2026-05-16T10:00:00.000Z","kind":"done","payload":[],"schema_version":1}\n'
+    events_path.write_bytes(bad)
+
+    new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert new_offset == len(bad)
+    assert events == []
+    assert len(malformed) == 1
+    assert malformed[0].reason == "bad payload: not an object"
+
+
+def test_tail_events_rejects_fail_or_wait_without_reason(tmp_path: Path):
+    events_path = tmp_path / "events.jsonl"
+    bad = b'{"ts":"2026-05-16T10:00:00.000Z","kind":"fail","payload":{},"schema_version":1}\n'
+    events_path.write_bytes(bad)
+
+    new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert new_offset == len(bad)
+    assert events == []
+    assert len(malformed) == 1
+    assert malformed[0].reason.startswith("bad reason:")
 
 
 def test_tail_events_rejects_invalid_utf8(tmp_path: Path):

@@ -220,6 +220,7 @@ def test_start_calls_lifecycle_with_project(monkeypatch, patched_env):
     assert kwargs["base_ref"] is None
     assert kwargs["finish_policy"] == "ask"
     assert kwargs["secrets"] == []
+    assert kwargs["auto_finish"] is False
 
 
 def test_start_no_arg_calls_lifecycle_with_project_none(monkeypatch, patched_env):
@@ -252,6 +253,16 @@ def test_start_passes_finish_policy(monkeypatch, patched_env):
     assert result.exit_code == 0, result.output
     _, kwargs = fake.call_args
     assert kwargs["finish_policy"] == "delete_worktree"
+
+
+def test_start_passes_auto_finish(monkeypatch, patched_env):
+    fake = MagicMock()
+    monkeypatch.setattr(cli_mod.lifecycle, "start", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["start", "alpha", "--auto-finish"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = fake.call_args
+    assert kwargs["auto_finish"] is True
 
 
 def test_start_invalid_finish_policy_exits_2(monkeypatch, patched_env):
@@ -425,14 +436,16 @@ def test_cli_list_command_invokes_list_cmd_run(patched_env, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(cli, ["list"])
     assert result.exit_code == 0, result.output
-    args, kwargs = fake.call_args
-    assert kwargs["limit"] == 10
-    assert kwargs["statuses"] == []
-    assert kwargs["project_filter"] is None
-    assert kwargs["show_all"] is False
-    assert kwargs["include_completed"] is False
-    assert kwargs["as_json"] is False
-    assert kwargs["limit_was_explicit"] is False
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.limit == 10
+    assert request.statuses == []
+    assert request.project_filter is None
+    assert request.show_all is False
+    assert request.include_completed is False
+    assert request.as_json is False
+    assert request.limit_was_explicit is False
+    assert request.apply_auto_finish is False
 
 
 def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
@@ -453,14 +466,47 @@ def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
         ],
     )
     assert result.exit_code == 0, result.output
-    _, kwargs = fake.call_args
-    assert kwargs["limit"] == 5
-    assert kwargs["statuses"] == ["running", "interrupted"]
-    assert kwargs["project_filter"] == "alpha"
-    assert kwargs["show_all"] is True
-    assert kwargs["include_completed"] is True
-    assert kwargs["as_json"] is True
-    assert kwargs["limit_was_explicit"] is True
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.limit == 5
+    assert request.statuses == ["running", "interrupted"]
+    assert request.project_filter == "alpha"
+    assert request.show_all is True
+    assert request.include_completed is True
+    assert request.as_json is True
+    assert request.limit_was_explicit is True
+    assert request.apply_auto_finish is False
+
+
+def test_cli_reap_invokes_list_cmd_with_auto_finish(patched_env, monkeypatch):
+    fake = MagicMock(return_value=cli_mod.list_cmd_module.ListResult(reaped=2))
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["reap", "--json"])
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.show_all is True
+    assert request.include_completed is True
+    assert request.as_json is True
+    assert request.limit is None
+    assert request.apply_auto_finish is True
+    assert request.dry_run is False
+    assert "reaped 2 task(s)" in result.stderr
+
+
+def test_cli_reap_dry_run_invokes_list_cmd_without_teardown(patched_env, monkeypatch):
+    fake = MagicMock(return_value=cli_mod.list_cmd_module.ListResult(would_reap=3))
+    monkeypatch.setattr(cli_mod.list_cmd_module, "run", fake)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["reap", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    args, _ = fake.call_args
+    request = args[2]
+    assert request.limit is None
+    assert request.apply_auto_finish is True
+    assert request.dry_run is True
+    assert "would reap 3 task(s)" in result.stderr
 
 
 def test_cli_list_rejects_unknown_status(patched_env, monkeypatch):
@@ -500,6 +546,25 @@ def test_cli_output_command_invokes_output_cmd_run(patched_env, monkeypatch):
     # output_cmd.run(cfg, task_id, lines=200)
     assert "task-001" in args or kwargs.get("task_id") == "task-001"
     assert kwargs.get("lines") == 200
+
+
+def test_cli_output_does_not_create_docker_client(monkeypatch, tmp_path):
+    cfg = Config(data_root=tmp_path / "naiw-data")
+    make_client = MagicMock(side_effect=AssertionError("Docker not needed"))
+    run_all = MagicMock(side_effect=AssertionError("startup checks not needed"))
+    output = MagicMock()
+    monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
+    monkeypatch.setattr(cli_mod, "make_client", make_client)
+    monkeypatch.setattr(cli_mod.startup_checks, "run_all", run_all)
+    monkeypatch.setattr(cli_mod.output_cmd_module, "run", output)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["output", "task-001"])
+
+    assert result.exit_code == 0, result.output
+    output.assert_called_once()
+    make_client.assert_not_called()
+    run_all.assert_not_called()
 
 
 def test_cli_output_passes_lines_flag(patched_env, monkeypatch):

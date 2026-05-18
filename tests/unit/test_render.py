@@ -43,9 +43,7 @@ def test_render_table_pads_columns_to_max_width():
 
 def test_render_table_handles_empty_rows():
     out = render.render_table(headers=["ID", "STATUS"], rows=[])
-    # Header row only: "ID  STATUS" + newline. ID column is 2 wide so no extra
-    # padding, joined by two spaces.
-    assert out == "ID  STATUS\n"
+    assert out == "no tasks\n"
 
 
 def test_render_table_handles_single_column():
@@ -80,7 +78,7 @@ def test_render_table_columns_aligned_consistently():
 
 
 def test_humanize_delta_minutes():
-    out = render._humanize_delta(
+    out = render.humanize_delta(
         now_iso="2026-05-16T10:00:00.000Z",
         reference_iso="2026-05-16T09:55:00.000Z",
     )
@@ -88,7 +86,7 @@ def test_humanize_delta_minutes():
 
 
 def test_humanize_delta_hours():
-    out = render._humanize_delta(
+    out = render.humanize_delta(
         now_iso="2026-05-16T10:00:00.000Z",
         reference_iso="2026-05-16T08:00:00.000Z",
     )
@@ -96,7 +94,7 @@ def test_humanize_delta_hours():
 
 
 def test_humanize_delta_days():
-    out = render._humanize_delta(
+    out = render.humanize_delta(
         now_iso="2026-05-16T10:00:00.000Z",
         reference_iso="2026-05-13T10:00:00.000Z",
     )
@@ -104,7 +102,7 @@ def test_humanize_delta_days():
 
 
 def test_humanize_delta_just_now():
-    out = render._humanize_delta(
+    out = render.humanize_delta(
         now_iso="2026-05-16T10:00:30.000Z",
         reference_iso="2026-05-16T10:00:00.000Z",
     )
@@ -112,16 +110,16 @@ def test_humanize_delta_just_now():
 
 
 def test_humanize_delta_none_returns_dash():
-    out = render._humanize_delta(
+    out = render.humanize_delta(
         now_iso="2026-05-16T10:00:00.000Z",
         reference_iso=None,
     )
-    assert out == "—"
+    assert out == "-"
 
 
 def test_humanize_delta_malformed_returns_raw():
     """Garbage in -> raw string passthrough; caller's problem to spot."""
-    out = render._humanize_delta(
+    out = render.humanize_delta(
         now_iso="2026-05-16T10:00:00.000Z",
         reference_iso="not-a-timestamp",
     )
@@ -243,19 +241,19 @@ def test_to_json_string_is_indented_sorted():
 
 
 def test_image_digest_first_12_hex_chars():
-    out = render._short_image_digest(
+    out = render.short_image_digest(
         "sha256:deadbeefcafebabe1234567890"
     )
     assert out == "deadbeefcafe"
 
 
 def test_image_digest_none_returns_missing_marker():
-    assert render._short_image_digest(None) == "<missing>"
+    assert render.short_image_digest(None) == "<missing>"
 
 
 def test_image_digest_no_prefix_truncates_first_12():
     """Digests without `sha256:` prefix (legacy/unusual) still truncate."""
-    out = render._short_image_digest("abcdef0123456789xxxx")
+    out = render.short_image_digest("abcdef0123456789xxxx")
     assert out == "abcdef012345"
 
 
@@ -263,16 +261,16 @@ def test_image_digest_no_prefix_truncates_first_12():
 
 
 def test_format_notes_joins_with_commas():
-    out = render._format_notes(("leaked ctr", "log shrunk"))
+    out = render.format_notes(("leaked ctr", "log shrunk"))
     assert out == "(leaked ctr), (log shrunk)"
 
 
 def test_format_notes_empty_returns_empty_string():
-    assert render._format_notes(()) == ""
+    assert render.format_notes(()) == ""
 
 
 def test_format_notes_single_note():
-    assert render._format_notes(("unknown status",)) == "(unknown status)"
+    assert render.format_notes(("unknown status",)) == "(unknown status)"
 
 
 # ---------- COLUMNS constant ------------------------------------------------

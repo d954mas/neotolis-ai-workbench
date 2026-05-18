@@ -1,4 +1,8 @@
 .planning/
+.claude/
+bash.exe.stackdump
+.ruff_cache/
+tmp/
 
 # Python
 __pycache__/

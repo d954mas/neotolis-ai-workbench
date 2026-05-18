@@ -228,6 +228,7 @@ def _initial_task(
     base_branch: str | None,
     base_commit: str | None,
     finish_policy: FinishPolicy,
+    auto_finish: bool,
     secrets: list[str],
     cfg: Config,
     labels: dict[str, str],
@@ -247,6 +248,7 @@ def _initial_task(
         base_branch=base_branch,
         base_commit=base_commit,
         finish_policy=finish_policy,
+        auto_finish=auto_finish,
         secrets=list(secrets),
         labels=dict(labels),
     )
@@ -259,6 +261,7 @@ def start(
     base_ref: str | None,
     finish_policy: str = "ask",
     secrets: list[str] | None = None,
+    auto_finish: bool = False,
 ) -> Task:
     """Start a project task (project!=None) or generic task. Returns the Task."""
     secrets = list(secrets or [])
@@ -285,6 +288,7 @@ def start(
         base_branch=None,
         base_commit=None,
         finish_policy=policy,
+        auto_finish=auto_finish,
         secrets=secrets,
         cfg=cfg,
         labels=labels,
@@ -508,6 +512,7 @@ def _mark_finish_failed(task_dir: Path, task_id: str, reason: str) -> None:
 def _resolve_finish_policy(
     cli_override: str | None,
     task_policy: str,
+    allow_prompt: bool = True,
 ) -> FinishPolicy:
     """CLI flag wins; otherwise task.json's stored policy; if 'ask', prompt
     in interactive contexts.
@@ -523,7 +528,7 @@ def _resolve_finish_policy(
         return FinishPolicy(cli_override)
     policy = FinishPolicy(task_policy)
     if policy is FinishPolicy.ASK:
-        if not sys.stdin.isatty():
+        if not allow_prompt or not sys.stdin.isatty():
             print(
                 "naiw-tasks: non-interactive context detected; defaulting "
                 "finish_policy=ask to delete_worktree. "
@@ -557,6 +562,7 @@ def teardown_and_mark(
     task_dir: Path,
     terminal_status: Status,
     policy_override: str | None,
+    allow_prompt: bool = True,
 ) -> None:
     """Stop+remove container, verify NotFound, apply finish policy if project
     task, write task.json.status=terminal_status with finished_at + updated_at
@@ -582,7 +588,12 @@ def teardown_and_mark(
             container = client.containers.get(container_name)
         except docker.errors.NotFound:
             container = None
-        except docker.errors.APIError:
+        except docker.errors.APIError as exc:
+            logging.getLogger("naiw_tasks").warning(
+                "finish: task %s: cannot inspect container before teardown: %s",
+                task_id,
+                exc,
+            )
             container = None
 
         if container is not None:
@@ -630,6 +641,7 @@ def teardown_and_mark(
             policy = _resolve_finish_policy(
                 policy_override,
                 data.get("finish_policy", "ask"),
+                allow_prompt=allow_prompt,
             )
             if policy is FinishPolicy.DELETE_WORKTREE:
                 repo_path = data.get("project_repo_path")
@@ -693,7 +705,7 @@ def teardown_and_mark(
         def _to_terminal(d: dict) -> dict:
             d = dict(d)
             d["status"] = str(terminal_status)
-            d["finished_at"] = ts_now
+            d["finished_at"] = d.get("finished_at") or ts_now
             d["updated_at"] = ts_now
             return d
 
@@ -762,4 +774,5 @@ def finish(
         task_dir,
         terminal_status=terminal_status,
         policy_override=policy_override,
+        allow_prompt=True,
     )

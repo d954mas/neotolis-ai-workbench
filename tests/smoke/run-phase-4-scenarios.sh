@@ -11,7 +11,7 @@
 #   1. naiw-tasks list happy path + reconciliation (LIST-01..06)
 #   2. naiw-tasks output end-to-end + symlink defense (CTRL-08)
 #   3. DATA-08 monotonic-growth tamper warning (DATA-08, LIST-06)
-#   4. auto_finish=true → real container teardown (SIG-07, LIST-06, CTRL-08)
+#   4. auto_finish=true → reap performs real container teardown (SIG-07, LIST-06, CTRL-08)
 #
 # Pattern matches tests/smoke/run-containerized-smoke.sh: same compose-file
 # resolution, same `compose run --rm naiw-controller <subcommand>` for CLI ops,
@@ -138,7 +138,7 @@ start_and_capture_id() {
     # Run `naiw_tasks start`, echo the assigned task-id (e.g. task-001) to stdout.
     # All other output is suppressed; caller reads stdout into a variable.
     local out
-    if ! out="$(naiw_tasks start 2>&1)"; then
+    if ! out="$(naiw_tasks start "$@" 2>&1)"; then
         echo "${_lib_log_prefix}   FAIL: start failed" >&2
         printf '%s\n' "$out" | sed 's/^/        /' >&2
         return 1
@@ -397,24 +397,23 @@ scenario_3() {
     echo "${_lib_log_prefix} Scenario 3 PASS"
 }
 
-# ─── Scenario 4 — auto_finish=true → real container teardown ───────
+# ─── Scenario 4 — auto_finish=true + reap → real container teardown ──
 
 scenario_4() {
     echo
-    echo "${_lib_log_prefix} ─── Scenario 4: auto_finish=true → real container teardown ──"
+    echo "${_lib_log_prefix} ─── Scenario 4: auto_finish=true + reap → real container teardown ──"
     reset_state_between_scenarios
     local out tid tid2
 
     # ── done branch ──
-    tid="$(start_and_capture_id)" || return 1
+    tid="$(start_and_capture_id --auto-finish)" || return 1
     echo "${_lib_log_prefix}   OK: started $tid (done branch)"
 
     local tj="$tmp_data/tasks/$tid/meta/task.json"
-    jq '.auto_finish = true' "$tj" > "$tj.tmp" && mv "$tj.tmp" "$tj"
     if [[ "$(jq -r .auto_finish "$tj")" != "true" ]]; then
-        echo "${_lib_log_prefix}   FAIL: auto_finish flip failed" >&2; return 1
+        echo "${_lib_log_prefix}   FAIL: start --auto-finish did not persist" >&2; return 1
     fi
-    echo "${_lib_log_prefix}   OK: auto_finish=true set in task.json"
+    echo "${_lib_log_prefix}   OK: auto_finish=true persisted in task.json"
 
     if ! wait_for_tmux_session "naiw-task-$tid" main 10; then
         echo "${_lib_log_prefix}   FAIL: tmux not up" >&2; return 1
@@ -438,7 +437,13 @@ scenario_4() {
     fi
     echo "${_lib_log_prefix}   OK: done event recorded"
 
-    naiw_tasks list >/dev/null 2>&1 || return 1
+    out="$(naiw_tasks list 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    assert_contains "auto_finish pending" "$out" "list reports pending auto_finish" || return 1
+    if ! docker inspect "naiw-task-$tid" >/dev/null 2>&1; then
+        echo "${_lib_log_prefix}   FAIL: list removed container before reap" >&2
+        return 1
+    fi
+    naiw_tasks reap >/dev/null 2>&1 || return 1
     out="$(naiw_tasks list --completed 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     assert_contains "completed" "$out" "task shows completed" || return 1
     assert_contains "notfound" "$out" "container shows notfound (torn down)" || return 1
@@ -472,11 +477,13 @@ scenario_4() {
     echo "${_lib_log_prefix}   OK: task.json status=completed, finished_at=$ft"
 
     # ── fail branch ──
-    tid2="$(start_and_capture_id)" || return 1
+    tid2="$(start_and_capture_id --auto-finish)" || return 1
     echo "${_lib_log_prefix}   OK: started $tid2 (fail branch)"
 
     local tj2="$tmp_data/tasks/$tid2/meta/task.json"
-    jq '.auto_finish = true' "$tj2" > "$tj2.tmp" && mv "$tj2.tmp" "$tj2"
+    if [[ "$(jq -r .auto_finish "$tj2")" != "true" ]]; then
+        echo "${_lib_log_prefix}   FAIL: start --auto-finish did not persist for $tid2" >&2; return 1
+    fi
 
     if ! wait_for_tmux_session "naiw-task-$tid2" main 10; then
         echo "${_lib_log_prefix}   FAIL: tmux not up for $tid2" >&2; return 1
@@ -508,7 +515,13 @@ scenario_4() {
             | tail -20 | sed 's/^/        /' >&2 || true
         return 1
     fi
-    naiw_tasks list >/dev/null 2>&1 || return 1
+    out="$(naiw_tasks list 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    assert_contains "auto_finish pending" "$out" "list reports pending fail auto_finish" || return 1
+    if ! docker inspect "naiw-task-$tid2" >/dev/null 2>&1; then
+        echo "${_lib_log_prefix}   FAIL: list removed $tid2 before reap" >&2
+        return 1
+    fi
+    naiw_tasks reap >/dev/null 2>&1 || return 1
     out="$(naiw_tasks list --completed 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     assert_contains "failed" "$out" "task shows failed" || return 1
 

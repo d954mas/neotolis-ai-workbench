@@ -1,8 +1,8 @@
 """naiw-tasks CLI: start, attach, finish.
 
-Thin click veneer over lifecycle/attach. The group invoke gates every
-subcommand on startup_checks.run_all so the operator gets one error story
-regardless of which command they typed.
+Thin click veneer over lifecycle/attach. Docker-touching commands run
+startup_checks.run_all on first client use; host-only commands like `output`
+can still work while Docker/proxy is down.
 
 Exit codes
 ----------
@@ -39,19 +39,24 @@ from naiw_tasks.ids import (
 )
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    # config.load() raises ValueError on schema mismatch / unparseable yaml.
-    # Catch here so every subcommand gets the same clean error story instead
-    # of a Python traceback at CLI startup.
+    # Keep config errors uniform across every subcommand.
     try:
         cfg = config.load()
     except ValueError as exc:
         click.echo(f"naiw-tasks: {exc}", err=True)
         sys.exit(2)
-    client = make_client(cfg.docker_proxy_url)
-    startup_checks.run_all(cfg, client)
     ctx.ensure_object(dict)
     ctx.obj["cfg"] = cfg
-    ctx.obj["client"] = client
+
+
+def _client_for(ctx: click.Context):
+    """Create/cache the Docker client and run startup checks on first use."""
+    if "client" not in ctx.obj:
+        cfg = ctx.obj["cfg"]
+        client = make_client(cfg.docker_proxy_url)
+        startup_checks.run_all(cfg, client)
+        ctx.obj["client"] = client
+    return ctx.obj["client"]
 
 
 @cli.command()
@@ -74,6 +79,12 @@ def cli(ctx: click.Context) -> None:
     multiple=True,
     help="Secret name to mount at /run/secrets/<name>:ro (repeatable).",
 )
+@click.option(
+    "--auto-finish",
+    is_flag=True,
+    default=False,
+    help="Let `naiw-tasks reap` close the task after done/fail signal events.",
+)
 @click.pass_context
 def start(
     ctx: click.Context,
@@ -81,21 +92,18 @@ def start(
     base_ref: str | None,
     finish_policy: str,
     secrets: tuple[str, ...],
+    auto_finish: bool,
 ) -> None:
     """Start a project task (with PROJECT alias) or generic task (no alias)."""
-    # Validate project alias at the CLI boundary so a bad alias gives a clean
-    # operator error instead of a raw ValueError from allocate_task_id deep
-    # inside lifecycle.start.
+    # Validate at the CLI boundary so bad input gets a clean exit 3.
     if project is not None:
         try:
             validate_project_alias(project)
         except ValueError as exc:
             click.echo(f"naiw-tasks: {exc}", err=True)
             sys.exit(3)
-    # Same boundary for --secret. Path-shaped names (`../foo`, `foo/bar`) would
-    # otherwise escape the secrets/ directory via traversal once they reach
-    # _build_volumes. Reject here for a clean message; _build_volumes also
-    # enforces a narrower bind-source prefix as defense-in-depth.
+    # _build_volumes narrows the bind-source prefix too; this is the clean
+    # operator-facing error path.
     for secret_name in secrets:
         try:
             validate_secret_name(secret_name)
@@ -105,15 +113,15 @@ def start(
     try:
         lifecycle.start(
             ctx.obj["cfg"],
-            ctx.obj["client"],
+            _client_for(ctx),
             project=project,
             base_ref=base_ref,
             finish_policy=finish_policy,
             secrets=list(secrets),
+            auto_finish=auto_finish,
         )
     except lifecycle.StartFailed:
-        # lifecycle.start has already written task.json.status=failed and
-        # printed the cause+hint to stderr. Click just needs the right exit code.
+        # lifecycle.start already wrote task.json and stderr.
         sys.exit(1)
 
 
@@ -128,13 +136,15 @@ def attach_cmd(ctx: click.Context, task_id: str) -> None:
         click.echo(f"naiw-tasks: {exc}", err=True)
         sys.exit(3)
     attach_mod.attach_to_task(
-        ctx.obj["client"], ctx.obj["cfg"].docker_proxy_url, task_id
+        _client_for(ctx), ctx.obj["cfg"].docker_proxy_url, task_id
     )
 
 
 @cli.command()
-def doctor() -> None:
+@click.pass_context
+def doctor(ctx: click.Context) -> None:
     """Verify config, proxy reachability, and proxy allowlist."""
+    _client_for(ctx)
     click.echo("naiw-tasks: doctor OK")
 
 
@@ -204,24 +214,63 @@ def list_command(
     as_json: bool,
 ) -> None:
     """List tasks with reconciled status."""
-    # ParameterSource is how click distinguishes "operator typed --limit N"
-    # from "operator left the default in place". The --all + explicit --limit
-    # combination is what restores the row cap when the operator wanted both.
+    # --all uncaps rows unless the operator explicitly supplied --limit.
     limit_was_explicit = (
         ctx.get_parameter_source("limit")
         == click.core.ParameterSource.COMMANDLINE
     )
     list_cmd_module.run(
         ctx.obj["cfg"],
-        ctx.obj["client"],
-        limit=limit,
-        statuses=list(statuses),
-        project_filter=project_filter,
-        show_all=show_all,
-        include_completed=include_completed,
-        as_json=as_json,
-        limit_was_explicit=limit_was_explicit,
+        _client_for(ctx),
+        list_cmd_module.ListRequest(
+            limit=limit,
+            statuses=list(statuses),
+            project_filter=project_filter,
+            show_all=show_all,
+            include_completed=include_completed,
+            as_json=as_json,
+            limit_was_explicit=limit_was_explicit,
+            apply_auto_finish=False,
+        ),
     )
+
+
+@cli.command("reap")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit JSON instead of the plain table.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show tasks that would be reaped without closing containers.",
+)
+@click.pass_context
+def reap_command(ctx: click.Context, as_json: bool, dry_run: bool) -> None:
+    """Apply auto_finish terminal events and close ready tasks."""
+    result = list_cmd_module.run(
+        ctx.obj["cfg"],
+        _client_for(ctx),
+        list_cmd_module.ListRequest(
+            limit=None,
+            statuses=[],
+            project_filter=None,
+            show_all=True,
+            include_completed=True,
+            as_json=as_json,
+            limit_was_explicit=False,
+            apply_auto_finish=True,
+            dry_run=dry_run,
+        ),
+    )
+    if dry_run:
+        click.echo(f"naiw-tasks: would reap {result.would_reap} task(s)", err=True)
+    else:
+        click.echo(f"naiw-tasks: reaped {result.reaped} task(s)", err=True)
 
 
 @cli.command("output")
@@ -307,7 +356,7 @@ def finish(
         sys.exit(3)
     lifecycle.finish(
         ctx.obj["cfg"],
-        ctx.obj["client"],
+        _client_for(ctx),
         task_id,
         policy_override=policy_override,
         force=force,

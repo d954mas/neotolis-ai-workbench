@@ -1,4 +1,8 @@
-"""Event schema for /io/.naiw/events.jsonl."""
+"""Event schema for /io/.naiw/events.jsonl.
+
+Schema 1 is the current strict contract: ISO timestamp string, known kind,
+object payload, and non-empty payload.reason for fail/wait.
+"""
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
