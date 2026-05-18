@@ -59,3 +59,16 @@ def test_config_load_max_data_size_rejects_si_typo(tmp_naiw_data):
     with pytest.raises(ValueError) as exc:
         load()
     assert "use IEC binary units" in str(exc.value)
+
+
+def test_max_data_size_zero_is_rejected():
+    """max_data_size=0KiB would silently disable both the >80% warning and
+    the >95% start-refusal gate. Reject at parse time so a config typo
+    cannot accidentally nuke the cap."""
+    with pytest.raises(ValueError) as exc:
+        _parse_max_data_size("0KiB")
+    assert "must be > 0" in str(exc.value)
+    assert "silently disables" in str(exc.value)
+    # 0 in other units rejected the same way.
+    with pytest.raises(ValueError):
+        _parse_max_data_size("0GiB")

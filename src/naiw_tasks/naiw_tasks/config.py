@@ -102,7 +102,17 @@ def _parse_max_data_size(raw: str) -> int:
     m = _IEC_PATTERN.match(value)
     if m:
         n, unit = m.group(1), m.group(2)
-        return int(n) * _IEC_UNIT_BYTES[unit]
+        result = int(n) * _IEC_UNIT_BYTES[unit]
+        # 0 disables both the >80% warning AND the >95% start-refusal gate
+        # — silently letting a typo nuke the cap is exactly the operator
+        # surprise we want to avoid. Operator who actually wants no cap
+        # should set a deliberately huge value (e.g. 1024TiB).
+        if result <= 0:
+            raise ValueError(
+                f"max_data_size={value!r}: must be > 0; setting 0 "
+                f"silently disables the disk-threshold gate"
+            )
+        return result
     if _DECIMAL_TYPO_PATTERN.match(value):
         raise ValueError(
             f"max_data_size={value!r}: use IEC binary units "

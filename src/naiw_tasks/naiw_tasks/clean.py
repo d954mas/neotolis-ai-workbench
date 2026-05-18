@@ -290,7 +290,10 @@ def run(
         if c.kind == "project" and c.project_repo_path:
             try:
                 git_ops.worktree_prune(Path(c.project_repo_path))
-            except Exception as exc:
+            except OSError as exc:
+                # OSError covers FileNotFoundError (git binary missing) and
+                # PermissionError (repo not readable). worktree_prune itself
+                # uses subprocess check=False, so non-zero exits don't raise.
                 _LOG.info(
                     "clean: worktree prune failed for %s: %s "
                     "(continuing with rmtree)",
