@@ -35,6 +35,7 @@ import docker.errors
 
 from naiw_tasks import git_ops, store
 from naiw_tasks.config import Config
+from naiw_tasks.format import humanize_iec_bytes
 
 _LOG = logging.getLogger("naiw_tasks")
 
@@ -91,15 +92,6 @@ def _humanize_age(age: dt.timedelta) -> str:
     if total >= 60:
         return f"{total // 60}m"
     return f"{total}s"
-
-
-def _humanize_bytes(n: int) -> str:
-    # Sized printer matching the disk module's eventual format.
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if n < 1024 or unit == "TiB":
-            return f"{n}{unit}"
-        n //= 1024
-    return f"{n}TiB"  # unreachable
 
 
 def _dir_size_bytes(p: Path) -> int:
@@ -252,7 +244,7 @@ def run(
             click.echo(
                 f"  {c.task_id}  finished_at={c.reference_ts} "
                 f"({_humanize_age(c.age)} ago)  "
-                f"{_humanize_bytes(c.size_bytes)}"
+                f"{humanize_iec_bytes(c.size_bytes)}"
             )
         if orphans:
             running_count = sum(1 for c in orphans if _container_state(c) == "running")
@@ -283,7 +275,7 @@ def run(
             click.echo(
                 f"  {c.task_id}  finished_at={c.reference_ts} "
                 f"({_humanize_age(c.age)} ago)  "
-                f"{_humanize_bytes(c.size_bytes)}"
+                f"{humanize_iec_bytes(c.size_bytes)}"
             )
         if not skip_prompt:
             if not click.confirm(

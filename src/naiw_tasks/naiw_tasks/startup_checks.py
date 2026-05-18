@@ -15,6 +15,7 @@ import docker
 
 from naiw_tasks import disk as disk_mod
 from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+from naiw_tasks.format import humanize_iec_bytes
 
 _IMAGE_PI_UID: int = 1000
 _WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[A-Za-z]/")
@@ -137,23 +138,6 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
         )
 
 
-def _format_iec_bytes(n: int) -> str:
-    """Render an int byte count as <num><IEC unit>. KISS sizer.
-
-    Matches the IEC binary convention used in config.yaml's max_data_size
-    field; operator-facing numbers stay readable (e.g. 48.2GiB) instead of
-    raw byte counts.
-    """
-    f = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if f < 1024.0 or unit == "TiB":
-            if unit == "B":
-                return f"{int(f)}{unit}"
-            return f"{f:.1f}{unit}"
-        f /= 1024.0
-    return f"{f:.1f}TiB"  # unreachable
-
-
 def check_disk_threshold(cfg, verb: str = "start") -> None:
     """Refuse start/recover when ~/naiw-data/ is at >95% of max_data_size.
 
@@ -163,10 +147,10 @@ def check_disk_threshold(cfg, verb: str = "start") -> None:
     `verb` is "start" or "recover" - both paths emit the SAME body but the
     lead clause adapts so the operator sees the right verb.
     """
-    used, max_bytes, pct = disk_mod._check_threshold(cfg)
+    used, max_bytes, pct = disk_mod.threshold(cfg)
     if pct > 95.0:
-        used_human = _format_iec_bytes(used)
-        max_human = _format_iec_bytes(max_bytes)
+        used_human = humanize_iec_bytes(used)
+        max_human = humanize_iec_bytes(max_bytes)
         raise StartupCheckFailed(
             f"cannot {verb} — ~/naiw-data/ is at "
             f"{pct:.1f}% of max_data_size "

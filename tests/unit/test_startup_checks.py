@@ -510,10 +510,10 @@ def test_start_refuses_above_95_percent_data_threshold(
 
     cfg = Config(data_root=tmp_path, max_data_size=1024)
     _stub_all_other_checks(monkeypatch)
-    # Force _check_threshold to return >95%.
+    # Force threshold() to return >95%.
     from naiw_tasks import disk as disk_mod
     monkeypatch.setattr(
-        disk_mod, "_check_threshold",
+        disk_mod, "threshold",
         lambda c: (1000, 1024, 97.65),
     )
     client = MagicMock()
@@ -536,7 +536,7 @@ def test_disk_threshold_gate_off_by_default(tmp_path, monkeypatch):
     from naiw_tasks import disk as disk_mod
     # Even at 99% the default-off gate doesn't raise.
     monkeypatch.setattr(
-        disk_mod, "_check_threshold",
+        disk_mod, "threshold",
         lambda c: (1010, 1024, 98.6),
     )
     client = MagicMock()
@@ -552,7 +552,7 @@ def test_disk_threshold_gate_passes_below_95_percent(tmp_path, monkeypatch):
     _stub_all_other_checks(monkeypatch)
     from naiw_tasks import disk as disk_mod
     monkeypatch.setattr(
-        disk_mod, "_check_threshold",
+        disk_mod, "threshold",
         lambda c: (500, 1024, 48.8),
     )
     client = MagicMock()
@@ -572,7 +572,7 @@ def test_disk_threshold_gate_recover_verb_in_message(
     _stub_all_other_checks(monkeypatch)
     from naiw_tasks import disk as disk_mod
     monkeypatch.setattr(
-        disk_mod, "_check_threshold",
+        disk_mod, "threshold",
         lambda c: (1000, 1024, 97.65),
     )
     client = MagicMock()

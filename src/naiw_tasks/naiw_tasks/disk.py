@@ -22,6 +22,7 @@ from pathlib import Path
 import click
 
 from naiw_tasks.config import Config
+from naiw_tasks.format import humanize_iec_bytes
 
 _LOG = logging.getLogger("naiw_tasks")
 
@@ -70,17 +71,6 @@ def _du_sb(path: Path) -> tuple[int, bool]:
     return (size, partial)
 
 
-def _humanize_bytes(n: int) -> str:
-    f = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if f < 1024.0 or unit == "TiB":
-            if unit == "B":
-                return f"{int(f)}{unit}"
-            return f"{f:.2f}{unit}"
-        f /= 1024.0
-    return f"{f:.2f}TiB"  # unreachable
-
-
 def _compute_rows(cfg: Config) -> tuple[list[_Row], int]:
     rows: list[_Row] = []
     total = 0
@@ -92,10 +82,13 @@ def _compute_rows(cfg: Config) -> tuple[list[_Row], int]:
     return rows, total
 
 
-def _check_threshold(cfg: Config) -> tuple[int, int, float]:
+def threshold(cfg: Config) -> tuple[int, int, float]:
     """Return (used_bytes, max_bytes, percent).
 
-    Used by startup_checks for the >95% start refusal.
+    Public hook consumed by startup_checks for the >95% start refusal.
+    Returns pct=0.0 when max_data_size <= 0 (treated as "gate disabled"
+    by callers — config._parse_max_data_size enforces > 0 for operator
+    config files, but Python-API callers can still pass 0/negative).
     """
     _rows, used = _compute_rows(cfg)
     if cfg.max_data_size <= 0:
@@ -112,10 +105,10 @@ def run(cfg: Config) -> int:
     for r in rows:
         tag = " (partial)" if r.partial else ""
         click.echo(
-            f"  {r.name.ljust(name_w)}{_humanize_bytes(r.bytes_)}{tag}"
+            f"  {r.name.ljust(name_w)}{humanize_iec_bytes(r.bytes_)}{tag}"
         )
     click.echo(
-        f"  {'TOTAL'.ljust(name_w)}{_humanize_bytes(total)}"
+        f"  {'TOTAL'.ljust(name_w)}{humanize_iec_bytes(total)}"
     )
     # Loud notice when any subdir was partial — total understates real usage
     # and the threshold warning below may not fire even when the operator
@@ -132,9 +125,9 @@ def run(cfg: Config) -> int:
         usage = shutil.disk_usage(cfg.data_root)
         click.echo(
             f"\n  host disk @ {cfg.data_root}: "
-            f"total={_humanize_bytes(usage.total)} "
-            f"used={_humanize_bytes(usage.used)} "
-            f"free={_humanize_bytes(usage.free)}"
+            f"total={humanize_iec_bytes(usage.total)} "
+            f"used={humanize_iec_bytes(usage.used)} "
+            f"free={humanize_iec_bytes(usage.free)}"
         )
     except OSError as exc:
         _LOG.warning(
@@ -146,8 +139,8 @@ def run(cfg: Config) -> int:
     if pct > 80.0:
         click.echo(
             f"\nWARNING: NAIW data at {pct:.1f}% of max_data_size "
-            f"({_humanize_bytes(total)} / "
-            f"{_humanize_bytes(cfg.max_data_size)}). "
+            f"({humanize_iec_bytes(total)} / "
+            f"{humanize_iec_bytes(cfg.max_data_size)}). "
             f"Run `naiw-tasks clean --older-than 30d` to reclaim space."
         )
     return 0
