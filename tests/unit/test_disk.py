@@ -3,8 +3,9 @@
 import subprocess
 from pathlib import Path
 
-from naiw_tasks import disk
 from naiw_tasks.config import Config
+
+from naiw_tasks import disk
 
 
 def _seed_naiw_data(root: Path, sizes: dict[str, int]) -> None:

@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from naiw_tasks.config import Config
 
 from naiw_tasks import clean
-from naiw_tasks.config import Config
 
 
 def _write_task(

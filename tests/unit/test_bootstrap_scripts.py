@@ -164,7 +164,6 @@ def test_new_task_chmods_all_bind_sources_1777(tmp_path):
     operator's host uid. work/ was previously omitted, blocking Pi from
     writing /work on uid-mismatched hosts for generic tasks.
     """
-    import stat as _stat
     data_root = _initialised_root(tmp_path)
     r = _run(NEW_TASK_SCRIPT, "alpha-002", data_root=data_root)
     assert r.returncode == 0, r.stderr

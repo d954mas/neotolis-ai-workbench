@@ -466,7 +466,7 @@ def clean_command(
     try:
         td = clean_mod.parse_older_than(older_than)
     except ValueError as exc:
-        raise click.UsageError(str(exc))
+        raise click.UsageError(str(exc)) from exc
     # Try to get a docker client; if startup checks fail (Docker unreachable
     # or proxy drift), proceed in disk-only mode rather than exiting 2 —
     # the whole point of clean is to free space, and disk reclaim must keep

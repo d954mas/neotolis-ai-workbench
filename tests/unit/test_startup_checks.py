@@ -505,8 +505,9 @@ def _stub_all_other_checks(monkeypatch):
 def test_start_refuses_above_95_percent_data_threshold(
         tmp_path, monkeypatch, capsys,
 ):
-    from naiw_tasks.config import Config
     from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
 
     cfg = Config(data_root=tmp_path, max_data_size=1024)
     _stub_all_other_checks(monkeypatch)
@@ -528,8 +529,9 @@ def test_start_refuses_above_95_percent_data_threshold(
 
 
 def test_disk_threshold_gate_off_by_default(tmp_path, monkeypatch):
-    from naiw_tasks.config import Config
     from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
 
     cfg = Config(data_root=tmp_path, max_data_size=1024)
     _stub_all_other_checks(monkeypatch)
@@ -545,8 +547,9 @@ def test_disk_threshold_gate_off_by_default(tmp_path, monkeypatch):
 
 
 def test_disk_threshold_gate_passes_below_95_percent(tmp_path, monkeypatch):
-    from naiw_tasks.config import Config
     from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
 
     cfg = Config(data_root=tmp_path, max_data_size=1024)
     _stub_all_other_checks(monkeypatch)
@@ -565,8 +568,9 @@ def test_disk_threshold_gate_recover_verb_in_message(
 ):
     """`disk_threshold_verb="recover"` surfaces 'cannot recover' instead of
     'cannot start' in the operator-visible stderr line."""
-    from naiw_tasks.config import Config
     from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
 
     cfg = Config(data_root=tmp_path, max_data_size=1024)
     _stub_all_other_checks(monkeypatch)

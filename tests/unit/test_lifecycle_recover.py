@@ -1,7 +1,7 @@
 """Tests for lifecycle.recover and recover-race serialization."""
 
+import contextlib
 import json
-import os
 import re
 import subprocess
 import threading
@@ -10,10 +10,10 @@ from unittest.mock import MagicMock
 
 import docker.errors
 import pytest
-
-from naiw_tasks import lifecycle, store
 from naiw_tasks.config import Config
 from naiw_tasks.model import Status
+
+from naiw_tasks import lifecycle, store
 
 
 def _seed_interrupted_task(
@@ -526,10 +526,8 @@ def test_recover_finish_race_does_not_corrupt_task_json(
             toggle["hit"] += 1
             n = toggle["hit"]
         if n <= 2:
-            try:
+            with contextlib.suppress(threading.BrokenBarrierError):
                 barrier.wait()
-            except threading.BrokenBarrierError:
-                pass
         return real_now_iso()
 
     monkeypatch.setattr(

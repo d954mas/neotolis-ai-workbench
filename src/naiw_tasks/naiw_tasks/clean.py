@@ -1,25 +1,10 @@
-"""naiw-tasks clean — terminal-state task removal + orphan-container prune.
+"""naiw-tasks clean — disk reclaim for terminal-state tasks + orphan prune.
 
-Removal policy:
-  - Terminal states only: completed, failed, cancelled. created/running/
-    interrupted/waiting_for_user are NEVER candidates, regardless of age.
-  - Reference timestamp: task.json.finished_at; fall back to updated_at
-    when finished_at is absent (e.g., a start-rollback wrote failed
-    without finished_at).
-  - For project tasks: git worktree prune is called against the base
-    repo before shutil.rmtree, so the worktree list stays clean.
-  - Always prompts unless --yes. Default-on-Enter = N (cancel).
-  - --dry-run lists candidates + orphans; no changes.
-
-Orphan-container prune:
-  - Runs AFTER per-task removal in the same invocation.
-  - Container with label naiw.managed=1 whose naiw.task-id points at a
-    non-existent task folder is removed via container.remove(force=True).
-  - With --dry-run, orphans are listed but not removed.
-
-Exit codes (from caller's perspective):
-  0 — clean success (zero per-task failures)
-  1 — at least one per-task removal failed (worktree prune or rmtree)
+Invariants:
+  - Only terminal statuses (completed/failed/cancelled) are candidates.
+  - For project tasks, `git worktree prune` runs BEFORE shutil.rmtree.
+  - Always prompts unless --yes; default-on-Enter is N (cancel).
+  - Orphan re-enumeration after per-task removal catches cascades.
 """
 
 import datetime as dt
@@ -107,7 +92,7 @@ def _dir_size_bytes(p: Path) -> int:
 
 
 def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 def _parse_iso(ts: str) -> dt.datetime | None:
@@ -157,7 +142,7 @@ def _enumerate_candidates(
         # Treat naive timestamps as UTC so comparison against the timezone-aware
         # `now` never raises TypeError on legacy task.json files.
         if ref_dt.tzinfo is None:
-            ref_dt = ref_dt.replace(tzinfo=dt.timezone.utc)
+            ref_dt = ref_dt.replace(tzinfo=dt.UTC)
         age = now - ref_dt
         if age < threshold:
             continue
@@ -259,7 +244,7 @@ def run(
             for c in orphans:
                 labels = c.attrs.get("Config", {}).get("Labels") or {}
                 state = _container_state(c)
-                state_tag = f"  [RUNNING]" if state == "running" else f"  [{state}]"
+                state_tag = "  [RUNNING]" if state == "running" else f"  [{state}]"
                 click.echo(
                     f"  {c.name} (task-id={labels.get('naiw.task-id')}){state_tag}"
                 )

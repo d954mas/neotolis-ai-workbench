@@ -6,7 +6,6 @@ threshold refusals.
 """
 
 import pytest
-
 from naiw_tasks.config import (
     DEFAULT_MAX_DATA_SIZE_BYTES,
     Config,
