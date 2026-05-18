@@ -1240,6 +1240,43 @@ def test_reap_done_event_does_not_set_failure_reason(
     assert teardown_calls[0]["failure_reason"] is None
 
 
+def test_non_auto_finish_fail_event_preserves_payload_reason(
+    tmp_naiw_data, capsys
+):
+    """An `auto_finish=false` task whose Pi writes `naiw-signal fail
+    --reason ...` must still record that reason in task.json.failure_reason.
+    Reconcile only sees event KIND; the reason payload travels through
+    list_cmd directly into the mutator's status-transition write.
+    Otherwise the operator sees `failed` with no diagnostic and the
+    offset is already past the event."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=False
+    )
+    events_path = task_dir / "io" / ".naiw" / "events.jsonl"
+    line = json.dumps(
+        {
+            "ts": "2026-05-16T10:00:00.000Z",
+            "kind": "fail",
+            "payload": {"reason": "smoke test exited 1"},
+            "schema_version": 1,
+        }
+    ) + "\n"
+    events_path.write_bytes(line.encode("utf-8"))
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=None, statuses=[], project_filter=None,
+        show_all=True, as_json=False, limit_was_explicit=False,
+    )
+
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["status"] == "failed"
+    assert data["failure_reason"] == "smoke test exited 1"
+
+
 def test_wait_event_flips_to_waiting_for_user_no_container_stop(
     tmp_naiw_data, monkeypatch, capsys
 ):

@@ -207,6 +207,17 @@ def _reconcile_one(
     ts_now = Event.now_iso()
     stale_state = False
     original_status = task_dict.get("status", "")
+    # `naiw-signal fail --reason ...` payload reason is required by the
+    # signal CLI but invisible to reconcile (which only sees event KIND).
+    # Capture it once and feed it to both the non-auto_finish persistence
+    # path (mutator below) and the reap inline-teardown path. Without this,
+    # auto_finish=false tasks lose the diagnostic the moment offset advances
+    # past the fail event.
+    fail_reason = (
+        _latest_fail_reason(valid_events)
+        if latest_event_kind == "fail"
+        else None
+    )
 
     # Offset is held back when the event still needs out-of-band handling:
     #   - defer_terminal_auto_finish: plain list, let reap consume it
@@ -243,6 +254,8 @@ def _reconcile_one(
             d["updated_at"] = ts_now
             if computed.failure_reason is not None:
                 d["failure_reason"] = computed.failure_reason
+            elif fail_reason and computed.status == str(Status.FAILED):
+                d["failure_reason"] = fail_reason
         return d
 
     # `reap --dry-run` MUST be fully read-only — no offset advancement,
@@ -278,13 +291,6 @@ def _reconcile_one(
     if will_inline_teardown:
         terminal_status = (
             Status.COMPLETED if latest_event_kind == "done" else Status.FAILED
-        )
-        # `naiw-signal fail` carries a required reason; preserve it in
-        # task.json so reap doesn't strip the diagnostic.
-        fail_reason = (
-            _latest_fail_reason(valid_events)
-            if latest_event_kind == "fail"
-            else None
         )
         # On failure, lifecycle has already written task.json.status=failed.
         teardown_failed = False
