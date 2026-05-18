@@ -330,6 +330,25 @@ def test_recover_bumps_count_inside_final_mutator_not_from_closure(tmp_path):
     assert final["recovery_history"][0]["recovery_count"] == 6
 
 
+def test_recover_kills_new_container_if_reload_fails(tmp_path):
+    """Same zombie-prevention contract as the concurrent-finish path:
+    if container.reload() raises (e.g., daemon dropped before we got the
+    image digest), the just-started container must be torn down.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    client = MagicMock()
+    client.containers.get.side_effect = docker.errors.NotFound("absent")
+    new_ctr = MagicMock()
+    new_ctr.reload.side_effect = docker.errors.APIError("daemon dropped")
+    client.containers.run.return_value = new_ctr
+
+    with pytest.raises(lifecycle.RecoverFailed):
+        lifecycle.recover(cfg, client, "t-001")
+
+    new_ctr.stop.assert_called(), "reload-fail must trigger stop"
+    new_ctr.remove.assert_called_with(force=True), "reload-fail must trigger remove"
+
+
 def test_recover_kills_new_container_if_concurrent_finish_wins(
         tmp_path, monkeypatch,
 ):

@@ -1016,10 +1016,16 @@ def recover(cfg: Config, client, task_id: str) -> None:
         ) from exc
 
     # Step 8: refresh the image digest from the just-started container.
+    # Same zombie-prevention as Step 9 — if reload() fails the container
+    # is live but unrecorded; tear it down before raising.
     try:
         new_container.reload()
         new_image_digest = new_container.attrs.get("Image", "")
     except docker.errors.APIError as exc:
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.stop(timeout=10)
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.remove(force=True)
         raise RecoverFailed(
             f"recover: container.reload() failed: {exc}"
         ) from exc
