@@ -87,6 +87,40 @@ def test_capture_writes_all_six_artifacts_for_project_task(tmp_path):
     assert "new.txt" in (art / "changed-files.txt").read_text()
 
 
+def test_capture_overwrites_stale_output_on_retry(tmp_path):
+    """Repeated capture must not leave stale files in meta/artifacts/output.
+    Earlier code used os.link which raises EEXIST on the second call, so
+    the new file was skipped and the OLD one survived. Worse, files
+    deleted from io/output between the two captures also survived.
+    """
+    td = _make_task_dir(tmp_path)
+    # First capture — full set.
+    _capture_artifacts(td, {"kind": "generic"}, None)
+    art = td / "meta" / "artifacts" / "output"
+    assert (art / "a.txt").read_text() == "apple\n"
+    assert (art / "b" / "c.txt").read_text() == "cherry\n"
+
+    # Mutate io/output/ between captures:
+    #  - change a.txt content (Pi rewrote the file)
+    #  - delete b/c.txt (Pi removed the output)
+    #  - add d.txt (Pi created a new output)
+    (td / "io" / "output" / "a.txt").write_text("apricot\n")
+    (td / "io" / "output" / "b" / "c.txt").unlink()
+    (td / "io" / "output" / "d.txt").write_text("dragon\n")
+
+    # Second capture — meta/artifacts/output must reflect the NEW state.
+    _capture_artifacts(td, {"kind": "generic"}, None)
+    assert (art / "a.txt").read_text() == "apricot\n", (
+        "stale a.txt — second capture did not overwrite"
+    )
+    assert not (art / "b" / "c.txt").exists(), (
+        "stale c.txt — file deleted from io/output survived in artifacts"
+    )
+    assert (art / "d.txt").read_text() == "dragon\n", (
+        "new d.txt not captured on retry"
+    )
+
+
 def test_capture_includes_uncommitted_changes_and_untracked(tmp_path):
     """Pi typically edits files without committing. `git diff <base>..HEAD`
     would lose every uncommitted change; the artifact would only show

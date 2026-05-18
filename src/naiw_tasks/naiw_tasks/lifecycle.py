@@ -589,18 +589,30 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({
 
 
 def _replicate_output_tree(src_root: Path, dst_root: Path) -> None:
-    """Mirror src_root at dst_root using hard-links with copy-fallback.
+    """Mirror src_root at dst_root.
 
-    Walks src_root with followlinks=False (Pi-planted directory symlinks like
-    io/output/loop -> .. would otherwise cause an unbounded walk). For each
-    regular file, prefers os.link (zero disk overhead, instant) and falls back
-    to a copy via an O_NOFOLLOW-defended fd on EXDEV/EPERM/EMLINK. Symlinks
-    and non-regular files are skipped with a warning — io/ is Pi-territory and
-    a Pi-planted symlink output/secret.txt -> /etc/passwd MUST NOT exfiltrate.
+    Defenses:
+      - followlinks=False on os.walk: Pi-planted directory symlink like
+        io/output/loop -> .. would otherwise drive an unbounded walk.
+      - lstat + S_ISREG + os.link (or O_NOFOLLOW copy on EXDEV/EPERM/
+        EMLINK): a Pi-planted file symlink like output/secret.txt ->
+        /etc/passwd MUST NOT resolve and exfiltrate the host file.
+
+    Stale-state contract: dst_root is fully removed before replication so
+    a retry after a partial capture doesn't leave behind files that have
+    since been deleted from io/output/. _capture_artifacts runs inside
+    teardown_and_mark (under that helper's lifecycle scope), so the
+    temporary non-atomicity is invisible to other operations.
     """
     logger = logging.getLogger("naiw_tasks")
     if not src_root.exists():
+        # Still wipe a leftover dst from a prior capture so subsequent
+        # `finish` retries don't surface stale artifacts.
+        if dst_root.exists():
+            shutil.rmtree(dst_root, ignore_errors=True)
         return
+    if dst_root.exists():
+        shutil.rmtree(dst_root, ignore_errors=True)
     for dirpath, _dirnames, filenames in os.walk(
         src_root, topdown=True, followlinks=False
     ):
