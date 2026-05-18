@@ -488,33 +488,25 @@ if ! wait_for_log_marker "${log_path}" 'PIPE_PANE_PROBE_REC' 5; then
     fail "REC-IMG-06 pipe-pane not ready"
 fi
 
-# Snapshot log size and the [REDACTED] count BEFORE the token send.
-# Polling on log-grew + new-[REDACTED] avoids confusing stale matches
-# from Step 16 with the current redaction event.
-pre_token_size=$(stat -c%s "${log_path}")
-pre_token_redacted=$(grep -c '\[REDACTED\]' "${log_path}" || true)
-
+# Send the token, then a sentinel that follows it through pipe-pane. When
+# the sentinel lands in terminal.log, pipe-pane has definitely flushed
+# the token line through sed. Avoids confusing stale [REDACTED] matches
+# from Step 16, and avoids racing pipe-pane buffering.
 docker exec "$container" tmux send-keys -t main \
     "printf 'ghp_TESTTOKEN1234567890abcdef\n'" Enter
+docker exec "$container" tmux send-keys -t main \
+    "printf 'POST_TOKEN_SENTINEL_REC\n'" Enter
 
-# Wait for the log to grow AND a new [REDACTED] to land. Poll for up to
-# 5s in 100ms increments; pipe-pane usually flushes in <1s.
-got_new_redacted=0
-for _ in $(seq 1 50); do
-    cur_size=$(stat -c%s "${log_path}")
-    cur_redacted=$(grep -c '\[REDACTED\]' "${log_path}" || true)
-    if (( cur_size > pre_token_size )) && (( cur_redacted > pre_token_redacted )); then
-        got_new_redacted=1
-        break
-    fi
-    sleep 0.1
-done
-if (( got_new_redacted == 0 )); then
-    step_fail "REC-IMG-06" "no new [REDACTED] post-recover (size $pre_token_size -> $(stat -c%s "${log_path}"), redacted-count $pre_token_redacted -> $(grep -c '\[REDACTED\]' "${log_path}" || true))"
-    fail "REC-IMG-06 redaction not active post-recover"
+if ! wait_for_log_marker "${log_path}" 'POST_TOKEN_SENTINEL_REC' 5; then
+    step_fail "REC-IMG-06" "post-token sentinel never reached terminal.log (pipe-pane stuck?)"
+    echo "--- terminal.log tail (debug) ---" >&2
+    tail -n 40 "${log_path}" >&2 || true
+    fail "REC-IMG-06 pipe-pane post-token flush missing"
 fi
 if grep -q 'ghp_TESTTOKEN' "${log_path}"; then
     step_fail "REC-IMG-06" "raw token ghp_TESTTOKEN leaked into terminal.log post-recover"
+    echo "--- terminal.log tail (debug) ---" >&2
+    tail -n 40 "${log_path}" >&2 || true
     fail "REC-IMG-06 raw token leaked"
 fi
 if ! grep -q 'RECOVERED #1' "${log_path}"; then
