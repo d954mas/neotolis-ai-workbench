@@ -1056,8 +1056,23 @@ def recover(cfg: Config, client, task_id: str) -> None:
     try:
         final_state = store.update_task(task_dir, _to_running)
     except RecoverNotInterrupted:
+        # Concurrent finish landed between our pre-flock read and the
+        # final mutator. New container has already been started — kill it
+        # to avoid a zombie (live container, task.json=cancelled/completed).
+        # Best-effort: errors here are noise, not a recovery failure.
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.stop(timeout=10)
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.remove(force=True)
         raise
     except Exception as exc:
+        # Same containment for any other update_task failure (fs error,
+        # disk full while writing task.json). Otherwise a live container
+        # would float without task.json bookkeeping pointing at it.
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.stop(timeout=10)
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.remove(force=True)
         raise RecoverFailed(
             f"recover: cannot commit status=running: {exc}"
         ) from exc

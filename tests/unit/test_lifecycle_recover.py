@@ -330,6 +330,50 @@ def test_recover_bumps_count_inside_final_mutator_not_from_closure(tmp_path):
     assert final["recovery_history"][0]["recovery_count"] == 6
 
 
+def test_recover_kills_new_container_if_concurrent_finish_wins(
+        tmp_path, monkeypatch,
+):
+    """If a concurrent finish flips status between our pre-flock read and
+    the final mutator, the new container we just started is a zombie —
+    live but with no task.json bookkeeping pointing at it. Recover MUST
+    stop+remove it before re-raising RecoverNotInterrupted.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    client, new_ctr = _fake_client()
+
+    # Simulate the race: real store.update_task reads d, but we monkey-patch
+    # the read step inside update_task to flip status to 'cancelled' after
+    # the initial read in recover() but before the final mutator. Simplest:
+    # patch store.update_task so its first invocation sees status=cancelled.
+    from naiw_tasks import store as store_mod
+
+    real_update = store_mod.update_task
+    call_count = {"n": 0}
+
+    def racing_update(td_arg, mutator):
+        call_count["n"] += 1
+        # Flip to cancelled on disk right before the real update runs its
+        # read-modify-write under flock. The mutator will then see status
+        # != INTERRUPTED and raise.
+        meta = td_arg / "meta" / "task.json"
+        data = json.loads(meta.read_text())
+        data["status"] = "cancelled"
+        meta.write_text(json.dumps(data))
+        return real_update(td_arg, mutator)
+
+    monkeypatch.setattr(store_mod, "update_task", racing_update)
+    monkeypatch.setattr(lifecycle.store, "update_task", racing_update)
+
+    with pytest.raises(lifecycle.RecoverNotInterrupted):
+        lifecycle.recover(cfg, client, "t-001")
+
+    # Container was created via containers.run …
+    assert client.containers.run.call_count == 1, "new container started"
+    # …but then torn down before the exception propagated, so no zombie.
+    new_ctr.stop.assert_called(), "new container must be stopped"
+    new_ctr.remove.assert_called_with(force=True), "new container must be removed"
+
+
 # ---------------------------------------------------------------------------
 # Concurrent recover + finish flock race
 # ---------------------------------------------------------------------------
