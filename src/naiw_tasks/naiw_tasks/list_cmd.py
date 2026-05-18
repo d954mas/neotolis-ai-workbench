@@ -205,7 +205,8 @@ def _reconcile_one(
         _append_events_errors(task_dir / "meta", malformed)
 
     ts_now = Event.now_iso()
-    stale_events_offset = False
+    stale_state = False
+    original_status = task_dict.get("status", "")
 
     # Offset is held back when the event still needs out-of-band handling:
     #   - defer_terminal_auto_finish: plain list, let reap consume it
@@ -219,14 +220,21 @@ def _reconcile_one(
     )
 
     def _mutator(d: dict) -> dict:
-        nonlocal stale_events_offset
+        nonlocal stale_state
         d = dict(d)
         disk_offset = int(d.get("events_offset", 0))
-        stale_events_offset = disk_offset != current_offset
+        disk_status = d.get("status", "")
+        # CAS over BOTH offset and status: a concurrent `finish` may have
+        # written a terminal status between our read and this locked update;
+        # without the status leg we'd overwrite the fresh terminal value
+        # with a stale `interrupted`/`running` computed from pre-finish input.
+        stale_state = (
+            disk_offset != current_offset or disk_status != original_status
+        )
         d["terminal_log_max_size"] = max(
             int(d.get("terminal_log_max_size", 0)), new_max_size
         )
-        if stale_events_offset:
+        if stale_state:
             return d
         if not hold_offset:
             d["events_offset"] = new_offset
@@ -237,9 +245,15 @@ def _reconcile_one(
                 d["failure_reason"] = computed.failure_reason
         return d
 
-    store.update_task(task_dir, _mutator)
+    # `reap --dry-run` MUST be fully read-only — no offset advancement,
+    # no status transitions, no terminal_log_max_size write. Otherwise a
+    # non-auto_finish task with unread events (where terminal_auto_pending
+    # is False and dry_run_pending therefore False too) would still get
+    # its offset+status persisted, breaking the dry-run contract.
+    if not dry_run:
+        store.update_task(task_dir, _mutator)
 
-    if stale_events_offset:
+    if stale_state:
         with contextlib.suppress(FileNotFoundError, store.UnsupportedSchemaError):
             task_dict = store.read_task(task_dir)
         computed = reconcile.compute_status(

@@ -976,6 +976,91 @@ def test_reap_does_not_rewind_events_offset_on_stale_task_read(
     _capture(capsys)
 
 
+def test_reap_dry_run_is_fully_read_only_for_non_auto_finish_tasks(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """A non-auto_finish task with unread events must NOT be mutated by
+    `reap --dry-run`. Previously the hold_offset gate only fired when
+    `terminal_auto_pending` was true, so plain done/fail events on
+    auto_finish=false tasks would advance offset + flip status to terminal
+    on disk even though the operator asked for read-only behavior."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=False
+    )
+    bytes_written = _write_event_line(task_dir, "done")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    teardown_calls = []
+    monkeypatch.setattr(
+        list_cmd,
+        "teardown_and_mark",
+        lambda *a, **kw: teardown_calls.append(kw),
+    )
+
+    before = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=None, statuses=[], project_filter=None,
+        show_all=True, as_json=False,
+        limit_was_explicit=False, apply_auto_finish=True, dry_run=True,
+    )
+    after = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+
+    # Nothing on disk has changed.
+    assert before == after
+    assert before["events_offset"] == 0
+    assert before["status"] == "running"
+    assert teardown_calls == []
+    assert bytes_written > 0
+    _capture(capsys)
+
+
+def test_concurrent_finish_does_not_get_overwritten_by_list(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """CAS over status too: a concurrent `finish` may transition a task to
+    `completed` between list's read and its mutator-protected write. The
+    mutator must detect the status change and refuse to overwrite the
+    fresh terminal state with a stale computed transition."""
+    # Disk: running. Reconcile would compute "interrupted" because the
+    # container is no longer in the listing.
+    task_dir = _make_task(tmp_naiw_data, "alpha-001", status="running")
+    client = _mock_client([])  # container not in listing
+
+    real_update_task = store.update_task
+
+    def concurrent_finish_update_task(td, mutator):
+        # Simulate another process marking the task `completed` while we
+        # hold the read — the wrapped mutator sees the updated status.
+        def wrapper(d):
+            d = dict(d)
+            d["status"] = "completed"
+            d["finished_at"] = "2026-05-16T10:00:00.000Z"
+            d["updated_at"] = "2026-05-16T10:00:00.000Z"
+            return mutator(d)
+
+        return real_update_task(td, wrapper)
+
+    monkeypatch.setattr(list_cmd.store, "update_task", concurrent_finish_update_task)
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=None, statuses=[], project_filter=None,
+        show_all=True, as_json=False, limit_was_explicit=False,
+    )
+
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    # Fresh terminal status survives — we did NOT overwrite with "interrupted".
+    assert data["status"] == "completed"
+    _capture(capsys)
+
+
 def test_limit_none_renders_all_rows(tmp_naiw_data, capsys):
     for i in range(12):
         _make_task(
