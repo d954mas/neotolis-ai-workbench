@@ -277,13 +277,42 @@ def run(
                 f"({_humanize_age(c.age)} ago)  "
                 f"{humanize_iec_bytes(c.size_bytes)}"
             )
-        if not skip_prompt:
-            if not click.confirm(
-                f"remove these {len(candidates)} tasks?",
-                default=False,
-            ):
-                click.echo("aborted")
-                return 0
+
+    if orphans:
+        running_count = sum(
+            1 for c in orphans if _container_state(c) == "running"
+        )
+        warn_suffix = (
+            f" — {running_count} STILL RUNNING; force-removal will kill them"
+            if running_count > 0 else ""
+        )
+        click.echo(
+            f"Will prune {len(orphans)} orphan container(s){warn_suffix}:"
+        )
+        for c in orphans:
+            labels = c.attrs.get("Config", {}).get("Labels") or {}
+            state = _container_state(c)
+            state_tag = "  [RUNNING]" if state == "running" else f"  [{state}]"
+            click.echo(
+                f"  {c.name} (task-id={labels.get('naiw.task-id')}){state_tag}"
+            )
+
+    # Single prompt covers BOTH tasks and orphans. Previous version only
+    # gated on candidates — an empty-candidate run with orphan containers
+    # would force-kill them without confirmation, contradicting the
+    # "always prompts unless --yes" policy.
+    if not skip_prompt:
+        actions: list[str] = []
+        if candidates:
+            actions.append(f"remove {len(candidates)} tasks")
+        if orphans:
+            actions.append(f"prune {len(orphans)} orphan container(s)")
+        if not click.confirm(
+            "proceed to " + " AND ".join(actions) + "?",
+            default=False,
+        ):
+            click.echo("aborted")
+            return 0
 
     failures = 0
     for c in candidates:

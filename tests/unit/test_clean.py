@@ -256,6 +256,30 @@ def test_dry_run_flags_running_orphan_with_warning(tmp_path, capsys):
     )
 
 
+def test_orphan_only_path_prompts_before_force_remove(tmp_path, monkeypatch):
+    """Empty candidates + orphan containers must still prompt. Previous
+    code only gated on candidates so a no-flag clean silently force-removed
+    orphans — violates the 'always prompts unless --yes' policy.
+    """
+    confirm_calls: list = []
+
+    def deny(*a, **kw):
+        confirm_calls.append((a, kw))
+        return False
+
+    monkeypatch.setattr(clean.click, "confirm", deny)
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    client = MagicMock()
+    orphan = _orphan_mock("naiw-task-t-gone", "t-gone", "running")
+    client.containers.list.return_value = [orphan]
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(cfg, client, dt.timedelta(days=365))
+    assert rc == 0, "abort path returns 0"
+    assert confirm_calls, "orphan-only run must hit click.confirm"
+    orphan.remove.assert_not_called(), "denied prompt must not force-kill"
+
+
 def test_real_run_prints_stderr_notice_before_force_kill(tmp_path, capsys):
     """When real-running (not dry), the loud stderr notice happens
     BEFORE force-remove so the operator can see what was killed even if
