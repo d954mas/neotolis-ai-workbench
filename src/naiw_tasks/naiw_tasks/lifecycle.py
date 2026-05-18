@@ -989,6 +989,20 @@ def recover(cfg: Config, client, task_id: str) -> None:
             old.remove(force=True)
 
     # Step 6: build fresh container with same name/labels/mounts.
+    # Idempotent ensure of storage/ — tasks started before the storage
+    # bind-mount landed have no storage/ on disk; without this, _build_volumes
+    # raises BindMountEscapeError on the resolve(strict=True) check and the
+    # operator cannot recover a pre-existing interrupted task.
+    storage_dir = task_dir / "storage"
+    if not storage_dir.exists():
+        logger.info(
+            "recover: creating missing storage/ for legacy task %s",
+            task_id,
+        )
+        storage_dir.mkdir()
+        with suppress(OSError):
+            storage_dir.chmod(0o1777)
+
     labels = _build_labels(task_id, initial.get("project"))
     secrets_list = list(initial.get("secrets") or [])
     try:

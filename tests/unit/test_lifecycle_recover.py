@@ -23,8 +23,14 @@ def _seed_interrupted_task(
     with_git: bool = False,
     with_merge_marker: bool = False,
     terminal_log: bytes = b"prior content\n",
+    with_storage: bool = True,
 ) -> tuple[Config, Path]:
-    """Seed a tmp NAIW_DATA skeleton with a single interrupted task."""
+    """Seed a tmp NAIW_DATA skeleton with a single interrupted task.
+
+    `with_storage=False` simulates a pre-Phase-5 legacy task — task.json
+    exists but the storage/ subdir was never created (it was added later
+    as the /home/pi bind-mount source).
+    """
     (tmp_path / "secrets").mkdir(parents=True, exist_ok=True)
     (tmp_path / "pi-packages").mkdir(exist_ok=True)
     cfg = Config(data_root=tmp_path)
@@ -33,8 +39,9 @@ def _seed_interrupted_task(
     (td / "io").mkdir()
     (td / "io").chmod(0o1777)
     (td / "io" / "terminal.log").write_bytes(terminal_log)
-    (td / "storage").mkdir()
-    (td / "storage").chmod(0o1777)
+    if with_storage:
+        (td / "storage").mkdir()
+        (td / "storage").chmod(0o1777)
     if kind == "project":
         work = td / "work"
         work.mkdir()
@@ -240,6 +247,27 @@ def test_recover_does_not_truncate_terminal_log(tmp_path):
     lifecycle.recover(cfg, client, "t-001")
     size = (td / "io" / "terminal.log").stat().st_size
     assert size >= 4096, f"terminal.log shrunk: {size} < 4096"
+
+
+# ---------------------------------------------------------------------------
+# Legacy task recovery — storage/ created later as a Phase 5 bind-mount source.
+# Tasks that became interrupted before Phase 5 landed have no storage/ on
+# disk; recover must idempotently create it instead of failing the bind
+# validation.
+# ---------------------------------------------------------------------------
+
+
+def test_recover_creates_missing_storage_for_legacy_task(tmp_path):
+    cfg, td = _seed_interrupted_task(tmp_path, with_storage=False)
+    assert not (td / "storage").exists(), "precondition: no storage/"
+    client, _ = _fake_client()
+    lifecycle.recover(cfg, client, "t-001")
+    storage = td / "storage"
+    assert storage.is_dir(), "recover must create storage/ for legacy tasks"
+    # 1777 sticky-writable so pi uid 1000 can write under /home/pi even when
+    # the operator's host uid differs.
+    mode = storage.stat().st_mode & 0o7777
+    assert mode == 0o1777, f"storage mode: expected 0o1777, got {oct(mode)}"
 
 
 # ---------------------------------------------------------------------------
