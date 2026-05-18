@@ -24,7 +24,9 @@ def patched_env(monkeypatch, tmp_path):
     cfg = Config(data_root=tmp_path / "naiw-data")
     monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
     monkeypatch.setattr(cli_mod, "make_client", lambda url: MagicMock())
-    monkeypatch.setattr(cli_mod.startup_checks, "run_all", lambda c, k: None)
+    monkeypatch.setattr(
+        cli_mod.startup_checks, "run_all", lambda c, k, **kw: None
+    )
     return cfg
 
 
@@ -44,7 +46,7 @@ def test_cli_top_level_help_lists_subcommands():
 def test_cli_runs_startup_checks_before_subcommand(monkeypatch, tmp_path):
     calls: list[str] = []
 
-    def fake_run_all(cfg, client):
+    def fake_run_all(cfg, client, **kwargs):
         calls.append("startup_checks")
 
     def fake_start(*a, **kw):
@@ -67,7 +69,7 @@ def test_cli_propagates_startup_check_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
     monkeypatch.setattr(cli_mod, "make_client", lambda url: MagicMock())
 
-    def boom(cfg, client):
+    def boom(cfg, client, **kwargs):
         raise StartupCheckFailed("nope")
 
     monkeypatch.setattr(cli_mod.startup_checks, "run_all", boom)
@@ -86,7 +88,7 @@ def test_doctor_runs_startup_checks(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_mod.startup_checks,
         "run_all",
-        lambda cfg, client: calls.append("startup_checks"),
+        lambda cfg, client, **kw: calls.append("startup_checks"),
     )
 
     runner = CliRunner()

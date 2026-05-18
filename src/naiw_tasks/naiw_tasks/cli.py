@@ -51,12 +51,27 @@ def cli(ctx: click.Context) -> None:
     ctx.obj["cfg"] = cfg
 
 
-def _client_for(ctx: click.Context):
-    """Create/cache the Docker client and run startup checks on first use."""
+def _client_for(
+    ctx: click.Context,
+    gate_disk_threshold: bool = False,
+    disk_threshold_verb: str = "start",
+):
+    """Create/cache the Docker client and run startup checks on first use.
+
+    `gate_disk_threshold` enables the >95% max_data_size refusal for `start`
+    and `recover`. Other commands (attach, finish, list, output, clean,
+    disk) leave the gate off - they may free disk; gating them would lock
+    the operator out of recovery.
+    """
     if "client" not in ctx.obj:
         cfg = ctx.obj["cfg"]
         client = make_client(cfg.docker_proxy_url)
-        startup_checks.run_all(cfg, client)
+        startup_checks.run_all(
+            cfg,
+            client,
+            gate_disk_threshold=gate_disk_threshold,
+            disk_threshold_verb=disk_threshold_verb,
+        )
         ctx.obj["client"] = client
     return ctx.obj["client"]
 
@@ -115,7 +130,7 @@ def start(
     try:
         lifecycle.start(
             ctx.obj["cfg"],
-            _client_for(ctx),
+            _client_for(ctx, gate_disk_threshold=True),
             project=project,
             base_ref=base_ref,
             finish_policy=finish_policy,
@@ -384,6 +399,34 @@ def finish(
         policy_override=policy_override,
         force=force,
     )
+
+
+@cli.command("recover")
+@click.argument("task_id")
+@click.pass_context
+def recover_command(ctx: click.Context, task_id: str) -> None:
+    """Recover an interrupted task: fresh container, same name/labels/mounts."""
+    try:
+        validate_task_id(task_id)
+    except ValueError as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(3)
+    try:
+        lifecycle.recover(
+            ctx.obj["cfg"],
+            _client_for(
+                ctx,
+                gate_disk_threshold=True,
+                disk_threshold_verb="recover",
+            ),
+            task_id,
+        )
+    except lifecycle.RecoverNotInterrupted as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(2)
+    except lifecycle.RecoverFailed as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(1)
 
 
 @cli.command("clean")

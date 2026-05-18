@@ -13,6 +13,7 @@ from pathlib import Path
 
 import docker
 
+from naiw_tasks import disk as disk_mod
 from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
 
 _IMAGE_PI_UID: int = 1000
@@ -136,6 +137,46 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
         )
 
 
+def _format_iec_bytes(n: int) -> str:
+    """Render an int byte count as <num><IEC unit>. KISS sizer.
+
+    Matches the IEC binary convention used in config.yaml's max_data_size
+    field; operator-facing numbers stay readable (e.g. 48.2GiB) instead of
+    raw byte counts.
+    """
+    f = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if f < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(f)}{unit}"
+            return f"{f:.1f}{unit}"
+        f /= 1024.0
+    return f"{f:.1f}TiB"  # unreachable
+
+
+def check_disk_threshold(cfg, verb: str = "start") -> None:
+    """Refuse start/recover when ~/naiw-data/ is at >95% of max_data_size.
+
+    Other commands (attach, finish, list, output, clean, disk) are NOT gated
+    - they may free disk; gating them would lock the operator out of recovery.
+
+    `verb` is "start" or "recover" - both paths emit the SAME body but the
+    lead clause adapts so the operator sees the right verb.
+    """
+    used, max_bytes, pct = disk_mod._check_threshold(cfg)
+    if pct > 95.0:
+        used_human = _format_iec_bytes(used)
+        max_human = _format_iec_bytes(max_bytes)
+        raise StartupCheckFailed(
+            f"cannot {verb} — ~/naiw-data/ is at "
+            f"{pct:.1f}% of max_data_size "
+            f"({used_human} / {max_human}).\n"
+            f"  Reclaim space first: naiw-tasks clean --older-than 30d\n"
+            f"  Or raise the limit in ~/naiw-data/config.yaml: "
+            f"max_data_size: 100GiB"
+        )
+
+
 def warn_uid_mismatch_with_image() -> None:
     getuid = getattr(os, "getuid", None)
     if getuid is None:
@@ -154,10 +195,17 @@ def warn_uid_mismatch_with_image() -> None:
         )
 
 
-def run_all(cfg, client) -> None:
+def run_all(
+    cfg,
+    client,
+    gate_disk_threshold: bool = False,
+    disk_threshold_verb: str = "start",
+) -> None:
     data_root = Path(cfg.data_root)
     check_naiw_data_not_symlink(data_root)
     check_not_on_windows_fs_on_linux(data_root)
     check_docker_reachable(client, cfg.docker_proxy_url)
     check_proxy_allowlist_drift(cfg.docker_proxy_url)
     warn_uid_mismatch_with_image()
+    if gate_disk_threshold:
+        check_disk_threshold(cfg, verb=disk_threshold_verb)
