@@ -37,7 +37,6 @@ class ListRequest:
     statuses: list[str]
     project_filter: str | None
     show_all: bool
-    include_completed: bool
     as_json: bool
     limit_was_explicit: bool
     apply_auto_finish: bool = False
@@ -208,6 +207,17 @@ def _reconcile_one(
     ts_now = Event.now_iso()
     stale_events_offset = False
 
+    # Offset is held back when the event still needs out-of-band handling:
+    #   - defer_terminal_auto_finish: plain list, let reap consume it
+    #   - dry_run_pending: reap --dry-run, must not consume
+    #   - will_inline_teardown: reap, advance ONLY after teardown_and_mark
+    #     returns cleanly. Holding back here removes a class of bugs where an
+    #     unexpected exception inside teardown_and_mark (not SystemExit) would
+    #     leave the offset advanced and the task stuck running forever.
+    hold_offset = (
+        defer_terminal_auto_finish or dry_run_pending or will_inline_teardown
+    )
+
     def _mutator(d: dict) -> dict:
         nonlocal stale_events_offset
         d = dict(d)
@@ -218,17 +228,9 @@ def _reconcile_one(
         )
         if stale_events_offset:
             return d
-        d["events_offset"] = (
-            current_offset
-            if defer_terminal_auto_finish or dry_run_pending
-            else new_offset
-        )
-        if (
-            not will_inline_teardown
-            and not defer_terminal_auto_finish
-            and not dry_run_pending
-            and computed.transitioned
-        ):
+        if not hold_offset:
+            d["events_offset"] = new_offset
+        if not hold_offset and computed.transitioned:
             d["status"] = computed.status
             d["updated_at"] = ts_now
             if computed.failure_reason is not None:
@@ -286,12 +288,8 @@ def _reconcile_one(
         with contextlib.suppress(FileNotFoundError, store.UnsupportedSchemaError):
             task_dict = store.read_task(task_dir)
         if teardown_failed:
-            def _restore_offset(d: dict) -> dict:
-                d = dict(d)
-                d["events_offset"] = current_offset
-                return d
-
-            task_dict = store.update_task(task_dir, _restore_offset)
+            # Offset was held back in the mutator above, so retry on next reap
+            # is automatic — no rollback write needed.
             try:
                 container = by_task_id.get(task_id)
                 if container is not None:
@@ -306,6 +304,14 @@ def _reconcile_one(
         else:
             ctr_state, exit_code = ("notfound", None)
             reaped = 1
+            # Teardown succeeded; safe to advance the offset so the consumed
+            # event is not re-evaluated on the next reap.
+            def _advance_offset(d: dict) -> dict:
+                d = dict(d)
+                d["events_offset"] = new_offset
+                return d
+
+            task_dict = store.update_task(task_dir, _advance_offset)
         computed = reconcile.compute_status(
             task_dict=task_dict,
             ctr_state=ctr_state,
@@ -349,29 +355,39 @@ def _apply_filters(
     rows: list[tuple[Path, dict, reconcile.ComputedRow, str, int | None]],
     statuses: list[str],
     project_filter: str | None,
-    show_all: bool,
-    include_completed: bool,
 ) -> list[tuple[Path, dict, reconcile.ComputedRow, str, int | None]]:
+    """Filter by status set (OR within) and by project alias.
+
+    No implicit terminal-state exclusion: per task.md the default `list`
+    shows the latest tasks regardless of status (`completed`/`failed`/etc.
+    are visible by default). Operator narrows with `--status` if needed.
+    """
     out = rows
     if statuses:
         allowed = frozenset(statuses)
         out = [r for r in out if r[2].status in allowed]
-    elif not show_all:
-        # Default scope: exclude terminal states unless --completed.
-        if not include_completed:
-            out = [r for r in out if r[2].status not in _TERMINAL_STATUSES]
     if project_filter is not None:
         out = [r for r in out if r[1].get("project") == project_filter]
     return out
 
 
-def _sort_rows(rows):
-    """Sort updated_at desc, tie-break id asc.
+def _sort_key(d: dict) -> str:
+    """task.md: sort by updated_at desc, fall back to created_at when missing.
 
-    Two-pass stable sort keeps id asc within equal updated_at buckets.
+    A legacy task.json that has `created_at` but not `updated_at` would
+    otherwise sort to the bottom (empty string < every real ISO timestamp),
+    hiding newer tasks from the default latest-10 view.
+    """
+    return d.get("updated_at") or d.get("created_at", "")
+
+
+def _sort_rows(rows):
+    """Sort updated_at desc (created_at fallback), tie-break id asc.
+
+    Two-pass stable sort keeps id asc within equal sort-key buckets.
     """
     by_id = sorted(rows, key=lambda r: r[1].get("id", ""))
-    return sorted(by_id, key=lambda r: r[1].get("updated_at", ""), reverse=True)
+    return sorted(by_id, key=lambda r: _sort_key(r[1]), reverse=True)
 
 
 def run(
@@ -411,8 +427,6 @@ def run(
         rows,
         request.statuses,
         request.project_filter,
-        request.show_all,
-        request.include_completed,
     )
     filtered = _sort_rows(filtered)
 

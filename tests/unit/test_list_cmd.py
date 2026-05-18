@@ -96,12 +96,13 @@ def _run_list(
     statuses: list[str],
     project_filter: str | None,
     show_all: bool,
-    include_completed: bool,
     as_json: bool,
     limit_was_explicit: bool,
+    include_completed: bool = True,  # legacy kwarg ignored
     apply_auto_finish: bool = False,
     dry_run: bool = False,
 ) -> list_cmd.ListResult:
+    del include_completed
     return list_cmd.run(
         cfg,
         client,
@@ -110,7 +111,6 @@ def _run_list(
             statuses=statuses,
             project_filter=project_filter,
             show_all=show_all,
-            include_completed=include_completed,
             as_json=as_json,
             limit_was_explicit=limit_was_explicit,
             apply_auto_finish=apply_auto_finish,
@@ -128,10 +128,13 @@ def _capture(capsys) -> str:
     return out
 
 
-# ---------- default scope (D-13) -------------------------------------------
+# ---------- default scope --------------------------------------------------
 
 
-def test_default_scope_excludes_terminal_statuses(tmp_naiw_data, capsys):
+def test_default_scope_includes_terminal_statuses(tmp_naiw_data, capsys):
+    """task.md describes default `naiw-tasks list` as 'the latest 10 tasks
+    with their statuses' with completed/failed visible in the example
+    output. No implicit terminal-state exclusion."""
     _make_task(tmp_naiw_data, "alpha-001", status="running")
     _make_task(tmp_naiw_data, "alpha-002", status="completed")
     _make_task(tmp_naiw_data, "alpha-003", status="failed")
@@ -146,17 +149,13 @@ def test_default_scope_excludes_terminal_statuses(tmp_naiw_data, capsys):
         statuses=[],
         project_filter=None,
         show_all=False,
-        include_completed=False,
         as_json=False,
         limit_was_explicit=False,
     )
     out = _capture(capsys)
 
-    assert "alpha-001" in out
-    assert "alpha-005" in out
-    assert "alpha-002" not in out
-    assert "alpha-003" not in out
-    assert "alpha-004" not in out
+    for tid in ("alpha-001", "alpha-002", "alpha-003", "alpha-004", "alpha-005"):
+        assert tid in out, f"{tid} missing from default `list` output"
 
 
 # ---------- filters (parametrised) ------------------------------------------
@@ -335,6 +334,49 @@ def test_sort_by_updated_at_desc_id_asc(tmp_naiw_data, capsys):
     idx_a2 = out.index("alpha-002")
     idx_omega = out.index("omega-001")
     assert idx_zeta < idx_a1 < idx_a2 < idx_omega
+
+
+def test_sort_falls_back_to_created_at_when_updated_at_missing(
+    tmp_naiw_data, capsys
+):
+    """task.md: 'Sort by updated_at descending. If updated_at is missing,
+    fall back to created_at.' A legacy task without updated_at must not
+    sink to the bottom of the default latest-10 view."""
+    # Newer task — has only created_at (legacy shape).
+    legacy_dir = tmp_naiw_data / "tasks" / "legacy-001"
+    (legacy_dir / "meta").mkdir(parents=True)
+    (legacy_dir / "io" / ".naiw").mkdir(parents=True)
+    legacy_payload = {
+        "id": "legacy-001",
+        "kind": "project",
+        "container_name": "naiw-task-legacy-001",
+        "image_tag": "ghcr.io/d954mas/naiw-task-image:latest",
+        "created_at": "2026-05-16T12:00:00.000Z",  # newest by created_at
+        "status": "running",
+        "project": "alpha",
+        "labels": {"naiw.managed": "1", "naiw.task-id": "legacy-001"},
+        "secrets": [],
+        "recovery_history": [],
+        "schema_version": 1,
+    }
+    (legacy_dir / "meta" / "task.json").write_text(
+        json.dumps(legacy_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    # Older task with both timestamps; updated_at predates legacy's created_at.
+    _make_task(
+        tmp_naiw_data, "alpha-001",
+        updated_at="2026-05-16T10:00:00.000Z",
+        started_at="2026-05-16T09:00:00.000Z",
+    )
+    client = _mock_client([])
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, as_json=False, limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert out.index("legacy-001") < out.index("alpha-001")
 
 
 # ---------- single containers.list call -------------------------------------
@@ -1146,12 +1188,23 @@ def test_wait_event_flips_to_waiting_for_user_no_container_stop(
     container.stop.assert_not_called()
 
 
-def test_auto_finish_done_triggers_two_store_update_task_calls(
+def test_auto_finish_done_triggers_three_store_update_task_calls(
     tmp_naiw_data, monkeypatch, capsys
 ):
-    """Atomic-write boundary: 2 store.update_task calls for auto_finish + done.
-    One in _reconcile_one for offset+max_size advance; one inside
-    teardown_and_mark for terminal status after teardown."""
+    """Atomic-write boundary: 3 store.update_task calls for auto_finish + done.
+
+    Sequence:
+      1. _reconcile_one mutator — advance terminal_log_max_size only
+         (events_offset held back because will_inline_teardown is True).
+      2. teardown_and_mark — write terminal status after stop+remove succeeded.
+      3. _advance_offset — advance events_offset only after teardown succeeded.
+
+    The 3-call shape is the cost of crash-safe ordering: if the controller
+    dies between teardown and offset advancement, the next reap re-evaluates
+    the event but observes status terminal and exits cleanly. Conversely if
+    we advanced offset before teardown (the old 2-call shape) and teardown
+    raised an unexpected exception, the task would be stuck running forever.
+    """
     task_dir = _make_task(
         tmp_naiw_data, "alpha-001", status="running", auto_finish=True
     )
@@ -1192,14 +1245,14 @@ def test_auto_finish_done_triggers_two_store_update_task_calls(
         apply_auto_finish=True,
     )
 
-    assert len(calls) == 2, f"expected 2 store.update_task calls, got {len(calls)}"
+    assert len(calls) == 3, f"expected 3 store.update_task calls, got {len(calls)}"
     data = json.loads(
         (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
     )
     assert data["status"] == "completed"
 
 
-def test_auto_finish_fail_triggers_two_store_update_task_calls(
+def test_auto_finish_fail_triggers_three_store_update_task_calls(
     tmp_naiw_data, monkeypatch, capsys
 ):
     task_dir = _make_task(
@@ -1240,7 +1293,7 @@ def test_auto_finish_fail_triggers_two_store_update_task_calls(
         apply_auto_finish=True,
     )
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     data = json.loads(
         (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
     )
@@ -1366,6 +1419,43 @@ def test_auto_finish_teardown_failure_can_be_retried_by_reap(
     assert json.loads(
         (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
     )["status"] == "completed"
+
+
+def test_auto_finish_unexpected_exception_does_not_consume_event(
+    tmp_naiw_data, monkeypatch, capsys
+):
+    """If teardown_and_mark raises an unexpected exception (not SystemExit,
+    which is the controlled-failure path), the event offset must NOT be
+    advanced — otherwise the task is stuck running forever.
+
+    Holding the offset back in the pre-teardown mutator (rather than rolling
+    back after the fact) means this guarantee survives controller kill +
+    arbitrary exception classes, not just SystemExit."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=True
+    )
+    bytes_written = _write_event_line(task_dir, "done")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    def explosive_teardown(*args, **kwargs):
+        raise RuntimeError("simulated controller killed mid-teardown")
+
+    monkeypatch.setattr(list_cmd, "teardown_and_mark", explosive_teardown)
+
+    with pytest.raises(RuntimeError):
+        _run_list(
+            _cfg(tmp_naiw_data), client,
+            limit=None, statuses=[], project_filter=None,
+            show_all=True, as_json=False,
+            limit_was_explicit=False, apply_auto_finish=True,
+        )
+
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    # Offset must still be 0 so the next reap re-evaluates the event.
+    assert data["events_offset"] == 0
+    assert bytes_written > 0
 
 
 # ---------- DATA-08 monotonic-growth (lstat-enforced) ----------------------

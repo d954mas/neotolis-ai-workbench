@@ -442,9 +442,8 @@ def test_cli_list_command_invokes_list_cmd_run(patched_env, monkeypatch):
     assert request.statuses == []
     assert request.project_filter is None
     assert request.show_all is False
-    # CLI default now shows terminal statuses too (per task.md "latest 10
-    # tasks with their statuses"). Removed legacy `--completed` opt-in.
-    assert request.include_completed is True
+    # Default `list` now shows terminal statuses too (per task.md "latest 10
+    # tasks with their statuses"). Legacy `--completed` opt-in removed.
     assert request.as_json is False
     assert request.limit_was_explicit is False
     assert request.apply_auto_finish is False
@@ -473,7 +472,6 @@ def test_cli_list_passes_flags_correctly(patched_env, monkeypatch):
     assert request.statuses == ["running", "interrupted"]
     assert request.project_filter == "alpha"
     assert request.show_all is True
-    assert request.include_completed is True
     assert request.as_json is True
     assert request.limit_was_explicit is True
     assert request.apply_auto_finish is False
@@ -533,7 +531,6 @@ def test_cli_reap_invokes_list_cmd_with_auto_finish(patched_env, monkeypatch):
     args, _ = fake.call_args
     request = args[2]
     assert request.show_all is True
-    assert request.include_completed is True
     assert request.as_json is True
     assert request.limit is None
     assert request.apply_auto_finish is True
