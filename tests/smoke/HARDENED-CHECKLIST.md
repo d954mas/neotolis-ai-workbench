@@ -33,6 +33,8 @@ controller and is verified when that phase ships.
 
 ## Lifecycle
 
+Phase 5 additions: persistent `/home/pi` via `tasks/<id>/storage/` bind-mount; recovery banner host-side append; IMG-06 redaction validated across the recover boundary.
+
 | Validation              | Gate step |
 |-------------------------|-----------|
 | PID-1 wrapper (tmux/tini/docker-init) | 15 |
@@ -41,6 +43,7 @@ controller and is verified when that phase ships.
 | `naiw-signal done` appends valid event to `events.jsonl` | 18 |
 | cgroup `pids.peak` + `memory.peak` logged (WARN-only) | 43 |
 | Storage persistence: `/home/pi` bind-mounted from `tasks/<id>/storage/`; survives `docker rm` | STORAGE-BIND |
+| Redaction filter survives recover boundary: Pi token printed after recover becomes `[REDACTED]` in `terminal.log` | REC-IMG-06 |
 
 ## Phase 3.5 — Containerized controller (manual gate)
 

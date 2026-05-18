@@ -588,7 +588,10 @@ fi
 # probed (step_check "ID" in script). Narrative mentions in headers/comments
 # don't count — that's what makes this an honest coverage check.
 step_check "" "Step 45: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
-checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND)' tests/smoke/HARDENED-CHECKLIST.md \
+# Extract IDs from any cell in a markdown table row (leading-pipe line) so
+# IDs in either the first column (HARD-XX/PROXY-XX requirements table) or
+# the last column (REC-IMG-06/STORAGE-BIND lifecycle table) both surface.
+checklist_ids="$(grep -E '^\|' tests/smoke/HARDENED-CHECKLIST.md \
     | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND' | sort -u)"
 script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND)"' tests/smoke/run-hardened-smoke.sh \
     | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND' | sort -u)"
