@@ -400,6 +400,30 @@ def test_recover_bumps_count_inside_final_mutator_not_from_closure(tmp_path):
     assert final["recovery_history"][0]["recovery_count"] == 6
 
 
+def test_recover_updates_image_tag_when_config_changed(tmp_path):
+    """If the operator pinned a different cfg.task_image between start and
+    recover, the new container DOES run on the new image — task.json
+    must reflect that, and recovery_history must record the transition.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    # Operator updated the pinned image between start (image_tag=...:old)
+    # and recover (cfg.task_image=...:new).
+    from naiw_tasks.config import Config
+    cfg = Config(
+        data_root=cfg.data_root, task_image="naiw-task-image:new",
+    )
+    client, _ = _fake_client(new_image_digest="sha256:new-digest")
+    lifecycle.recover(cfg, client, "t-001")
+    final = json.loads((td / "meta" / "task.json").read_text())
+    assert final["image_tag"] == "naiw-task-image:new"
+    assert len(final["recovery_history"]) == 1
+    entry = final["recovery_history"][0]
+    assert entry["prev_image_tag"] == "naiw-task-image:latest"
+    assert entry["new_image_tag"] == "naiw-task-image:new"
+    assert entry["prev_image_digest"] == "sha256:old"
+    assert entry["new_image_digest"] == "sha256:new-digest"
+
+
 def test_recover_kills_new_container_if_reload_fails(tmp_path):
     """Same zombie-prevention contract as the concurrent-finish path:
     if container.reload() raises (e.g., daemon dropped before we got the

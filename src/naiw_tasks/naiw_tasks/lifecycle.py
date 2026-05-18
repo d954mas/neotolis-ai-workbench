@@ -989,6 +989,7 @@ def recover(cfg: Config, client, task_id: str) -> None:
         old = None
 
     prev_image_digest = initial.get("image_digest")
+    prev_image_tag = initial.get("image_tag")
     worktree_path_value = initial.get("worktree_path")
     work_path = (
         Path(worktree_path_value) if worktree_path_value else None
@@ -1105,10 +1106,18 @@ def recover(cfg: Config, client, task_id: str) -> None:
             "prev_container_exit_code": prev_container_exit_code,
             "prev_image_digest": prev_image_digest,
             "new_image_digest": new_image_digest,
+            "prev_image_tag": prev_image_tag,
+            "new_image_tag": cfg.task_image,
             "git_state": list(git_state),
         })
         d["recovery_history"] = history
         d["image_digest"] = new_image_digest
+        # image_tag tracks WHICH image we just ran on. If the operator
+        # pinned a new digest in config.yaml between start and recover,
+        # cfg.task_image differs from initial; updating here keeps the
+        # audit trail honest. The transition is also written into history
+        # above (prev_image_tag / new_image_tag).
+        d["image_tag"] = cfg.task_image
         d["updated_at"] = Event.now_iso()
         # events_offset and terminal_log_max_size PRESERVED verbatim.
         return d
