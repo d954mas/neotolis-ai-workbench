@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import docker.errors
 import pytest
 from naiw_tasks.config import Config
 
@@ -1792,12 +1793,80 @@ def test_list_cmd_module_has_no_gsd_refs():
     )
 
 
-# ---------- Wave 0 stubs — populated downstream when auto_finish artifact
-# capture lands in the reap path ---------------------------------------------
+# ---------- auto_finish artifact capture inheritance --------------------------
 
 
-@pytest.mark.xfail(
-    reason="auto_finish artifact capture not implemented yet", strict=False
-)
-def test_reap_auto_finish_captures_artifacts():
-    raise NotImplementedError
+def _make_running_task_with_done_event(
+    tmp_path,
+    task_id: str = "alpha-001",
+    kind: str = "generic",
+):
+    """Seed a running auto_finish task with a `done` event on disk.
+
+    Returns (cfg, task_dir). Reuses the module-top _make_task fixture; adds
+    a Pi-side terminal.log + summary.md so the real capture helper has
+    source content to read via its O_NOFOLLOW-defended path.
+    """
+    project = None if kind == "generic" else "alpha"
+    task_dir = _make_task(
+        tmp_path, task_id, status="running",
+        auto_finish=True, kind=kind, project=project,
+    )
+    (task_dir / "io" / "terminal.log").write_text("seeded log\n")
+    (task_dir / "io" / "summary.md").write_text("# done\n")
+    _write_event_line(task_dir, "done")
+    return _cfg(tmp_path), task_dir
+
+
+def test_reap_auto_finish_captures_artifacts(tmp_naiw_data):
+    """End-to-end through list_cmd.run(apply_auto_finish=True) WITHOUT
+    monkeypatching teardown_and_mark — so the real capture helper fires
+    and writes meta/artifacts/ during the reap path.
+    """
+    cfg, task_dir = _make_running_task_with_done_event(
+        tmp_naiw_data, "alpha-001", kind="generic",
+    )
+    # Build a client that mirrors real Docker semantics: containers.list
+    # returns the alive container for the LIST query; containers.get for
+    # the teardown path returns a stoppable container the first time and
+    # raises NotFound after .remove() is called (so the survivor verify
+    # inside teardown_and_mark passes).
+    listed_ctr = _mock_container("alpha-001", state="running")
+    teardown_ctr = MagicMock()
+    teardown_ctr.attrs = {"State": {"Status": "running"}}
+
+    client = MagicMock()
+    client.containers.list.return_value = [listed_ctr]
+
+    def _get(name):
+        if teardown_ctr.remove.called:
+            raise docker.errors.NotFound(f"{name} removed")
+        return teardown_ctr
+
+    client.containers.get = MagicMock(side_effect=_get)
+
+    _run_list(
+        cfg, client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+        apply_auto_finish=True,
+    )
+
+    artifacts_dir = task_dir / "meta" / "artifacts"
+    assert artifacts_dir.exists(), "auto_finish must create meta/artifacts/"
+    # Generic-task contract: terminal.log + summary.md always; the three
+    # git-driven captures only fire for project tasks.
+    assert (artifacts_dir / "terminal.log").exists()
+    assert (artifacts_dir / "terminal.log").read_text() == "seeded log\n"
+    assert (artifacts_dir / "summary.md").exists()
+    assert not (artifacts_dir / "git-status.txt").exists()
+    assert not (artifacts_dir / "diff.patch").exists()
+    assert not (artifacts_dir / "changed-files.txt").exists()
+
+    # Status was flipped via teardown_and_mark.
+    from naiw_tasks.model import Status
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8"),
+    )
+    assert data["status"] == str(Status.COMPLETED)
