@@ -157,6 +157,66 @@ def test_dry_run_does_not_remove_orphans(tmp_path):
     orphan.remove.assert_not_called()
 
 
+def test_clean_runs_disk_side_with_no_docker_client(tmp_path, monkeypatch, capsys):
+    """clean must keep working when Docker is unreachable so the operator can
+    reclaim space before fixing the daemon. CLI passes client=None on
+    StartupCheckFailed; clean.run handles it by skipping the orphan scan and
+    printing a clear notice. Disk-side per-task removal still runs.
+    """
+    old_ts = "2020-01-01T00:00:00.000+00:00"
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    td = _write_task(
+        tasks_dir, "t-001", "completed",
+        finished_at=old_ts, updated_at=old_ts,
+    )
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(
+        cfg, client=None, older_than=dt.timedelta(seconds=1), skip_prompt=True,
+    )
+    assert rc == 0
+    assert not td.exists(), "disk-side removal must still run with no client"
+
+
+def test_dry_run_with_no_docker_client_notes_skip(tmp_path, capsys):
+    """With no Docker client AND tasks to clean, dry-run prints the
+    orphan-scan-skipped notice so the operator knows orphans were not checked.
+    """
+    old_ts = "2020-01-01T00:00:00.000+00:00"
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    _write_task(
+        tasks_dir, "t-001", "completed",
+        finished_at=old_ts, updated_at=old_ts,
+    )
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(
+        cfg, client=None, older_than=dt.timedelta(seconds=1), dry_run=True,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "orphan-container scan skipped" in out, (
+        f"dry-run with no client must say it skipped orphans; got: {out!r}"
+    )
+
+
+def test_clean_no_candidates_no_client_notes_skip(tmp_path, capsys):
+    """The empty-case (no candidates, no Docker) also prints the notice so
+    the operator does not get a misleading 'no tasks to clean' that hides
+    the fact that orphans weren't checked at all.
+    """
+    (tmp_path / "tasks").mkdir()
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(
+        cfg, client=None, older_than=dt.timedelta(days=365),
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "orphan-container scan skipped" in out, (
+        f"empty-case with no client must say it skipped orphans; got: {out!r}"
+    )
+
+
 def test_yes_skips_prompt(tmp_path, monkeypatch):
     confirm_calls: list = []
     monkeypatch.setattr(

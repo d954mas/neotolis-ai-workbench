@@ -457,14 +457,30 @@ def clean_command(
     dry_run: bool,
     skip_prompt: bool,
 ) -> None:
-    """Remove terminal-state tasks older than DURATION; prune orphan containers."""
+    """Remove terminal-state tasks older than DURATION; prune orphan containers.
+
+    Graceful-degrades when Docker is unreachable: disk-side cleanup still
+    runs (so the operator can reclaim space before fixing Docker); the
+    orphan-container scan is skipped with a clear notice.
+    """
     try:
         td = clean_mod.parse_older_than(older_than)
     except ValueError as exc:
         raise click.UsageError(str(exc))
+    # Try to get a docker client; if startup checks fail (Docker unreachable
+    # or proxy drift), proceed in disk-only mode rather than exiting 2 —
+    # the whole point of clean is to free space, and disk reclaim must keep
+    # working even when the Docker daemon is down. StartupCheckFailed has
+    # already printed the underlying reason to stderr; clean.run prints a
+    # "(orphan-container scan skipped: docker unreachable)" line in its
+    # output so the operator understands the degraded mode.
+    try:
+        client = _client_for(ctx)
+    except startup_checks.StartupCheckFailed:
+        client = None
     rc = clean_mod.run(
         ctx.obj["cfg"],
-        _client_for(ctx),
+        client,
         older_than=td,
         dry_run=dry_run,
         skip_prompt=skip_prompt,

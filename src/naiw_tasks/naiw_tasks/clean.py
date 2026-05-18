@@ -186,7 +186,12 @@ def _enumerate_candidates(
 def _enumerate_orphans(client, data_root: Path) -> list:
     """Return docker.models.containers.Container instances labelled
     naiw.managed=1 whose task folder is missing.
+
+    `client=None` returns []: graceful-degraded mode used when Docker is
+    unreachable and the caller still wants to do disk-side cleanup.
     """
+    if client is None:
+        return []
     try:
         all_managed = client.containers.list(
             all=True, filters={"label": "naiw.managed=1"},
@@ -213,12 +218,22 @@ def run(
     dry_run: bool = False,
     skip_prompt: bool = False,
 ) -> int:
-    """Execute clean. Returns exit code (0 = success, 1 = >=1 per-task failure)."""
+    """Execute clean. Returns exit code (0 = success, 1 = >=1 per-task failure).
+
+    `client=None` skips the orphan-container scan + prune (graceful-degrade
+    when Docker is unreachable) and prints a clear notice so the operator
+    knows orphans were not checked. Disk-side per-task removal still runs.
+    """
     candidates = _enumerate_candidates(cfg, older_than)
     orphans = _enumerate_orphans(client, cfg.data_root)
+    docker_skipped = client is None
 
     if not candidates and not orphans:
-        click.echo("no tasks to clean")
+        if docker_skipped:
+            click.echo("no terminal-state tasks older than threshold "
+                       "(orphan-container scan skipped: docker unreachable)")
+        else:
+            click.echo("no tasks to clean")
         return 0
 
     if dry_run:
@@ -242,6 +257,10 @@ def run(
                 click.echo(
                     f"  {c.name} (task-id={labels.get('naiw.task-id')})"
                 )
+        elif docker_skipped:
+            click.echo(
+                "  (orphan-container scan skipped: docker unreachable)"
+            )
         return 0
 
     if candidates:
