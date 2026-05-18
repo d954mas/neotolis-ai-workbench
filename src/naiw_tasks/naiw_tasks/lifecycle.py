@@ -60,6 +60,22 @@ class StartFailed(RuntimeError):
     """
 
 
+class RecoverFailed(RuntimeError):
+    """Surface for any post-status-check failure during recover.
+
+    Carries the short reason for the operator-visible stderr line; the
+    original task.json status is preserved so the operator can retry.
+    """
+
+
+class RecoverNotInterrupted(RuntimeError):
+    """The task is not in the 'interrupted' status - refuse recover.
+
+    Mapped to exit code 2 by the CLI veneer (usage condition: the operator's
+    intent does not match the task state).
+    """
+
+
 def _container_name(task_id: str) -> str:
     return f"naiw-task-{task_id}"
 
@@ -788,6 +804,262 @@ def _capture_artifacts(
             )
     except OSError as exc:
         logger.warning("artifact capture: diff.patch write: %s", exc)
+
+
+def _detect_git_state(work_path: Path) -> list[str]:
+    """Return the list of in-progress git markers found under work/.git/.
+
+    Order is load-bearing - caller uses the FIRST entry as the banner flag.
+    Empty list for generic tasks and project tasks with no in-progress
+    operation.
+    """
+    git_dir = work_path / ".git"
+    if not git_dir.is_dir():
+        return []
+    found: list[str] = []
+    if (git_dir / "MERGE_HEAD").exists():
+        found.append("MERGE_HEAD (interrupted merge)")
+    if (git_dir / "rebase-merge").is_dir():
+        found.append("rebase-merge (interrupted interactive rebase)")
+    if (git_dir / "rebase-apply").is_dir():
+        found.append("rebase-apply (interrupted rebase --apply)")
+    if (git_dir / "CHERRY_PICK_HEAD").exists():
+        found.append("CHERRY_PICK_HEAD (interrupted cherry-pick)")
+    if (git_dir / "REVERT_HEAD").exists():
+        found.append("REVERT_HEAD (interrupted revert)")
+    return found
+
+
+def _append_recovery_banner(
+    io_dir: Path, recovery_count: int, git_state: list[str],
+) -> None:
+    """Append the recovery banner to terminal.log BEFORE the new container
+    starts. Host-side write; never via `docker exec`.
+
+    Uses O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW so a Pi-planted symlink at
+    io/terminal.log is refused (banner becomes best-effort but never
+    exfiltrates). Never uses O_TRUNC - the append-only invariant.
+    """
+    logger = logging.getLogger("naiw_tasks")
+    terminal_log = io_dir / "terminal.log"
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+    try:
+        fd = os.open(str(terminal_log), flags, 0o644)
+    except OSError as exc:
+        logger.warning(
+            "recover: cannot open terminal.log for banner write: %s "
+            "(continuing without banner)",
+            exc,
+        )
+        return
+    banner = (
+        f"\n===== RECOVERED #{recovery_count} AT {Event.now_iso()} =====\n"
+    )
+    if git_state:
+        banner += (
+            f"\n===== GIT STATE: {git_state[0]} "
+            f"(manual resolve required) =====\n"
+        )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(banner.encode("utf-8"))
+    except OSError as exc:
+        logger.warning(
+            "recover: cannot write recovery banner: %s "
+            "(continuing without banner)",
+            exc,
+        )
+
+
+def recover(cfg: Config, client, task_id: str) -> None:
+    """Recover an interrupted task: fresh container, same name/mounts/labels.
+
+    Sequence:
+      1. Atomically verify status == 'interrupted' AND bump recovery_count
+         (read-modify-write under flock so a concurrent finish cannot flip
+         status between the check and the bump).
+      2. Detect any in-progress git operation in work/.git/.
+      3. Probe the old container for state (best-effort; tolerate NotFound).
+      4. Host-side append the recovery banner to io/terminal.log BEFORE
+         container start so it lands even if the new container fails to
+         come up.
+      5. docker rm the old container (force, best-effort).
+      6. Allocate fresh container with the same hardened kwargs.
+      7. container.reload() + read attrs['Image'] for the new digest.
+      8. Atomically commit: status=running, recovery_history append (with
+         new_image_digest), image_digest refresh. events_offset and
+         terminal_log_max_size are PRESERVED (controller-level continuity).
+
+    Raises:
+      RecoverNotInterrupted - task is not in 'interrupted' status
+      RecoverFailed - post-status-check error (Docker, fs, etc.)
+    """
+    logger = logging.getLogger("naiw_tasks")
+    task_dir = cfg.data_root / "tasks" / task_id
+
+    # Step 1: initial read for prev state. The atomic verify+bump happens
+    # below under flock so a concurrent finish cannot flip status between
+    # this read and the bump.
+    try:
+        initial = store.read_task(task_dir)
+    except FileNotFoundError as exc:
+        raise RecoverFailed(
+            f"task {task_id!r} not found at {task_dir}"
+        ) from exc
+    if str(initial.get("status")) != str(Status.INTERRUPTED):
+        raise RecoverNotInterrupted(
+            f"task {task_id!r} is in status {initial.get('status')!r}; "
+            f"recover applies only to 'interrupted' tasks"
+        )
+
+    # Capture prev-container state for the recovery_history entry.
+    container_name = initial.get(
+        "container_name", _container_name(task_id)
+    )
+    prev_container_id: str | None = None
+    prev_container_exit_code: int | None = None
+    try:
+        old = client.containers.get(container_name)
+        prev_container_id = old.id
+        try:
+            exit_code = old.attrs.get("State", {}).get("ExitCode")
+            if isinstance(exit_code, int):
+                prev_container_exit_code = exit_code
+        except (KeyError, TypeError):
+            pass
+    except docker.errors.NotFound:
+        old = None
+    except docker.errors.APIError as exc:
+        logger.warning(
+            "recover: cannot inspect old container %s: %s (continuing)",
+            container_name, exc,
+        )
+        old = None
+
+    prev_image_digest = initial.get("image_digest")
+    worktree_path_value = initial.get("worktree_path")
+    work_path = (
+        Path(worktree_path_value) if worktree_path_value else None
+    )
+    git_state = (
+        _detect_git_state(work_path)
+        if work_path and initial.get("kind") == "project"
+        else []
+    )
+
+    # Step 2: atomic verify+bump under flock. Mutator raises if status
+    # changed between our initial read and the locked window (e.g., a
+    # concurrent finish flipped to cancelled). RecoverNotInterrupted is
+    # the exit-2 path; any other Exception is RecoverFailed.
+    new_recovery_count = int(initial.get("recovery_count", 0)) + 1
+
+    def _bump_to_pending(d: dict) -> dict:
+        if str(d.get("status")) != str(Status.INTERRUPTED):
+            raise RecoverNotInterrupted(
+                f"task {task_id!r} status changed to "
+                f"{d.get('status')!r} during recover; aborting"
+            )
+        d = dict(d)
+        d["recovery_count"] = new_recovery_count
+        d["updated_at"] = Event.now_iso()
+        # Do NOT flip status to running yet - only after container is up.
+        # Do NOT append recovery_history yet - image_digest is unknown.
+        return d
+
+    try:
+        store.update_task(task_dir, _bump_to_pending)
+    except RecoverNotInterrupted:
+        raise
+    except Exception as exc:
+        raise RecoverFailed(
+            f"recover: cannot bump recovery_count: {exc}"
+        ) from exc
+
+    # Step 4: host-side banner BEFORE container start (so banner lands
+    # deterministically even if start fails).
+    _append_recovery_banner(
+        task_dir / "io", new_recovery_count, git_state
+    )
+
+    # Step 5: docker rm old container (best-effort).
+    if old is not None:
+        with suppress(docker.errors.NotFound, docker.errors.APIError):
+            old.stop(timeout=10)
+        with suppress(docker.errors.NotFound, docker.errors.APIError):
+            old.remove(force=True)
+
+    # Step 6: build fresh container with same name/labels/mounts.
+    labels = _build_labels(task_id, initial.get("project"))
+    secrets_list = list(initial.get("secrets") or [])
+    try:
+        volumes = _build_volumes(
+            cfg.data_root,
+            task_dir,
+            secrets=secrets_list,
+            host_root=cfg.host_root,
+        )
+    except BindMountEscapeError as exc:
+        raise RecoverFailed(
+            f"recover: bind-mount validation failed: {exc}"
+        ) from exc
+
+    try:
+        new_container = client.containers.run(
+            image=cfg.task_image,
+            name=container_name,
+            labels=labels,
+            volumes=volumes,
+            detach=True,
+            **hardened_kwargs(),
+        )
+    except docker.errors.APIError as exc:
+        raise RecoverFailed(
+            f"recover: docker run failed: {exc}"
+        ) from exc
+
+    try:
+        new_container.reload()
+        new_image_digest = new_container.attrs.get("Image", "")
+    except docker.errors.APIError as exc:
+        raise RecoverFailed(
+            f"recover: container.reload() failed: {exc}"
+        ) from exc
+
+    # Step 8: commit the final atomic update.
+    history_entry = {
+        "ts": Event.now_iso(),
+        "recovery_count": new_recovery_count,
+        "prev_container_id": prev_container_id,
+        "prev_container_exit_code": prev_container_exit_code,
+        "prev_image_digest": prev_image_digest,
+        "new_image_digest": new_image_digest,
+        "git_state": list(git_state),
+    }
+
+    def _to_running(d: dict) -> dict:
+        d = dict(d)
+        d["status"] = str(Status.RUNNING)
+        history = list(d.get("recovery_history") or [])
+        history.append(history_entry)
+        d["recovery_history"] = history
+        d["image_digest"] = new_image_digest
+        d["updated_at"] = Event.now_iso()
+        # events_offset and terminal_log_max_size PRESERVED verbatim.
+        return d
+
+    try:
+        store.update_task(task_dir, _to_running)
+    except Exception as exc:
+        raise RecoverFailed(
+            f"recover: cannot commit status=running: {exc}"
+        ) from exc
+
+    print(
+        f"naiw-tasks: recovered task {task_id} "
+        f"(recovery #{new_recovery_count})",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def teardown_and_mark(
