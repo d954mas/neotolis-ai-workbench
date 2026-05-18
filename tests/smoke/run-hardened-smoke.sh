@@ -498,15 +498,20 @@ docker exec "$container" tmux send-keys -t main \
     "printf 'POST_TOKEN_SENTINEL_REC\n'" Enter
 
 if ! wait_for_log_marker "${log_path}" 'POST_TOKEN_SENTINEL_REC' 5; then
+    echo "--- terminal.log tail (debug, no-sentinel branch) ---" >&2
+    tail -n 60 "${log_path}" >&2 || true
+    echo "--- end tail ---" >&2
     step_fail "REC-IMG-06" "post-token sentinel never reached terminal.log (pipe-pane stuck?)"
-    echo "--- terminal.log tail (debug) ---" >&2
-    tail -n 40 "${log_path}" >&2 || true
     fail "REC-IMG-06 pipe-pane post-token flush missing"
 fi
 if grep -q 'ghp_TESTTOKEN' "${log_path}"; then
+    echo "--- terminal.log tail (debug, raw-leak branch) ---" >&2
+    tail -n 60 "${log_path}" >&2 || true
+    echo "--- end tail ---" >&2
+    echo "--- grep matches ---" >&2
+    grep -n 'ghp_TESTTOKEN\|\[REDACTED\]\|POST_TOKEN' "${log_path}" >&2 || true
+    echo "--- end grep ---" >&2
     step_fail "REC-IMG-06" "raw token ghp_TESTTOKEN leaked into terminal.log post-recover"
-    echo "--- terminal.log tail (debug) ---" >&2
-    tail -n 40 "${log_path}" >&2 || true
     fail "REC-IMG-06 raw token leaked"
 fi
 if ! grep -q 'RECOVERED #1' "${log_path}"; then
