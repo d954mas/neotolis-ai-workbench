@@ -75,11 +75,8 @@ def tail_events(
     if not stat.S_ISREG(st.st_mode):
         # Pi tried to substitute a symlink/fifo/socket for events.jsonl.
         # Surface as a single Malformed line; don't follow, don't advance offset.
-        return (
-            offset,
-            [],
-            [Malformed(raw_line="", reason=f"refused: not a regular file (mode={oct(st.st_mode)})")],
-        )
+        reason = f"refused: not a regular file (mode={oct(st.st_mode)})"
+        return (offset, [], [Malformed(raw_line="", reason=reason)])
     size = st.st_size
 
     if offset > size:
