@@ -476,6 +476,19 @@ docker rm -f "$container" >/dev/null
 
 start_smoke_container
 
+# wait_for_tmux_session inside start_smoke_container confirms the tmux
+# session is reachable, but pipe-pane setup happens later in the
+# entrypoint — there is a race window where send-keys would write raw
+# output into the pane BEFORE the redaction filter is wired. Send a
+# distinct benign probe first and wait for it to land in terminal.log,
+# proving pipe-pane is live before we send the token.
+docker exec "$container" tmux send-keys -t main \
+    "printf 'PIPE_PANE_PROBE_REC\n'" Enter
+if ! wait_for_log_marker "${log_path}" 'PIPE_PANE_PROBE_REC' 5; then
+    step_fail "REC-IMG-06" "pipe-pane filter never came online post-recover"
+    fail "REC-IMG-06 pipe-pane not ready"
+fi
+
 # Print a Pi-shaped token inside the recovered container.
 docker exec "$container" tmux send-keys -t main \
     "printf 'ghp_TESTTOKEN1234567890abcdef\n'" Enter
