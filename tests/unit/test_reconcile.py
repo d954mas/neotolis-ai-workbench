@@ -36,6 +36,16 @@ from naiw_tasks.reconcile import ComputedRow, compute_status
         ("created", "exited", 0, None, "failed", (), None),
         ("created", "notfound", None, None, "failed", (),
             "reconcile: container missing while status=created (controller crash?)"),
+        # Controller crashed between containers.run and the to-running write;
+        # Pi may have emitted a terminal event against the live container
+        # while task.json is still `created`. The event must win — otherwise
+        # list_cmd advances events_offset past it and the signal is gone.
+        ("created", "running", None, "done", "completed", (), None),
+        ("created", "running", None, "fail", "failed", (), None),
+        ("created", "exited", 0, "done", "completed", (), None),
+        ("created", "exited", 137, "fail", "failed", (), None),
+        ("created", "notfound", None, "done", "completed", (), None),
+        ("created", "notfound", None, "fail", "failed", (), None),
         ("completed", "running", None, None, "completed", ("leaked ctr",), None),
         ("completed", "notfound", None, None, "completed", (), None),
         ("failed", "running", None, None, "failed", ("leaked ctr",), None),

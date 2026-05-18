@@ -200,8 +200,15 @@ def _reconcile_one(
     defer_terminal_auto_finish = terminal_auto_pending and not apply_auto_finish
     dry_run_pending = apply_auto_finish and terminal_auto_pending and dry_run
 
-    # Keep unread-range diagnostics for reap to avoid duplicate list logs.
-    if not (defer_terminal_auto_finish or dry_run_pending):
+    # Skip the diagnostic write under two conditions:
+    #   - defer_terminal_auto_finish: plain `list` is deferring this event
+    #     for reap to consume; reap will log the malformed diagnostic itself
+    #     (avoid duplicate entries across the two passes).
+    #   - any dry_run: `reap --dry-run` must be fully read-only — including
+    #     not touching meta/events-error.log (covers the case where the
+    #     task is auto_finish=false but a malformed line is in the unread
+    #     range; dry_run_pending alone wouldn't catch it).
+    if not (defer_terminal_auto_finish or dry_run):
         _append_events_errors(task_dir / "meta", malformed)
 
     ts_now = Event.now_iso()

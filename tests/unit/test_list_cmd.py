@@ -1019,6 +1019,33 @@ def test_reap_dry_run_is_fully_read_only_for_non_auto_finish_tasks(
     _capture(capsys)
 
 
+def test_reap_dry_run_does_not_write_events_error_log(
+    tmp_naiw_data, capsys
+):
+    """`reap --dry-run` must be fully read-only — including NOT touching
+    meta/events-error.log when the unread range contains malformed lines.
+    The dry_run_pending gate alone misses this case for non-auto_finish
+    tasks; the diagnostic write needs its own dry_run guard."""
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001", status="running", auto_finish=False
+    )
+    events_path = task_dir / "io" / ".naiw" / "events.jsonl"
+    # One malformed line that would normally land in events-error.log.
+    events_path.write_bytes(b"{bad json\n")
+    client = _mock_client([_mock_container("alpha-001", state="running")])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=None, statuses=[], project_filter=None,
+        show_all=True, as_json=False,
+        limit_was_explicit=False, apply_auto_finish=True, dry_run=True,
+    )
+
+    error_log = task_dir / "meta" / "events-error.log"
+    assert not error_log.exists()
+    _capture(capsys)
+
+
 def test_concurrent_finish_does_not_get_overwritten_by_list(
     tmp_naiw_data, monkeypatch, capsys
 ):

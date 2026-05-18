@@ -97,7 +97,7 @@ def compute_status(
         return _compute_from_running(ctr_state, ctr_exit_code, pending_event_kind)
 
     if current == "created":
-        return _compute_from_created(ctr_state, ctr_exit_code)
+        return _compute_from_created(ctr_state, ctr_exit_code, pending_event_kind)
 
     if current == "waiting_for_user":
         return _compute_from_waiting(ctr_state, ctr_exit_code, pending_event_kind)
@@ -143,7 +143,17 @@ def _compute_from_running(
 def _compute_from_created(
     ctr_state: str,
     ctr_exit_code: int | None,
+    event: str | None,
 ) -> ComputedRow:
+    # Terminal events first, same precedence as _compute_from_running: if the
+    # controller crashed between containers.run and the to-running write, Pi
+    # may have still emitted `done`/`fail` against the live container while
+    # disk says `created`. Honoring the event here keeps the terminal signal
+    # from being silently consumed when list_cmd advances events_offset.
+    if event == "done":
+        return ComputedRow("completed", True, (), None)
+    if event == "fail":
+        return ComputedRow("failed", True, (), None)
     if ctr_state == "running":
         # Controller crashed between containers.run and the to-running write.
         # Flip forward; container is genuinely up.
