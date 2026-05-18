@@ -25,12 +25,12 @@ HARDENED_HOST_CONFIG_KWARGS = MappingProxyType({
     "security_opt": ("no-new-privileges",),
     # Read-only rootfs forces every writable surface to be tmpfs (audit-able).
     "read_only": True,
-    # /home/pi tmpfs lets `pip install --user` work under read-only rootfs
-    # (verified by the hardened-smoke pass1/pass2 probe).
+    # tmpfs covers ephemeral writable surfaces. /home/pi is provided as a
+    # per-task bind mount from ~/naiw-data/tasks/<id>/storage/ so Pi's home
+    # survives container teardown and the recover boundary.
     "tmpfs": MappingProxyType({
         "/tmp": "rw,size=512m,mode=1777",
         "/run": "rw,size=64m,mode=755",
-        "/home/pi": "rw,size=128m,mode=1777",
     }),
     # Cap fork-bombs.
     "pids_limit": 512,

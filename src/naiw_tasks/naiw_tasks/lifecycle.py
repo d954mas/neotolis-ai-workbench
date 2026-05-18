@@ -63,18 +63,23 @@ def _container_name(task_id: str) -> str:
 def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
     """Create the per-task directory skeleton sized to the task kind.
 
-    Generic tasks get meta/, work/, io/ — controller owns the empty work/.
-    Project tasks get meta/, io/ only — git worktree add creates work/ later
-    (and it requires the path to not already exist).
+    Generic tasks get meta/, work/, io/, storage/ — controller owns the empty
+    work/. Project tasks get meta/, io/, storage/ only — git worktree add
+    creates work/ later (and it requires the path to not already exist).
 
-    Bind-mount source dirs (io/.naiw, generic-task work/) get mode 1777 (sticky
-    + world-writable, same as /tmp). The task image runs as `pi` uid 1000
-    hardcoded; without this the operator's umask 0755 would block pi from
-    writing /io/.naiw/events.jsonl whenever the operator's host uid is not
-    1000 (LDAP boxes, second-user installs, etc.). Sticky bit preserves
-    owner-only delete so pi cannot remove files written by the operator.
-    meta/ stays at default 0755: it is host-only, never bind-mounted into the
-    container, and pi must not touch it.
+    Bind-mount source dirs (io/.naiw, storage/, generic-task work/) get mode
+    1777 (sticky + world-writable, same as /tmp). The task image runs as `pi`
+    uid 1000 hardcoded; without this the operator's umask 0755 would block pi
+    from writing /io/.naiw/events.jsonl or /home/pi files whenever the
+    operator's host uid is not 1000 (LDAP boxes, second-user installs, etc.).
+    Sticky bit preserves owner-only delete so pi cannot remove files written
+    by the operator (e.g. a pre-seeded storage/.gitconfig). meta/ stays at
+    default 0755: it is host-only, never bind-mounted into the container, and
+    pi must not touch it.
+
+    storage/ is the persistent /home/pi bind-mount source — Pi's home survives
+    container teardown so conversation history, .bash_history, and kit caches
+    are still present after the container is replaced (recover boundary).
     """
     task_dir = data_root / "tasks" / task_id
     (task_dir / "meta").mkdir(parents=True, exist_ok=True)
@@ -83,6 +88,9 @@ def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
     # Apply mode AFTER mkdir — mkdir's mode arg is masked by umask, chmod is not.
     (task_dir / "io").chmod(0o1777)
     io_naiw.chmod(0o1777)
+    storage = task_dir / "storage"
+    storage.mkdir(exist_ok=True)
+    storage.chmod(0o1777)
     if kind is TaskKind.GENERIC:
         work = task_dir / "work"
         work.mkdir(exist_ok=True)
@@ -186,9 +194,14 @@ def _build_volumes(
     volumes: dict[str, dict[str, str]] = {}
     work_src = validate_bind_source(task_dir / "work", data_root)
     io_src = validate_bind_source(task_dir / "io", data_root)
+    storage_src = validate_bind_source(task_dir / "storage", data_root)
     pi_pkgs_src = validate_bind_source(data_root / "pi-packages", data_root)
     volumes[_to_host(work_src)] = {"bind": "/work", "mode": "rw"}
     volumes[_to_host(io_src)] = {"bind": "/io", "mode": "rw"}
+    # storage/ is the persistent /home/pi bind-mount so Pi's home survives
+    # container teardown (replaces the prior tmpfs /home/pi). The bind-source
+    # escape check above (validate_bind_source) covers this entry too.
+    volumes[_to_host(storage_src)] = {"bind": "/home/pi", "mode": "rw"}
     volumes[_to_host(pi_pkgs_src)] = {"bind": "/pi-packages", "mode": "ro"}
     # Secrets MUST resolve under data_root/secrets/, NOT just under data_root.
     # Without narrowing the prefix, a name like "../config.yaml" passes the
