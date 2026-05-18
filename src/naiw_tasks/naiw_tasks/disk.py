@@ -106,6 +106,7 @@ def _check_threshold(cfg: Config) -> tuple[int, int, float]:
 def run(cfg: Config) -> int:
     """Print breakdown to stdout. Returns 0."""
     rows, total = _compute_rows(cfg)
+    partial_rows = [r for r in rows if r.partial]
     # Column widths
     name_w = max(len(r.name) for r in rows) + 2
     for r in rows:
@@ -116,6 +117,16 @@ def run(cfg: Config) -> int:
     click.echo(
         f"  {'TOTAL'.ljust(name_w)}{_humanize_bytes(total)}"
     )
+    # Loud notice when any subdir was partial — total understates real usage
+    # and the threshold warning below may not fire even when the operator
+    # is actually near the cap. Stronger than the per-row "(partial)" tag.
+    if partial_rows:
+        partial_names = ", ".join(r.name for r in partial_rows)
+        click.echo(
+            f"\nNOTE: {len(partial_rows)} subdir(s) returned partial size "
+            f"({partial_names}) — TOTAL may understate actual usage; "
+            f"check permissions / unmounted volumes."
+        )
     # Host disk free — informational, NOT part of threshold math.
     try:
         usage = shutil.disk_usage(cfg.data_root)

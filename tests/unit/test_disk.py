@@ -123,6 +123,25 @@ def test_du_partial_marks_row_partial(tmp_path, capsys, monkeypatch):
     assert clean_lines, (
         f"expected at least one non-partial row, got: {lines!r}"
     )
+    # Bug 6 regression: partial-row count must surface as a loud NOTE so
+    # the operator does not silently miss that TOTAL undercounts.
+    assert "NOTE: 1 subdir(s) returned partial size" in out, (
+        f"partial run must emit a loud NOTE; got: {out!r}"
+    )
+    assert "secrets" in out.split("NOTE:", 1)[1], (
+        f"NOTE must name the partial subdir(s); got: {out!r}"
+    )
+    assert "TOTAL may understate" in out
+
+
+def test_no_partial_means_no_note(tmp_path, capsys):
+    _seed_naiw_data(tmp_path, {"tasks": 100})
+    cfg = Config(data_root=tmp_path)
+    disk.run(cfg)
+    out = capsys.readouterr().out
+    assert "NOTE:" not in out, (
+        f"all-clean run must not emit a partial NOTE; got: {out!r}"
+    )
 
 
 def test_check_threshold_returns_used_max_pct(tmp_path):
