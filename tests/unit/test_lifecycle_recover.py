@@ -30,6 +30,10 @@ def _seed_interrupted_task(
     `with_storage=False` simulates a pre-Phase-5 legacy task — task.json
     exists but the storage/ subdir was never created (it was added later
     as the /home/pi bind-mount source).
+
+    `with_git=True` runs a real `git init` inside work/ so
+    _resolve_git_dir succeeds — a fake mkdir(".git") would not, the
+    repo path resolution relies on `git rev-parse --absolute-git-dir`.
     """
     (tmp_path / "secrets").mkdir(parents=True, exist_ok=True)
     (tmp_path / "pi-packages").mkdir(exist_ok=True)
@@ -46,9 +50,25 @@ def _seed_interrupted_task(
         work = td / "work"
         work.mkdir()
         if with_git:
-            (work / ".git").mkdir()
+            subprocess.run(
+                ["git", "init", "-q", str(work)], check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(work), "config", "user.email", "t@t.t"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(work), "config", "user.name", "t"],
+                check=True,
+            )
             if with_merge_marker:
-                (work / ".git" / "MERGE_HEAD").write_text("abc\n")
+                # MERGE_HEAD lives in the resolved git-dir, not necessarily
+                # under work/.git/. Resolve it the same way the code does.
+                gd = subprocess.run(
+                    ["git", "-C", str(work), "rev-parse", "--absolute-git-dir"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+                (Path(gd) / "MERGE_HEAD").write_text("abc\n")
     else:
         (td / "work").mkdir()
         (td / "work").chmod(0o1777)
@@ -142,6 +162,14 @@ def test_recovery_banner_appended_with_canonical_shape(tmp_path):
     ), f"banner shape wrong: {text!r}"
 
 
+def _git_dir(work: Path) -> Path:
+    out = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--absolute-git-dir"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return Path(out)
+
+
 @pytest.mark.parametrize(
     "marker",
     [
@@ -157,10 +185,11 @@ def test_recovery_banner_surfaces_git_state(tmp_path, marker):
     cfg, td = _seed_interrupted_task(
         tmp_path, kind="project", with_git=True,
     )
+    gd = _git_dir(td / "work")
     if marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
-        (td / "work" / ".git" / marker).write_text("ref\n")
+        (gd / marker).write_text("ref\n")
     elif marker in ("rebase-merge", "rebase-apply"):
-        (td / "work" / ".git" / marker).mkdir()
+        (gd / marker).mkdir()
     client, _ = _fake_client()
     lifecycle.recover(cfg, client, "t-001")
     text = (td / "io" / "terminal.log").read_text()
@@ -169,6 +198,47 @@ def test_recovery_banner_surfaces_git_state(tmp_path, marker):
     else:
         assert "GIT STATE:" in text
         assert marker in text
+
+
+def test_recovery_banner_surfaces_git_state_in_worktree_layout(tmp_path):
+    """git worktree add makes `.git` a FILE (`gitdir: <path>`), not a
+    directory. _resolve_git_dir must follow that pointer — otherwise no
+    markers would ever be surfaced for project tasks created via
+    worktree add (which is ~every real NAIW project task)."""
+    cfg, td = _seed_interrupted_task(tmp_path, kind="project")
+    # Create a real source repo, then `git worktree add` the task work/.
+    src_repo = tmp_path / "src_repo"
+    src_repo.mkdir()
+    for args in (
+        ["git", "init", "-q", str(src_repo)],
+        ["git", "-C", str(src_repo), "config", "user.email", "t@t.t"],
+        ["git", "-C", str(src_repo), "config", "user.name", "t"],
+        ["git", "-C", str(src_repo), "commit",
+         "--allow-empty", "-m", "init", "-q"],
+    ):
+        subprocess.run(args, check=True)
+    # Replace the placeholder work/ with a real worktree add target.
+    work = td / "work"
+    work.rmdir()
+    subprocess.run(
+        ["git", "-C", str(src_repo), "worktree", "add", "-q",
+         str(work), "HEAD"],
+        check=True,
+    )
+    # Sanity: in a worktree layout, work/.git is a FILE.
+    assert (work / ".git").is_file(), (
+        ".git should be a file in a worktree layout — test setup broken"
+    )
+    # Plant MERGE_HEAD in the resolved git-dir.
+    gd = _git_dir(work)
+    (gd / "MERGE_HEAD").write_text("abc\n")
+    client, _ = _fake_client()
+    lifecycle.recover(cfg, client, "t-001")
+    text = (td / "io" / "terminal.log").read_text()
+    assert "GIT STATE:" in text, (
+        f"worktree-layout MERGE_HEAD not surfaced; banner: {text!r}"
+    )
+    assert "MERGE_HEAD" in text
 
 
 # ---------------------------------------------------------------------------

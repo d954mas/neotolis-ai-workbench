@@ -806,15 +806,36 @@ def _capture_artifacts(
         logger.warning("artifact capture: diff.patch write: %s", exc)
 
 
-def _detect_git_state(work_path: Path) -> list[str]:
-    """Return the list of in-progress git markers found under work/.git/.
+def _resolve_git_dir(work_path: Path) -> Path | None:
+    """Return the absolute git-dir for work_path, or None if not a repo.
 
-    Order is load-bearing - caller uses the FIRST entry as the banner flag.
-    Empty list for generic tasks and project tasks with no in-progress
-    operation.
+    For `git worktree add` checkouts `.git` is a file containing
+    `gitdir: <path-to-real-gitdir>`, NOT a directory — Path(work_path) / ".git"
+    will not have MERGE_HEAD/rebase-merge/etc. directly. `git rev-parse
+    --absolute-git-dir` is the canonical way to resolve this regardless of
+    repo layout.
     """
-    git_dir = work_path / ".git"
-    if not git_dir.is_dir():
+    result = subprocess.run(
+        ["git", "-C", str(work_path), "rev-parse", "--absolute-git-dir"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    return Path(out) if out else None
+
+
+def _detect_git_state(work_path: Path) -> list[str]:
+    """In-progress git markers (MERGE_HEAD, rebase-*, CHERRY_PICK_HEAD,
+    REVERT_HEAD) found under the resolved git-dir. Order is load-bearing —
+    caller uses the FIRST entry as the banner flag.
+    """
+    git_dir = _resolve_git_dir(work_path)
+    if git_dir is None or not git_dir.is_dir():
         return []
     found: list[str] = []
     if (git_dir / "MERGE_HEAD").exists():
