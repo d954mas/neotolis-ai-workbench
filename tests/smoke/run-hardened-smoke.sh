@@ -147,6 +147,12 @@ mkdir -p "$TMP/naiw-data/pi-packages/dummy-pkg"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/meta"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/work"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/io"
+# Pre-create terminal.log mode 0666 so BOTH host (recovery banner append in
+# step 17b) AND in-container pi (uid 1000, pipe-pane append) can write.
+# Without this pre-create, pi creates the file 0644 owner-only and the
+# host (CI runner uid != 1000) gets EACCES on `>> terminal.log`.
+touch "$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
+chmod 0666 "$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
 echo "synthetic" > "$TMP/naiw-data/pi-packages/dummy-pkg/marker"
 printf '%s' "$fake_token" > "$TMP/naiw-data/secrets/test_token"
 chmod 0600 "$TMP/naiw-data/secrets/test_token"
