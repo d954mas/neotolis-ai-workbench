@@ -81,6 +81,20 @@ def worktree_add(
         )
 
 
+def worktree_prune(repo: Path) -> None:
+    """Best-effort `git worktree prune` against the base repo.
+
+    Used after host-side removal of a task folder when the worktree subdirectory
+    has already been torn down out-of-band — keeps the base repo's worktree
+    bookkeeping clean. Non-zero exits and missing repos are tolerated (the
+    operator may have deleted the base repo entirely); failures are silent so
+    callers can call this unconditionally before removing a task folder.
+    """
+    if not repo.exists():
+        return
+    _git(repo, "worktree", "prune")
+
+
 def worktree_remove(repo: Path, work_path: Path) -> None:
     """Force-remove worktree + prune metadata.
 
