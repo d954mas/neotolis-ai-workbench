@@ -444,7 +444,7 @@ scenario_4() {
         return 1
     fi
     naiw_tasks reap >/dev/null 2>&1 || return 1
-    out="$(naiw_tasks list --completed 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    out="$(naiw_tasks list 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     assert_contains "completed" "$out" "task shows completed" || return 1
     assert_contains "notfound" "$out" "container shows notfound (torn down)" || return 1
 
@@ -522,7 +522,7 @@ scenario_4() {
         return 1
     fi
     naiw_tasks reap >/dev/null 2>&1 || return 1
-    out="$(naiw_tasks list --completed 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    out="$(naiw_tasks list 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
     assert_contains "failed" "$out" "task shows failed" || return 1
 
     local removed2=no
