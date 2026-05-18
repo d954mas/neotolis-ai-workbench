@@ -271,6 +271,66 @@ def test_recover_creates_missing_storage_for_legacy_task(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# recovery_count does not stick on early failure (regression: prior design
+# bumped recovery_count BEFORE docker run; any docker/fs error in steps 4-7
+# left task.json with a higher count but no matching history entry).
+# ---------------------------------------------------------------------------
+
+
+def test_recover_failure_at_docker_run_does_not_bump_recovery_count(tmp_path):
+    cfg, td = _seed_interrupted_task(tmp_path)
+    client = MagicMock()
+    client.containers.get.side_effect = docker.errors.NotFound("absent")
+    # docker run fails — simulates "image not found", "name in use", etc.
+    client.containers.run.side_effect = docker.errors.APIError(
+        "Conflict. The container name '/naiw-task-t-001' is already in use"
+    )
+    with pytest.raises(lifecycle.RecoverFailed):
+        lifecycle.recover(cfg, client, "t-001")
+    # task.json untouched: status still interrupted, recovery_count still 0,
+    # history empty. Banner may or may not have landed (best-effort, host-side).
+    data = json.loads((td / "meta" / "task.json").read_text())
+    assert data["status"] == "interrupted", (
+        f"status must stay interrupted on docker-run failure; "
+        f"got {data['status']!r}"
+    )
+    assert data["recovery_count"] == 0, (
+        f"recovery_count must not bump on early failure; "
+        f"got {data['recovery_count']!r}"
+    )
+    assert data["recovery_history"] == [], (
+        f"recovery_history must stay empty on early failure; "
+        f"got {data['recovery_history']!r}"
+    )
+
+
+def test_recover_bumps_count_inside_final_mutator_not_from_closure(tmp_path):
+    """Concurrent-recover regression: even though banner_count is computed
+    from `initial` outside the flock window, the persisted recovery_count
+    must come from the value read inside the mutator. We simulate this by
+    pre-bumping task.json AFTER the initial read but BEFORE update_task.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    # Pre-set count to 5 — simulates a previous successful recover that
+    # landed between this recover's initial read and its final mutator.
+    meta = td / "meta" / "task.json"
+    data = json.loads(meta.read_text())
+    data["recovery_count"] = 5
+    meta.write_text(json.dumps(data))
+    client, _ = _fake_client()
+    lifecycle.recover(cfg, client, "t-001")
+    final = json.loads(meta.read_text())
+    # count must be 5 + 1, not (initial=0) + 1.
+    assert final["recovery_count"] == 6, (
+        f"recovery_count must bump from value-in-d, not stale closure: "
+        f"expected 6, got {final['recovery_count']!r}"
+    )
+    # history entry must match.
+    assert len(final["recovery_history"]) == 1
+    assert final["recovery_history"][0]["recovery_count"] == 6
+
+
+# ---------------------------------------------------------------------------
 # Concurrent recover + finish flock race
 # ---------------------------------------------------------------------------
 

@@ -947,38 +947,18 @@ def recover(cfg: Config, client, task_id: str) -> None:
         else []
     )
 
-    # Step 2: atomic verify+bump under flock. Mutator raises if status
-    # changed between our initial read and the locked window (e.g., a
-    # concurrent finish flipped to cancelled). RecoverNotInterrupted is
-    # the exit-2 path; any other Exception is RecoverFailed.
-    new_recovery_count = int(initial.get("recovery_count", 0)) + 1
-
-    def _bump_to_pending(d: dict) -> dict:
-        if str(d.get("status")) != str(Status.INTERRUPTED):
-            raise RecoverNotInterrupted(
-                f"task {task_id!r} status changed to "
-                f"{d.get('status')!r} during recover; aborting"
-            )
-        d = dict(d)
-        d["recovery_count"] = new_recovery_count
-        d["updated_at"] = Event.now_iso()
-        # Do NOT flip status to running yet - only after container is up.
-        # Do NOT append recovery_history yet - image_digest is unknown.
-        return d
-
-    try:
-        store.update_task(task_dir, _bump_to_pending)
-    except RecoverNotInterrupted:
-        raise
-    except Exception as exc:
-        raise RecoverFailed(
-            f"recover: cannot bump recovery_count: {exc}"
-        ) from exc
+    # Banner number is display-only — task.json's recovery_count is bumped
+    # atomically inside the final mutator (under flock; reads the current
+    # value out of `d`). On the unlikely concurrent-recover path the banner
+    # # and task.json count can diverge by one, but task.json remains the
+    # source of truth and never sticks-on-failure (which the prior
+    # separate-bump design did when steps 5-7 errored after the bump).
+    banner_count = int(initial.get("recovery_count", 0)) + 1
 
     # Step 4: host-side banner BEFORE container start (so banner lands
     # deterministically even if start fails).
     _append_recovery_banner(
-        task_dir / "io", new_recovery_count, git_state
+        task_dir / "io", banner_count, git_state
     )
 
     # Step 5: docker rm old container (best-effort).
@@ -1039,22 +1019,34 @@ def recover(cfg: Config, client, task_id: str) -> None:
             f"recover: container.reload() failed: {exc}"
         ) from exc
 
-    # Step 8: commit the final atomic update.
-    history_entry = {
-        "ts": Event.now_iso(),
-        "recovery_count": new_recovery_count,
-        "prev_container_id": prev_container_id,
-        "prev_container_exit_code": prev_container_exit_code,
-        "prev_image_digest": prev_image_digest,
-        "new_image_digest": new_image_digest,
-        "git_state": list(git_state),
-    }
+    # Step 8: commit the final atomic update — single read-modify-write
+    # under flock that (a) re-checks status==INTERRUPTED, (b) bumps
+    # recovery_count from the CURRENT value in d (not from a stale closure
+    # capture), (c) appends recovery_history, (d) flips status to running.
+    # No earlier partial bump means an error in steps 4-7 leaves task.json
+    # exactly as it was.
+    history_ts = Event.now_iso()
 
     def _to_running(d: dict) -> dict:
+        if str(d.get("status")) != str(Status.INTERRUPTED):
+            raise RecoverNotInterrupted(
+                f"task {task_id!r} status changed to "
+                f"{d.get('status')!r} during recover; aborting"
+            )
         d = dict(d)
+        new_count = int(d.get("recovery_count", 0)) + 1
+        d["recovery_count"] = new_count
         d["status"] = str(Status.RUNNING)
         history = list(d.get("recovery_history") or [])
-        history.append(history_entry)
+        history.append({
+            "ts": history_ts,
+            "recovery_count": new_count,
+            "prev_container_id": prev_container_id,
+            "prev_container_exit_code": prev_container_exit_code,
+            "prev_image_digest": prev_image_digest,
+            "new_image_digest": new_image_digest,
+            "git_state": list(git_state),
+        })
         d["recovery_history"] = history
         d["image_digest"] = new_image_digest
         d["updated_at"] = Event.now_iso()
@@ -1062,7 +1054,9 @@ def recover(cfg: Config, client, task_id: str) -> None:
         return d
 
     try:
-        store.update_task(task_dir, _to_running)
+        final_state = store.update_task(task_dir, _to_running)
+    except RecoverNotInterrupted:
+        raise
     except Exception as exc:
         raise RecoverFailed(
             f"recover: cannot commit status=running: {exc}"
@@ -1070,7 +1064,7 @@ def recover(cfg: Config, client, task_id: str) -> None:
 
     print(
         f"naiw-tasks: recovered task {task_id} "
-        f"(recovery #{new_recovery_count})",
+        f"(recovery #{final_state['recovery_count']})",
         file=sys.stderr,
         flush=True,
     )
