@@ -875,31 +875,35 @@ def recover(cfg: Config, client, task_id: str) -> None:
     """Recover an interrupted task: fresh container, same name/mounts/labels.
 
     Sequence:
-      1. Atomically verify status == 'interrupted' AND bump recovery_count
-         (read-modify-write under flock so a concurrent finish cannot flip
-         status between the check and the bump).
-      2. Detect any in-progress git operation in work/.git/.
-      3. Probe the old container for state (best-effort; tolerate NotFound).
+      1. Pre-flock read + cheap reject when status != interrupted.
+      2. Probe the old container for state (best-effort; tolerate NotFound).
+      3. Detect any in-progress git operation in work/.git/.
       4. Host-side append the recovery banner to io/terminal.log BEFORE
          container start so it lands even if the new container fails to
          come up.
-      5. docker rm the old container (force, best-effort).
-      6. Allocate fresh container with the same hardened kwargs.
-      7. container.reload() + read attrs['Image'] for the new digest.
-      8. Atomically commit: status=running, recovery_history append (with
-         new_image_digest), image_digest refresh. events_offset and
-         terminal_log_max_size are PRESERVED (controller-level continuity).
+      5. docker stop+rm the old container (best-effort).
+      6. Idempotently ensure storage/ exists (legacy pre-Phase-5 tasks).
+      7. Build volumes + start the new container.
+      8. container.reload() + read attrs['Image'] for the new digest.
+      9. SINGLE atomic read-modify-write under flock that (a) re-checks
+         status == INTERRUPTED, (b) bumps recovery_count from d (not from
+         a stale closure), (c) appends recovery_history with the new
+         digest, (d) flips status to running. On RecoverNotInterrupted at
+         this step (concurrent finish landed), the new container is torn
+         down before re-raising so no zombie survives.
+
+    `events_offset` and `terminal_log_max_size` are PRESERVED across the
+    boundary (controller-level continuity for the lazy-event tailer).
 
     Raises:
-      RecoverNotInterrupted - task is not in 'interrupted' status
+      RecoverNotInterrupted - task is not (or no longer) 'interrupted'
       RecoverFailed - post-status-check error (Docker, fs, etc.)
     """
     logger = logging.getLogger("naiw_tasks")
     task_dir = cfg.data_root / "tasks" / task_id
 
-    # Step 1: initial read for prev state. The atomic verify+bump happens
-    # below under flock so a concurrent finish cannot flip status between
-    # this read and the bump.
+    # Step 1: initial read + cheap reject. The authoritative status check
+    # happens again under flock in Step 9.
     try:
         initial = store.read_task(task_dir)
     except FileNotFoundError as exc:
@@ -961,18 +965,17 @@ def recover(cfg: Config, client, task_id: str) -> None:
         task_dir / "io", banner_count, git_state
     )
 
-    # Step 5: docker rm old container (best-effort).
+    # Step 5: stop+rm old container (best-effort).
     if old is not None:
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.stop(timeout=10)
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.remove(force=True)
 
-    # Step 6: build fresh container with same name/labels/mounts.
-    # Idempotent ensure of storage/ — tasks started before the storage
-    # bind-mount landed have no storage/ on disk; without this, _build_volumes
-    # raises BindMountEscapeError on the resolve(strict=True) check and the
-    # operator cannot recover a pre-existing interrupted task.
+    # Step 6: idempotent ensure of storage/ — tasks started before the
+    # storage bind-mount landed have no storage/ on disk; without this,
+    # _build_volumes raises BindMountEscapeError on resolve(strict=True)
+    # and the operator cannot recover a pre-existing interrupted task.
     storage_dir = task_dir / "storage"
     if not storage_dir.exists():
         logger.info(
@@ -983,6 +986,7 @@ def recover(cfg: Config, client, task_id: str) -> None:
         with suppress(OSError):
             storage_dir.chmod(0o1777)
 
+    # Step 7: build volumes + start the new container.
     labels = _build_labels(task_id, initial.get("project"))
     secrets_list = list(initial.get("secrets") or [])
     try:
@@ -1011,6 +1015,7 @@ def recover(cfg: Config, client, task_id: str) -> None:
             f"recover: docker run failed: {exc}"
         ) from exc
 
+    # Step 8: refresh the image digest from the just-started container.
     try:
         new_container.reload()
         new_image_digest = new_container.attrs.get("Image", "")
@@ -1019,12 +1024,13 @@ def recover(cfg: Config, client, task_id: str) -> None:
             f"recover: container.reload() failed: {exc}"
         ) from exc
 
-    # Step 8: commit the final atomic update — single read-modify-write
-    # under flock that (a) re-checks status==INTERRUPTED, (b) bumps
-    # recovery_count from the CURRENT value in d (not from a stale closure
-    # capture), (c) appends recovery_history, (d) flips status to running.
-    # No earlier partial bump means an error in steps 4-7 leaves task.json
-    # exactly as it was.
+    # Step 9: single atomic read-modify-write under flock that (a) re-checks
+    # status==INTERRUPTED, (b) bumps recovery_count from the CURRENT value
+    # in d (not from a stale closure capture), (c) appends recovery_history,
+    # (d) flips status to running. No earlier partial bump means an error
+    # in steps 4-8 leaves task.json exactly as it was. On RecoverNotInterrupted
+    # at this step, the new container is torn down before raising so no
+    # zombie survives.
     history_ts = Event.now_iso()
 
     def _to_running(d: dict) -> dict:
