@@ -630,19 +630,9 @@ def _safe_copy_io_file(src: Path, dst: Path) -> None:
 def _capture_artifacts(
     task_dir: Path, task_data: dict, work_path: Path | None,
 ) -> None:
-    """Bundle the six artifact items into meta/artifacts/.
-
-    Best-effort: any failure here is logged WARN and swallowed so the caller
-    can still flip terminal status. Repeated calls overwrite — there is no
-    historical artifact versioning.
-
-    Bundle contents (per task kind):
-      - terminal.log      (always; copied, not hard-linked)
-      - summary.md        (if present in io/; copied)
-      - output/...        (if present in io/; per-file hard-link, copy fallback)
-      - git-status.txt    (project tasks only)
-      - changed-files.txt (project tasks only; needs base_commit)
-      - diff.patch        (project tasks only; needs base_commit)
+    """Bundle artifacts into meta/artifacts/. Best-effort: all failures
+    are WARN-logged and swallowed so terminal-status write still happens.
+    Repeated calls overwrite (no artifact versioning).
     """
     logger = logging.getLogger("naiw_tasks")
     artifacts = task_dir / "meta" / "artifacts"
@@ -705,12 +695,9 @@ def _capture_artifacts(
         )
         return
 
-    # NOTE: `git diff <base>` (no `..HEAD`) — compares <base> to the
-    # working tree, capturing committed + staged + unstaged changes.
-    # `<base>..HEAD` would lose every uncommitted edit, which is the most
-    # common Pi/agent state at finish-time. Untracked files are appended
-    # to changed-files.txt with the `??` tag (matches git status porcelain
-    # convention) since `git diff` never emits them.
+    # `git diff <base>` (no `..HEAD`) captures committed + uncommitted
+    # changes against the working tree — Pi commonly edits without
+    # committing. Untracked files added to changed-files.txt with `??` tag.
     try:
         r = _run_git("diff", "--name-status", base)
         changed = r.stdout
@@ -750,13 +737,9 @@ def _capture_artifacts(
 
 
 def _resolve_git_dir(work_path: Path) -> Path | None:
-    """Return the absolute git-dir for work_path, or None if not a repo.
-
-    For `git worktree add` checkouts `.git` is a file containing
-    `gitdir: <path-to-real-gitdir>`, NOT a directory — Path(work_path) / ".git"
-    will not have MERGE_HEAD/rebase-merge/etc. directly. `git rev-parse
-    --absolute-git-dir` is the canonical way to resolve this regardless of
-    repo layout.
+    """Return absolute git-dir or None. In a `git worktree add` checkout
+    `.git` is a file (`gitdir: <real-path>`), not a directory — so a
+    Path(work_path) / ".git" probe misses MERGE_HEAD etc.
     """
     result = subprocess.run(
         ["git", "-C", str(work_path), "rev-parse", "--absolute-git-dir"],
@@ -773,9 +756,8 @@ def _resolve_git_dir(work_path: Path) -> Path | None:
 
 
 def _detect_git_state(work_path: Path) -> list[str]:
-    """In-progress git markers (MERGE_HEAD, rebase-*, CHERRY_PICK_HEAD,
-    REVERT_HEAD) found under the resolved git-dir. Order is load-bearing —
-    caller uses the FIRST entry as the banner flag.
+    """In-progress git markers. Order is load-bearing — caller uses
+    the FIRST entry as the banner flag.
     """
     git_dir = _resolve_git_dir(work_path)
     if git_dir is None or not git_dir.is_dir():
@@ -797,12 +779,8 @@ def _detect_git_state(work_path: Path) -> list[str]:
 def _append_recovery_banner(
     io_dir: Path, recovery_count: int, git_state: list[str],
 ) -> None:
-    """Append the recovery banner to terminal.log BEFORE the new container
-    starts. Host-side write; never via `docker exec`.
-
-    Uses O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW so a Pi-planted symlink at
-    io/terminal.log is refused (banner becomes best-effort but never
-    exfiltrates). Never uses O_TRUNC - the append-only invariant.
+    """Host-side append to terminal.log. O_APPEND only (terminal.log
+    append-only invariant); O_NOFOLLOW refuses a Pi-planted symlink.
     """
     logger = logging.getLogger("naiw_tasks")
     terminal_log = io_dir / "terminal.log"
@@ -836,28 +814,16 @@ def _append_recovery_banner(
 
 
 def recover(cfg: Config, client, task_id: str) -> None:
-    """Recover an interrupted task: fresh container, same name/mounts/labels.
+    """Recover an interrupted task on a fresh container.
 
-    Sequence:
-      1. Pre-flock read + cheap reject when status != interrupted.
-      2. Probe the old container for state (best-effort; tolerate NotFound).
-      3. Detect any in-progress git operation in work/.git/.
-      4. Host-side append the recovery banner to io/terminal.log BEFORE
-         container start so it lands even if the new container fails to
-         come up.
-      5. docker stop+rm the old container (best-effort).
-      6. Idempotently ensure storage/ exists (legacy pre-Phase-5 tasks).
-      7. Build volumes + start the new container.
-      8. container.reload() + read attrs['Image'] for the new digest.
-      9. SINGLE atomic read-modify-write under flock that (a) re-checks
-         status == INTERRUPTED, (b) bumps recovery_count from d (not from
-         a stale closure), (c) appends recovery_history with the new
-         digest, (d) flips status to running. On RecoverNotInterrupted at
-         this step (concurrent finish landed), the new container is torn
-         down before re-raising so no zombie survives.
-
-    `events_offset` and `terminal_log_max_size` are PRESERVED across the
-    boundary (controller-level continuity for the lazy-event tailer).
+    Invariants:
+      - recovery_count bumps ONLY on success (single final mutator).
+      - events_offset and terminal_log_max_size are preserved across the
+        boundary (lazy-event tailer continuity).
+      - terminal.log banner is host-side append (never truncates).
+      - On any failure after the new container started — including a
+        concurrent finish flipping status under flock — the new container
+        is torn down so no zombie survives.
 
     Raises:
       RecoverNotInterrupted - task is not (or no longer) 'interrupted'
@@ -866,8 +832,6 @@ def recover(cfg: Config, client, task_id: str) -> None:
     logger = logging.getLogger("naiw_tasks")
     task_dir = cfg.data_root / "tasks" / task_id
 
-    # Step 1: initial read + cheap reject. The authoritative status check
-    # happens again under flock in Step 9.
     try:
         initial = store.read_task(task_dir)
     except FileNotFoundError as exc:
@@ -916,31 +880,22 @@ def recover(cfg: Config, client, task_id: str) -> None:
         else []
     )
 
-    # Banner number is display-only — task.json's recovery_count is bumped
-    # atomically inside the final mutator (under flock; reads the current
-    # value out of `d`). On the unlikely concurrent-recover path the banner
-    # # and task.json count can diverge by one, but task.json remains the
-    # source of truth and never sticks-on-failure (which the prior
-    # separate-bump design did when steps 5-7 errored after the bump).
+    # Display-only count; authoritative bump happens in the final mutator.
     banner_count = int(initial.get("recovery_count", 0)) + 1
 
-    # Step 4: host-side banner BEFORE container start (so banner lands
-    # deterministically even if start fails).
+    # Banner lands BEFORE container start so it appears even if start fails.
     _append_recovery_banner(
         task_dir / "io", banner_count, git_state
     )
 
-    # Step 5: stop+rm old container (best-effort).
     if old is not None:
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.stop(timeout=10)
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.remove(force=True)
 
-    # Step 6: idempotent ensure of storage/ — tasks started before the
-    # storage bind-mount landed have no storage/ on disk; without this,
-    # _build_volumes raises BindMountEscapeError on resolve(strict=True)
-    # and the operator cannot recover a pre-existing interrupted task.
+    # Legacy task compat: storage/ was added later as the /home/pi bind
+    # source; tasks created before that have no storage/ on disk.
     storage_dir = task_dir / "storage"
     if not storage_dir.exists():
         logger.info(
@@ -951,7 +906,6 @@ def recover(cfg: Config, client, task_id: str) -> None:
         with suppress(OSError):
             storage_dir.chmod(0o1777)
 
-    # Step 7: build volumes + start the new container.
     labels = _build_labels(task_id, initial.get("project"))
     secrets_list = list(initial.get("secrets") or [])
     try:
@@ -980,9 +934,7 @@ def recover(cfg: Config, client, task_id: str) -> None:
             f"recover: docker run failed: {exc}"
         ) from exc
 
-    # Step 8: refresh the image digest from the just-started container.
-    # Same zombie-prevention as Step 9 — if reload() fails the container
-    # is live but unrecorded; tear it down before raising.
+    # Zombie-prevention: container is live but unrecorded if reload fails.
     try:
         new_container.reload()
         new_image_digest = new_container.attrs.get("Image", "")
@@ -995,13 +947,6 @@ def recover(cfg: Config, client, task_id: str) -> None:
             f"recover: container.reload() failed: {exc}"
         ) from exc
 
-    # Step 9: single atomic read-modify-write under flock that (a) re-checks
-    # status==INTERRUPTED, (b) bumps recovery_count from the CURRENT value
-    # in d (not from a stale closure capture), (c) appends recovery_history,
-    # (d) flips status to running. No earlier partial bump means an error
-    # in steps 4-8 leaves task.json exactly as it was. On RecoverNotInterrupted
-    # at this step, the new container is torn down before raising so no
-    # zombie survives.
     history_ts = Event.now_iso()
 
     def _to_running(d: dict) -> dict:
@@ -1028,36 +973,23 @@ def recover(cfg: Config, client, task_id: str) -> None:
         })
         d["recovery_history"] = history
         d["image_digest"] = new_image_digest
-        # image_tag tracks WHICH image we just ran on. If the operator
-        # pinned a new digest in config.yaml between start and recover,
-        # cfg.task_image differs from initial; updating here keeps the
-        # audit trail honest. The transition is also written into history
-        # above (prev_image_tag / new_image_tag).
         d["image_tag"] = cfg.task_image
         d["updated_at"] = Event.now_iso()
-        # events_offset and terminal_log_max_size PRESERVED verbatim.
         return d
+
+    def _kill_new_container() -> None:
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.stop(timeout=10)
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.remove(force=True)
 
     try:
         final_state = store.update_task(task_dir, _to_running)
     except RecoverNotInterrupted:
-        # Concurrent finish landed between our pre-flock read and the
-        # final mutator. New container has already been started — kill it
-        # to avoid a zombie (live container, task.json=cancelled/completed).
-        # Best-effort: errors here are noise, not a recovery failure.
-        with suppress(docker.errors.APIError, docker.errors.NotFound):
-            new_container.stop(timeout=10)
-        with suppress(docker.errors.APIError, docker.errors.NotFound):
-            new_container.remove(force=True)
+        _kill_new_container()
         raise
     except Exception as exc:
-        # Same containment for any other update_task failure (fs error,
-        # disk full while writing task.json). Otherwise a live container
-        # would float without task.json bookkeeping pointing at it.
-        with suppress(docker.errors.APIError, docker.errors.NotFound):
-            new_container.stop(timeout=10)
-        with suppress(docker.errors.APIError, docker.errors.NotFound):
-            new_container.remove(force=True)
+        _kill_new_container()
         raise RecoverFailed(
             f"recover: cannot commit status=running: {exc}"
         ) from exc
