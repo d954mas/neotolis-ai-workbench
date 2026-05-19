@@ -18,7 +18,9 @@ import sys
 import click
 
 from naiw_tasks import attach as attach_mod
+from naiw_tasks import clean as clean_mod
 from naiw_tasks import config, lifecycle, startup_checks
+from naiw_tasks import disk as disk_mod
 from naiw_tasks import list_cmd as list_cmd_module
 from naiw_tasks import output_cmd as output_cmd_module
 from naiw_tasks.docker_client import make_client
@@ -49,12 +51,27 @@ def cli(ctx: click.Context) -> None:
     ctx.obj["cfg"] = cfg
 
 
-def _client_for(ctx: click.Context):
-    """Create/cache the Docker client and run startup checks on first use."""
+def _client_for(
+    ctx: click.Context,
+    gate_disk_threshold: bool = False,
+    disk_threshold_verb: str = "start",
+):
+    """Create/cache the Docker client and run startup checks on first use.
+
+    `gate_disk_threshold` enables the >95% max_data_size refusal for `start`
+    and `recover`. Other commands (attach, finish, list, output, clean,
+    disk) leave the gate off - they may free disk; gating them would lock
+    the operator out of recovery.
+    """
     if "client" not in ctx.obj:
         cfg = ctx.obj["cfg"]
         client = make_client(cfg.docker_proxy_url)
-        startup_checks.run_all(cfg, client)
+        startup_checks.run_all(
+            cfg,
+            client,
+            gate_disk_threshold=gate_disk_threshold,
+            disk_threshold_verb=disk_threshold_verb,
+        )
         ctx.obj["client"] = client
     return ctx.obj["client"]
 
@@ -113,7 +130,7 @@ def start(
     try:
         lifecycle.start(
             ctx.obj["cfg"],
-            _client_for(ctx),
+            _client_for(ctx, gate_disk_threshold=True),
             project=project,
             base_ref=base_ref,
             finish_policy=finish_policy,
@@ -382,6 +399,99 @@ def finish(
         policy_override=policy_override,
         force=force,
     )
+
+
+@cli.command("recover")
+@click.argument("task_id")
+@click.pass_context
+def recover_command(ctx: click.Context, task_id: str) -> None:
+    """Recover an interrupted task: fresh container, same name/labels/mounts."""
+    try:
+        validate_task_id(task_id)
+    except ValueError as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(3)
+    try:
+        lifecycle.recover(
+            ctx.obj["cfg"],
+            _client_for(
+                ctx,
+                gate_disk_threshold=True,
+                disk_threshold_verb="recover",
+            ),
+            task_id,
+        )
+    except lifecycle.RecoverNotInterrupted as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(2)
+    except lifecycle.RecoverFailed as exc:
+        click.echo(f"naiw-tasks: {exc}", err=True)
+        sys.exit(1)
+
+
+@cli.command("clean")
+@click.option(
+    "--older-than",
+    "older_than",
+    required=True,
+    help="Duration: <int><unit> where unit is s, m, h, d, w (e.g. '30d').",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="List candidates and orphans; do not remove.",
+)
+@click.option(
+    "--yes",
+    "skip_prompt",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt (cron-friendly).",
+)
+@click.pass_context
+def clean_command(
+    ctx: click.Context,
+    older_than: str,
+    dry_run: bool,
+    skip_prompt: bool,
+) -> None:
+    """Remove terminal-state tasks older than DURATION; prune orphan containers.
+
+    Graceful-degrades when Docker is unreachable: disk-side cleanup still
+    runs (so the operator can reclaim space before fixing Docker); the
+    orphan-container scan is skipped with a clear notice.
+    """
+    try:
+        td = clean_mod.parse_older_than(older_than)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    # Graceful-degrade ONLY on Docker reachability / proxy-drift failures
+    # so disk reclaim still works when the daemon is down. Other
+    # StartupCheckFailed variants (symlinked data root, Windows-FS gating)
+    # signal an unsafe local config and MUST still hard-stop — they
+    # propagate untouched.
+    try:
+        client = _client_for(ctx)
+    except startup_checks.DockerCheckFailed:
+        client = None
+    rc = clean_mod.run(
+        ctx.obj["cfg"],
+        client,
+        older_than=td,
+        dry_run=dry_run,
+        skip_prompt=skip_prompt,
+    )
+    sys.exit(rc)
+
+
+@cli.command("disk")
+@click.pass_context
+def disk_command(ctx: click.Context) -> None:
+    """Print per-subdirectory disk usage of ~/naiw-data/; warn at >80%."""
+    rc = disk_mod.run(ctx.obj["cfg"])
+    sys.exit(rc)
 
 
 if __name__ == "__main__":  # pragma: no cover

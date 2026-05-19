@@ -88,10 +88,11 @@ def test_hardened_kwargs_match_phase25() -> None:
     # tmpfs / restart_policy are MappingProxyType wrappers; equality with a
     # plain dict still works because MappingProxyType delegates __eq__ to the
     # underlying mapping.
+    # /home/pi is intentionally NOT in tmpfs — it is provided as a per-task
+    # bind mount from tasks/<id>/storage/ so Pi's home survives recover.
     assert K["tmpfs"] == {
         "/tmp": "rw,size=512m,mode=1777",
         "/run": "rw,size=64m,mode=755",
-        "/home/pi": "rw,size=128m,mode=1777",
     }
     assert K["pids_limit"] == 512
     assert K["mem_limit"] == "4g"
@@ -117,6 +118,18 @@ def test_hardened_kwargs_top_level_is_immutable() -> None:
         K["new_key"] = "danger"  # type: ignore[index]
     with pytest.raises(TypeError):
         del K["cap_drop"]  # type: ignore[arg-type]
+
+
+def test_hardened_kwargs_no_longer_includes_home_pi_tmpfs() -> None:
+    """Phase 5 D-02: /home/pi is provided as a per-task bind mount from
+    tasks/<id>/storage/, NOT as a tmpfs. Regression sentinel for accidental
+    re-introduction of the tmpfs entry (would shadow the bind mount and lose
+    Pi's persistent home on every container restart)."""
+    from naiw_tasks.docker_client import hardened_kwargs
+
+    tmpfs = hardened_kwargs()["tmpfs"]
+    assert set(tmpfs.keys()) == {"/tmp", "/run"}
+    assert "/home/pi" not in tmpfs
 
 
 def test_hardened_kwargs_nested_tmpfs_is_immutable() -> None:

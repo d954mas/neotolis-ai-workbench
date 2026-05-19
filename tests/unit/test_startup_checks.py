@@ -474,3 +474,119 @@ def test_warn_uid_mismatch_is_non_fatal(monkeypatch):
     # Just call — anything raised here would surface as test failure.
     result = startup_checks.warn_uid_mismatch_with_image()
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Disk-threshold gate (refuses start/recover at >95% of max_data_size)
+# ---------------------------------------------------------------------------
+
+
+def _stub_all_other_checks(monkeypatch):
+    """Stub the four pre-existing run_all checks so only the disk gate fires."""
+    monkeypatch.setattr(
+        startup_checks, "check_naiw_data_not_symlink", lambda d: None,
+    )
+    monkeypatch.setattr(
+        startup_checks, "check_not_on_windows_fs_on_linux", lambda d: None,
+    )
+    monkeypatch.setattr(
+        startup_checks,
+        "check_docker_reachable",
+        lambda c, url, **kw: None,
+    )
+    monkeypatch.setattr(
+        startup_checks, "check_proxy_allowlist_drift", lambda url: None,
+    )
+    monkeypatch.setattr(
+        startup_checks, "warn_uid_mismatch_with_image", lambda: None,
+    )
+
+
+def test_start_refuses_above_95_percent_data_threshold(
+        tmp_path, monkeypatch, capsys,
+):
+    from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
+
+    cfg = Config(data_root=tmp_path, max_data_size=1024)
+    _stub_all_other_checks(monkeypatch)
+    # Force threshold() to return >95%.
+    from naiw_tasks import disk as disk_mod
+    monkeypatch.setattr(
+        disk_mod, "threshold",
+        lambda c: (1000, 1024, 97.65),
+    )
+    client = MagicMock()
+    with pytest.raises(SystemExit) as exc:
+        startup_checks.run_all(cfg, client, gate_disk_threshold=True)
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "max_data_size" in captured.err
+    # `:.1f` rounds 97.65 -> 97.7 (banker's rounding -> nearest)
+    assert "97.7%" in captured.err or "97.65" in captured.err
+    assert "naiw-tasks clean" in captured.err
+
+
+def test_disk_threshold_gate_off_by_default(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
+
+    cfg = Config(data_root=tmp_path, max_data_size=1024)
+    _stub_all_other_checks(monkeypatch)
+    from naiw_tasks import disk as disk_mod
+    # Even at 99% the default-off gate doesn't raise.
+    monkeypatch.setattr(
+        disk_mod, "threshold",
+        lambda c: (1010, 1024, 98.6),
+    )
+    client = MagicMock()
+    # No gate flag - default-off; must not raise.
+    startup_checks.run_all(cfg, client)
+
+
+def test_disk_threshold_gate_passes_below_95_percent(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
+
+    cfg = Config(data_root=tmp_path, max_data_size=1024)
+    _stub_all_other_checks(monkeypatch)
+    from naiw_tasks import disk as disk_mod
+    monkeypatch.setattr(
+        disk_mod, "threshold",
+        lambda c: (500, 1024, 48.8),
+    )
+    client = MagicMock()
+    # Gate ON, but usage is below 95% - must not raise.
+    startup_checks.run_all(cfg, client, gate_disk_threshold=True)
+
+
+def test_disk_threshold_gate_recover_verb_in_message(
+        tmp_path, monkeypatch, capsys,
+):
+    """`disk_threshold_verb="recover"` surfaces 'cannot recover' instead of
+    'cannot start' in the operator-visible stderr line."""
+    from unittest.mock import MagicMock
+
+    from naiw_tasks.config import Config
+
+    cfg = Config(data_root=tmp_path, max_data_size=1024)
+    _stub_all_other_checks(monkeypatch)
+    from naiw_tasks import disk as disk_mod
+    monkeypatch.setattr(
+        disk_mod, "threshold",
+        lambda c: (1000, 1024, 97.65),
+    )
+    client = MagicMock()
+    with pytest.raises(SystemExit) as exc:
+        startup_checks.run_all(
+            cfg, client,
+            gate_disk_threshold=True,
+            disk_threshold_verb="recover",
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot recover" in err
+    assert "cannot start" not in err

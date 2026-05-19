@@ -18,7 +18,9 @@ reclaims disk via `naiw-tasks finish <id> --delete-worktree`.
 
 import logging
 import logging.handlers
+import os
 import stat
+import subprocess
 import sys
 from contextlib import suppress
 from dataclasses import replace
@@ -27,6 +29,7 @@ from pathlib import Path
 import docker.errors
 from naiw_common.events import Event
 
+from naiw_tasks import artifacts as artifacts_mod
 from naiw_tasks import git_ops, projects, store
 from naiw_tasks.config import Config
 from naiw_tasks.docker_client import (
@@ -56,6 +59,22 @@ class StartFailed(RuntimeError):
     """
 
 
+class RecoverFailed(RuntimeError):
+    """Surface for any post-status-check failure during recover.
+
+    Carries the short reason for the operator-visible stderr line; the
+    original task.json status is preserved so the operator can retry.
+    """
+
+
+class RecoverNotInterrupted(RuntimeError):
+    """The task is not in the 'interrupted' status - refuse recover.
+
+    Mapped to exit code 2 by the CLI veneer (usage condition: the operator's
+    intent does not match the task state).
+    """
+
+
 def _container_name(task_id: str) -> str:
     return f"naiw-task-{task_id}"
 
@@ -63,18 +82,23 @@ def _container_name(task_id: str) -> str:
 def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
     """Create the per-task directory skeleton sized to the task kind.
 
-    Generic tasks get meta/, work/, io/ — controller owns the empty work/.
-    Project tasks get meta/, io/ only — git worktree add creates work/ later
-    (and it requires the path to not already exist).
+    Generic tasks get meta/, work/, io/, storage/ — controller owns the empty
+    work/. Project tasks get meta/, io/, storage/ only — git worktree add
+    creates work/ later (and it requires the path to not already exist).
 
-    Bind-mount source dirs (io/.naiw, generic-task work/) get mode 1777 (sticky
-    + world-writable, same as /tmp). The task image runs as `pi` uid 1000
-    hardcoded; without this the operator's umask 0755 would block pi from
-    writing /io/.naiw/events.jsonl whenever the operator's host uid is not
-    1000 (LDAP boxes, second-user installs, etc.). Sticky bit preserves
-    owner-only delete so pi cannot remove files written by the operator.
-    meta/ stays at default 0755: it is host-only, never bind-mounted into the
-    container, and pi must not touch it.
+    Bind-mount source dirs (io/.naiw, storage/, generic-task work/) get mode
+    1777 (sticky + world-writable, same as /tmp). The task image runs as `pi`
+    uid 1000 hardcoded; without this the operator's umask 0755 would block pi
+    from writing /io/.naiw/events.jsonl or /home/pi files whenever the
+    operator's host uid is not 1000 (LDAP boxes, second-user installs, etc.).
+    Sticky bit preserves owner-only delete so pi cannot remove files written
+    by the operator (e.g. a pre-seeded storage/.gitconfig). meta/ stays at
+    default 0755: it is host-only, never bind-mounted into the container, and
+    pi must not touch it.
+
+    storage/ is the persistent /home/pi bind-mount source — Pi's home survives
+    container teardown so conversation history, .bash_history, and kit caches
+    are still present after the container is replaced (recover boundary).
     """
     task_dir = data_root / "tasks" / task_id
     (task_dir / "meta").mkdir(parents=True, exist_ok=True)
@@ -83,6 +107,18 @@ def _make_skeleton(data_root: Path, task_id: str, kind: TaskKind) -> Path:
     # Apply mode AFTER mkdir — mkdir's mode arg is masked by umask, chmod is not.
     (task_dir / "io").chmod(0o1777)
     io_naiw.chmod(0o1777)
+    storage = task_dir / "storage"
+    storage.mkdir(exist_ok=True)
+    storage.chmod(0o1777)
+    # Pre-create terminal.log mode 0666 so BOTH the in-container pi (uid 1000,
+    # appends via tmux pipe-pane) and the host operator (any uid, appends
+    # the recovery banner) can write. Without this, a host with uid != 1000
+    # cannot append the banner — _append_recovery_banner falls back to a
+    # silent WARN and the operator never sees the banner in the log.
+    terminal_log = task_dir / "io" / "terminal.log"
+    if not terminal_log.exists():
+        terminal_log.touch()
+    terminal_log.chmod(0o666)
     if kind is TaskKind.GENERIC:
         work = task_dir / "work"
         work.mkdir(exist_ok=True)
@@ -186,9 +222,14 @@ def _build_volumes(
     volumes: dict[str, dict[str, str]] = {}
     work_src = validate_bind_source(task_dir / "work", data_root)
     io_src = validate_bind_source(task_dir / "io", data_root)
+    storage_src = validate_bind_source(task_dir / "storage", data_root)
     pi_pkgs_src = validate_bind_source(data_root / "pi-packages", data_root)
     volumes[_to_host(work_src)] = {"bind": "/work", "mode": "rw"}
     volumes[_to_host(io_src)] = {"bind": "/io", "mode": "rw"}
+    # storage/ is the persistent /home/pi bind-mount so Pi's home survives
+    # container teardown (replaces the prior tmpfs /home/pi). The bind-source
+    # escape check above (validate_bind_source) covers this entry too.
+    volumes[_to_host(storage_src)] = {"bind": "/home/pi", "mode": "rw"}
     volumes[_to_host(pi_pkgs_src)] = {"bind": "/pi-packages", "mode": "ro"}
     # Secrets MUST resolve under data_root/secrets/, NOT just under data_root.
     # Without narrowing the prefix, a name like "../config.yaml" passes the
@@ -555,6 +596,325 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({
 })
 
 
+def _resolve_git_dir(work_path: Path) -> Path | None:
+    """Return absolute git-dir or None. In a `git worktree add` checkout
+    `.git` is a file (`gitdir: <real-path>`), not a directory — so a
+    Path(work_path) / ".git" probe misses MERGE_HEAD etc.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(work_path), "rev-parse", "--absolute-git-dir"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    return Path(out) if out else None
+
+
+def _detect_git_state(work_path: Path) -> list[str]:
+    """In-progress git markers. Order is load-bearing — caller uses
+    the FIRST entry as the banner flag.
+    """
+    git_dir = _resolve_git_dir(work_path)
+    if git_dir is None or not git_dir.is_dir():
+        return []
+    found: list[str] = []
+    if (git_dir / "MERGE_HEAD").exists():
+        found.append("MERGE_HEAD (interrupted merge)")
+    if (git_dir / "rebase-merge").is_dir():
+        found.append("rebase-merge (interrupted interactive rebase)")
+    if (git_dir / "rebase-apply").is_dir():
+        found.append("rebase-apply (interrupted rebase --apply)")
+    if (git_dir / "CHERRY_PICK_HEAD").exists():
+        found.append("CHERRY_PICK_HEAD (interrupted cherry-pick)")
+    if (git_dir / "REVERT_HEAD").exists():
+        found.append("REVERT_HEAD (interrupted revert)")
+    return found
+
+
+def _append_recovery_banner(
+    io_dir: Path, recovery_count: int, git_state: list[str],
+) -> None:
+    """Host-side append to terminal.log. O_APPEND only (terminal.log
+    append-only invariant); O_NOFOLLOW refuses a Pi-planted symlink.
+    """
+    logger = logging.getLogger("naiw_tasks")
+    terminal_log = io_dir / "terminal.log"
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+    try:
+        fd = os.open(str(terminal_log), flags, 0o644)
+    except OSError as exc:
+        logger.warning(
+            "recover: cannot open terminal.log for banner write: %s "
+            "(continuing without banner)",
+            exc,
+        )
+        return
+    # "RECOVERY ATTEMPT", not "RECOVERED": banner lands before the new
+    # container starts. On a containers.run failure, status stays
+    # interrupted but the banner is already in terminal.log — past tense
+    # would lie. The new container's tmux output following the banner is
+    # the operator's signal that the attempt succeeded.
+    banner = (
+        f"\n===== RECOVERY ATTEMPT #{recovery_count} "
+        f"AT {Event.now_iso()} =====\n"
+    )
+    if git_state:
+        banner += (
+            f"\n===== GIT STATE: {git_state[0]} "
+            f"(manual resolve required) =====\n"
+        )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(banner.encode("utf-8"))
+    except OSError as exc:
+        logger.warning(
+            "recover: cannot write recovery banner: %s "
+            "(continuing without banner)",
+            exc,
+        )
+
+
+def recover(cfg: Config, client, task_id: str) -> None:
+    """Recover an interrupted task on a fresh container.
+
+    Invariants:
+      - recovery_count bumps ONLY on success (single final mutator).
+      - events_offset and terminal_log_max_size are preserved across the
+        boundary (lazy-event tailer continuity).
+      - terminal.log banner is host-side append (never truncates).
+      - On any failure after the new container started — including a
+        concurrent finish flipping status under flock — the new container
+        is torn down so no zombie survives.
+
+    Raises:
+      RecoverNotInterrupted - task is not (or no longer) 'interrupted'
+      RecoverFailed - post-status-check error (Docker, fs, etc.)
+    """
+    logger = logging.getLogger("naiw_tasks")
+    task_dir = cfg.data_root / "tasks" / task_id
+
+    try:
+        initial = store.read_task(task_dir)
+    except FileNotFoundError as exc:
+        raise RecoverFailed(
+            f"task {task_id!r} not found at {task_dir}"
+        ) from exc
+    if str(initial.get("status")) != str(Status.INTERRUPTED):
+        raise RecoverNotInterrupted(
+            f"task {task_id!r} is in status {initial.get('status')!r}; "
+            f"recover applies only to 'interrupted' tasks"
+        )
+
+    # Capture prev-container state for the recovery_history entry.
+    container_name = initial.get(
+        "container_name", _container_name(task_id)
+    )
+    prev_container_id: str | None = None
+    prev_container_exit_code: int | None = None
+    try:
+        old = client.containers.get(container_name)
+        prev_container_id = old.id
+        try:
+            exit_code = old.attrs.get("State", {}).get("ExitCode")
+            if isinstance(exit_code, int):
+                prev_container_exit_code = exit_code
+        except (KeyError, TypeError):
+            pass
+    except docker.errors.NotFound:
+        old = None
+    except docker.errors.APIError as exc:
+        logger.warning(
+            "recover: cannot inspect old container %s: %s (continuing)",
+            container_name, exc,
+        )
+        old = None
+
+    prev_image_digest = initial.get("image_digest")
+    prev_image_tag = initial.get("image_tag")
+    worktree_path_value = initial.get("worktree_path")
+    work_path = (
+        Path(worktree_path_value) if worktree_path_value else None
+    )
+    git_state = (
+        _detect_git_state(work_path)
+        if work_path and initial.get("kind") == "project"
+        else []
+    )
+
+    # Display-only count; authoritative bump happens in the final mutator.
+    banner_count = int(initial.get("recovery_count", 0)) + 1
+
+    # Legacy compat: pre-Phase-5 tasks may have pi-owned 0644 terminal.log;
+    # widen to 0666 so the host banner append below works on uid != 1000.
+    # O_NOFOLLOW + fchmod (NOT Path.chmod, which follows symlinks; NOT
+    # os.chmod(follow_symlinks=False), which Linux can't do — no lchmod —
+    # and raises NotImplementedError, defeating the widen). io/ is
+    # sticky-1777 so Pi can't swap the file out anyway; this is defense
+    # in depth on the path-resolution side.
+    terminal_log = task_dir / "io" / "terminal.log"
+    try:
+        fd = os.open(str(terminal_log), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        pass  # ENOENT/ELOOP/EACCES → banner write will WARN and degrade.
+    else:
+        try:
+            with suppress(OSError):
+                os.fchmod(fd, 0o666)
+        finally:
+            os.close(fd)
+
+    # Stop+remove old container BEFORE banner so late pipe-pane writes
+    # from the dying container do not land after the seam.
+    if old is not None:
+        with suppress(docker.errors.NotFound, docker.errors.APIError):
+            old.stop(timeout=10)
+        # Log remove() failure explicitly — a survivor will surface as
+        # 409 on containers.run below.
+        try:
+            old.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        except docker.errors.APIError as exc:
+            logger.warning(
+                "recover: old container %s remove failed: %s "
+                "(may surface as 409 on new container start)",
+                container_name, exc,
+            )
+
+    # Banner before start so it lands even if containers.run fails.
+    _append_recovery_banner(
+        task_dir / "io", banner_count, git_state
+    )
+
+    # Legacy task compat: storage/ was added later as the /home/pi bind
+    # source; tasks created before that have no storage/ on disk.
+    storage_dir = task_dir / "storage"
+    if not storage_dir.exists():
+        logger.info(
+            "recover: creating missing storage/ for legacy task %s",
+            task_id,
+        )
+        storage_dir.mkdir()
+        with suppress(OSError):
+            storage_dir.chmod(0o1777)
+
+    labels = _build_labels(task_id, initial.get("project"))
+    secrets_list = list(initial.get("secrets") or [])
+    try:
+        volumes = _build_volumes(
+            cfg.data_root,
+            task_dir,
+            secrets=secrets_list,
+            host_root=cfg.host_root,
+        )
+    except BindMountEscapeError as exc:
+        raise RecoverFailed(
+            f"recover: bind-mount validation failed: {exc}"
+        ) from exc
+
+    try:
+        new_container = client.containers.run(
+            image=cfg.task_image,
+            name=container_name,
+            labels=labels,
+            volumes=volumes,
+            detach=True,
+            **hardened_kwargs(),
+        )
+    except docker.errors.APIError as exc:
+        # 409 Conflict means the previous container survived our best-effort
+        # remove above and is still holding the name. Mirror the operator
+        # hint that start() emits for the same condition so the operator
+        # gets a ready-to-run cleanup command — DOCKER_API_VERSION pinned
+        # (daemon negotiation is blocked by the proxy) and -H pointed at
+        # the proxy URL (a bare `docker rm` would hit the host socket).
+        if getattr(exc, "status_code", None) == 409:
+            raise RecoverFailed(
+                f"recover: container name {container_name!r} already in "
+                f"use by an orphan; clean up with: "
+                f"DOCKER_API_VERSION={PINNED_DOCKER_API_VERSION} "
+                f"docker -H {cfg.docker_proxy_url} rm -f {container_name}"
+            ) from exc
+        raise RecoverFailed(
+            f"recover: docker run failed: {exc}"
+        ) from exc
+
+    # Zombie-prevention: container is live but unrecorded if reload fails.
+    try:
+        new_container.reload()
+        new_image_digest = new_container.attrs.get("Image", "")
+    except docker.errors.APIError as exc:
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.stop(timeout=10)
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.remove(force=True)
+        raise RecoverFailed(
+            f"recover: container.reload() failed: {exc}"
+        ) from exc
+
+    history_ts = Event.now_iso()
+
+    def _to_running(d: dict) -> dict:
+        # Invariant: do NOT mutate events_offset / terminal_log_max_size.
+        # dict(d) copies them; the tailer relies on continuity across the
+        # recover boundary.
+        if str(d.get("status")) != str(Status.INTERRUPTED):
+            raise RecoverNotInterrupted(
+                f"task {task_id!r} status changed to "
+                f"{d.get('status')!r} during recover; aborting"
+            )
+        d = dict(d)
+        new_count = int(d.get("recovery_count", 0)) + 1
+        d["recovery_count"] = new_count
+        d["status"] = str(Status.RUNNING)
+        history = list(d.get("recovery_history") or [])
+        history.append({
+            "ts": history_ts,
+            "recovery_count": new_count,
+            "prev_container_id": prev_container_id,
+            "prev_container_exit_code": prev_container_exit_code,
+            "prev_image_digest": prev_image_digest,
+            "new_image_digest": new_image_digest,
+            "prev_image_tag": prev_image_tag,
+            "new_image_tag": cfg.task_image,
+            "git_state": list(git_state),
+        })
+        d["recovery_history"] = history
+        d["image_digest"] = new_image_digest
+        d["image_tag"] = cfg.task_image
+        d["updated_at"] = Event.now_iso()
+        return d
+
+    def _kill_new_container() -> None:
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.stop(timeout=10)
+        with suppress(docker.errors.APIError, docker.errors.NotFound):
+            new_container.remove(force=True)
+
+    try:
+        final_state = store.update_task(task_dir, _to_running)
+    except RecoverNotInterrupted:
+        _kill_new_container()
+        raise
+    except Exception as exc:
+        _kill_new_container()
+        raise RecoverFailed(
+            f"recover: cannot commit status=running: {exc}"
+        ) from exc
+
+    print(
+        f"naiw-tasks: recovered task {task_id} "
+        f"(recovery #{final_state['recovery_count']})",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def teardown_and_mark(
     cfg: Config,
     client,
@@ -633,6 +993,22 @@ def teardown_and_mark(
                 f"(state={survivor_state!r}) after stop+remove",
             )
             raise SystemExit(1)
+
+        # Capture BEFORE worktree teardown so git diff/status can read work/.
+        # capture_bundle handles its own OSError; the outer catch guards
+        # non-OSError bugs so they cannot abort the terminal-status write
+        # below (SystemExit / KeyboardInterrupt still propagate).
+        worktree_path_value = data.get("worktree_path")
+        capture_work_path = (
+            Path(worktree_path_value) if worktree_path_value else None
+        )
+        try:
+            artifacts_mod.capture_bundle(task_dir, data, capture_work_path)
+        except Exception:
+            logging.getLogger("naiw_tasks").exception(
+                "artifact capture: unexpected error (suppressed to "
+                "preserve terminal-status write)",
+            )
 
         # Worktree teardown — project tasks only. delete_worktree => git
         # worktree remove --force + prune (never raw recursive-delete).

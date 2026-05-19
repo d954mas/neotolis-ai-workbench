@@ -4,6 +4,16 @@ Mocks the docker client and uses mock_subprocess_run from conftest for git;
 the real filesystem under tmp_naiw_data exercises store/ids/path_validation.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import json
 import multiprocessing
 import os
@@ -259,6 +269,64 @@ def test_make_skeleton_project_io_is_sticky_no_work_yet(tmp_naiw_data):
     for path in (td / "io", td / "io" / ".naiw"):
         assert path.stat().st_mode & 0o7777 == 0o1777
     assert not (td / "work").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_skeleton_creates_storage_dir_mode_1777(tmp_naiw_data):
+    """storage/ is the persistent /home/pi bind-mount source — must be created
+    for BOTH project and generic tasks at mode 1777 (sticky-writable) so pi
+    (uid 1000) can write regardless of the operator's host uid."""
+    td_generic = lifecycle._make_skeleton(tmp_naiw_data, "task-001", TaskKind.GENERIC)
+    storage_g = td_generic / "storage"
+    assert storage_g.is_dir()
+    assert (storage_g.stat().st_mode & 0o7777) == 0o1777
+
+    td_project = lifecycle._make_skeleton(tmp_naiw_data, "alpha-001", TaskKind.PROJECT)
+    storage_p = td_project / "storage"
+    assert storage_p.is_dir()
+    assert (storage_p.stat().st_mode & 0o7777) == 0o1777
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file modes are not meaningful on Windows-native Python",
+)
+def test_make_skeleton_precreates_terminal_log_mode_0666(tmp_naiw_data):
+    """terminal.log must be pre-created mode 0666 so both pi (uid 1000,
+    appends via tmux pipe-pane) AND the host operator (any uid, appends
+    the recovery banner host-side) can write. Regression for CI failure
+    where uid != 1000 runner could not append the banner.
+    """
+    td = lifecycle._make_skeleton(tmp_naiw_data, "task-tl-1", TaskKind.GENERIC)
+    tl = td / "io" / "terminal.log"
+    assert tl.is_file(), "terminal.log must be pre-created"
+    mode = tl.stat().st_mode & 0o777
+    assert mode == 0o666, (
+        f"terminal.log mode = {oct(mode)}, expected 0o666"
+    )
+
+
+def test_build_volumes_includes_storage_bind_mount(tmp_naiw_data):
+    """_build_volumes maps tasks/<id>/storage/ -> /home/pi:rw so Pi's home
+    survives container teardown (replaces the previous tmpfs /home/pi)."""
+    td = tmp_naiw_data / "tasks" / "t-002"
+    (td / "work").mkdir(parents=True)
+    (td / "io").mkdir()
+    (td / "storage").mkdir()
+
+    vols = lifecycle._build_volumes(tmp_naiw_data, td, secrets=[])
+    assert any(
+        spec == {"bind": "/home/pi", "mode": "rw"} for spec in vols.values()
+    ), f"no /home/pi bind-mount entry in {vols!r}"
+    # And the source path must resolve under the task dir's storage/
+    src_for_home_pi = next(
+        src for src, spec in vols.items() if spec["bind"] == "/home/pi"
+    )
+    assert "storage" in src_for_home_pi
+    assert "t-002" in src_for_home_pi
 
 
 def test_lifecycle_module_does_not_call_rmdir():
@@ -538,6 +606,7 @@ def test_build_volumes_rejects_secret_traversal_via_narrow_prefix(tmp_naiw_data)
     task_dir = tmp_naiw_data / "tasks" / "task-001"
     (task_dir / "work").mkdir(parents=True)
     (task_dir / "io").mkdir()
+    (task_dir / "storage").mkdir()
     # Create a file under data_root that traversal would point at via
     # secrets/../projects.yaml — older code mounted exactly this.
     (tmp_naiw_data / "projects.yaml").write_text("projects: {}\n", encoding="utf-8")
@@ -560,6 +629,7 @@ def test_build_volumes_accepts_real_secret_under_secrets_dir(tmp_naiw_data):
     task_dir = tmp_naiw_data / "tasks" / "task-001"
     (task_dir / "work").mkdir(parents=True)
     (task_dir / "io").mkdir()
+    (task_dir / "storage").mkdir()
     (tmp_naiw_data / "secrets" / "github_token").write_text(
         "tok", encoding="utf-8"
     )

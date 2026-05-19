@@ -82,6 +82,40 @@ _hardened_cleanup() {
 }
 trap _hardened_cleanup EXIT INT TERM
 
+# ─── Helper: start_smoke_container ──────────────────────────────────────
+# Lifts the main hardened-container run+wait block into a function so the
+# REC-IMG-06 redaction probe can re-run it after a host-side recover
+# (docker rm + re-run with the same flags + same name + same mounts +
+# same labels). Used by the main start AND by the recover-boundary probe.
+start_smoke_container() {
+    docker run -d --init --name "$container" \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        --read-only \
+        --tmpfs /tmp:rw,size=512m,mode=1777 \
+        --tmpfs /run:rw,size=64m,mode=755 \
+        --pids-limit=512 \
+        --memory=4g \
+        --memory-swap=4g \
+        --cpus=2 \
+        --network naiw-task-net \
+        --restart=no \
+        -t \
+        --label naiw.managed=1 \
+        --label naiw.task-id=smoke-test \
+        --label naiw.role=task-container \
+        -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
+        -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
+        -v "$TMP/naiw-data/tasks/smoke-test/storage:/home/pi:rw" \
+        -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
+        -v "$TMP/naiw-data/secrets/test_token:/run/secrets/test_token:ro" \
+        "$image" >/dev/null
+    wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 30 \
+        || fail "container not ready"
+    wait_for_tmux_session "$container" main 10 \
+        || fail "tmux 'main' session not online within 10s"
+}
+
 # ─── Step 01: platform check ───────────────────────────────────────────
 step_check "" "Step 01: platform check (Linux + non-/mnt/c \$HOME)"
 if ! [[ "$(uname -s)" == "Linux" && ! "$HOME" =~ ^/mnt/c ]]; then
@@ -113,6 +147,12 @@ mkdir -p "$TMP/naiw-data/pi-packages/dummy-pkg"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/meta"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/work"
 mkdir -p "$TMP/naiw-data/tasks/smoke-test/io"
+# Pre-create terminal.log mode 0666 so BOTH host (recovery banner append in
+# step 17b) AND in-container pi (uid 1000, pipe-pane append) can write.
+# Without this pre-create, pi creates the file 0644 owner-only and the
+# host (CI runner uid != 1000) gets EACCES on `>> terminal.log`.
+touch "$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
+chmod 0666 "$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
 echo "synthetic" > "$TMP/naiw-data/pi-packages/dummy-pkg/marker"
 printf '%s' "$fake_token" > "$TMP/naiw-data/secrets/test_token"
 chmod 0600 "$TMP/naiw-data/secrets/test_token"
@@ -189,15 +229,21 @@ else
     fi
 fi
 
+# pass2 uses a bind-mount for /home/pi (matching the production shape:
+# tasks/<id>/storage/ → /home/pi:rw). Re-create the source directory each
+# run with sticky-writable mode so pi (uid 1000) can write.
+mkdir -p "$TMP/naiw-data/tasks/smoke-test-pass2/storage"
+chmod 1777 "$TMP/naiw-data/tasks/smoke-test-pass2/storage"
+
 docker run -d --init --name "$pass2_container" \
     --cap-drop=ALL --security-opt=no-new-privileges --read-only \
     --tmpfs /tmp:rw,size=512m,mode=1777 \
     --tmpfs /run:rw,size=64m,mode=755 \
-    --tmpfs /home/pi:rw,size=128m,mode=1777 \
     --pids-limit=512 --memory=4g --memory-swap=4g --cpus=2 \
     --network naiw-task-net --restart=no -t \
     -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
     -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
+    -v "$TMP/naiw-data/tasks/smoke-test-pass2/storage:/home/pi:rw" \
     -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
     "$image" >/dev/null
 
@@ -205,43 +251,21 @@ wait_for_container_ready "$pass2_container" '[ -f /io/.naiw/events.jsonl ]' 30 \
     || fail "pass2 container not ready (pre-pip)"
 
 docker exec -u pi "$pass2_container" sh -c 'pip install --user --quiet pyyaml && python3 -c "import yaml"' \
-    || fail "pass2 pip install --user pyyaml failed even WITH /home/pi tmpfs — HARD-03 broken"
-step_ok "HARD-03" "pass2 pip succeeded with /home/pi tmpfs; yaml importable"
-echo "${_lib_log_prefix} [result] standard hardened run-flags MUST include --tmpfs /home/pi:rw,size=128m,mode=1777: $pip_result_note"
+    || fail "pass2 pip install --user pyyaml failed even WITH /home/pi bind-mount — HARD-03 broken"
+step_ok "HARD-03" "pass2 pip succeeded with /home/pi bind-mount; yaml importable"
+echo "${_lib_log_prefix} [result] standard hardened run-flags use bind-mount /home/pi from tasks/<id>/storage/: $pip_result_note"
 docker rm -f "$pass2_container" >/dev/null
 
 # ─── Main hardened container start ─────────────────────────────────────
 step_check "" "Starting main hardened container"
-docker run -d --init --name "$container" \
-    --cap-drop=ALL \
-    --security-opt=no-new-privileges \
-    --read-only \
-    --tmpfs /tmp:rw,size=512m,mode=1777 \
-    --tmpfs /run:rw,size=64m,mode=755 \
-    --tmpfs /home/pi:rw,size=128m,mode=1777 \
-    --pids-limit=512 \
-    --memory=4g \
-    --memory-swap=4g \
-    --cpus=2 \
-    --network naiw-task-net \
-    --restart=no \
-    -t \
-    --label naiw.managed=1 \
-    --label naiw.task-id=smoke-test \
-    --label naiw.role=task-container \
-    -v "$TMP/naiw-data/tasks/smoke-test/work:/work" \
-    -v "$TMP/naiw-data/tasks/smoke-test/io:/io" \
-    -v "$TMP/naiw-data/pi-packages:/pi-packages:ro" \
-    -v "$TMP/naiw-data/secrets/test_token:/run/secrets/test_token:ro" \
-    "$image" >/dev/null
+# /home/pi is now provided as a per-task bind mount from tasks/<id>/storage/
+# (matches the controller's lifecycle._build_volumes wiring; the bind source
+# survives `docker rm` so Pi's home state persists across recover). Re-create
+# the source dir each run with sticky-writable mode.
+mkdir -p "$TMP/naiw-data/tasks/smoke-test/storage"
+chmod 1777 "$TMP/naiw-data/tasks/smoke-test/storage"
 
-wait_for_container_ready "$container" '[ -f /io/.naiw/events.jsonl ] && [ -f /io/terminal.log ]' 30 \
-    || fail "main container not ready"
-# terminal.log existing doesn't mean tmux is accepting send-keys yet — the
-# server needs to bind /tmp/tmux-1000/default. Wait for it explicitly to
-# avoid a 'no such file or directory' race in later send-keys probes.
-wait_for_tmux_session "$container" main 10 \
-    || fail "tmux 'main' session not online within 10s of container start"
+start_smoke_container
 log_path="$TMP/naiw-data/tasks/smoke-test/io/terminal.log"
 events_path="$TMP/naiw-data/tasks/smoke-test/io/.naiw/events.jsonl"
 step_ok "" "Main hardened container ready"
@@ -428,6 +452,79 @@ if (( size_after < size_before )); then
 fi
 step_ok "HARD-restart" "terminal.log appended through stop+start (before=$size_before after=$size_after)"
 
+# ─── Step 17b: REC-IMG-06 redaction filter across recover boundary ─────
+# Simulates a host-side recover (docker rm + re-run with the same name,
+# mounts, and labels) and asserts the pipe-pane redaction filter still
+# catches a Pi-shaped token in the NEW container — the filter is re-issued
+# by the entrypoint on every container start.
+step_check "REC-IMG-06" "Step 17b: IMG-06 redaction filter active across recover boundary"
+
+# Capture pre-recover size to assert monotonic growth across the boundary.
+pre_size_rec=$(stat -c%s "${log_path}")
+
+# Simulate operator interrupt: stop the container.
+docker stop --time 10 "$container" >/dev/null
+
+# Host-side recovery banner write (matches lifecycle._append_recovery_banner).
+{
+    printf '\n===== RECOVERY ATTEMPT #1 AT %sZ =====\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%S.000')"
+} >> "${log_path}"
+
+# docker rm + re-run with the same flags via the extracted helper.
+docker rm -f "$container" >/dev/null
+
+start_smoke_container
+
+# wait_for_tmux_session inside start_smoke_container confirms tmux is
+# reachable, but pipe-pane setup happens later in the entrypoint —
+# race window where send-keys would write raw before the sed filter is
+# wired. Send a benign probe first, wait for it to land in terminal.log,
+# proving pipe-pane is intercepting writes.
+docker exec "$container" tmux send-keys -t main \
+    "printf 'PIPE_PANE_PROBE_REC\n'" Enter
+if ! wait_for_log_marker "${log_path}" 'PIPE_PANE_PROBE_REC' 5; then
+    step_fail "REC-IMG-06" "pipe-pane filter never came online post-recover"
+    fail "REC-IMG-06 pipe-pane not ready"
+fi
+
+# Send the token, then a sentinel that follows it through pipe-pane. When
+# the sentinel lands in terminal.log, pipe-pane has definitely flushed
+# the token line through sed. Avoids confusing stale [REDACTED] matches
+# from Step 16, and avoids racing pipe-pane buffering.
+docker exec "$container" tmux send-keys -t main \
+    "printf 'ghp_TESTTOKEN1234567890abcdefghij0123456789\n'" Enter
+docker exec "$container" tmux send-keys -t main \
+    "printf 'POST_TOKEN_SENTINEL_REC\n'" Enter
+
+if ! wait_for_log_marker "${log_path}" 'POST_TOKEN_SENTINEL_REC' 5; then
+    echo "--- terminal.log tail (debug, no-sentinel branch) ---" >&2
+    tail -n 60 "${log_path}" >&2 || true
+    echo "--- end tail ---" >&2
+    step_fail "REC-IMG-06" "post-token sentinel never reached terminal.log (pipe-pane stuck?)"
+    fail "REC-IMG-06 pipe-pane post-token flush missing"
+fi
+if grep -q 'ghp_TESTTOKEN' "${log_path}"; then
+    echo "--- terminal.log tail (debug, raw-leak branch) ---" >&2
+    tail -n 60 "${log_path}" >&2 || true
+    echo "--- end tail ---" >&2
+    echo "--- grep matches ---" >&2
+    grep -n 'ghp_TESTTOKEN\|\[REDACTED\]\|POST_TOKEN' "${log_path}" >&2 || true
+    echo "--- end grep ---" >&2
+    step_fail "REC-IMG-06" "raw token ghp_TESTTOKEN leaked into terminal.log post-recover"
+    fail "REC-IMG-06 raw token leaked"
+fi
+if ! grep -q 'RECOVERY ATTEMPT #1' "${log_path}"; then
+    step_fail "REC-IMG-06" "recovery banner missing from terminal.log"
+    fail "REC-IMG-06 banner missing"
+fi
+post_size_rec=$(stat -c%s "${log_path}")
+if (( post_size_rec < pre_size_rec )); then
+    step_fail "REC-IMG-06" "terminal.log shrunk across recover (${pre_size_rec} -> ${post_size_rec})"
+    fail "REC-IMG-06 terminal.log shrunk"
+fi
+step_ok "REC-IMG-06" "redaction filter green post-recover; banner present; terminal.log grew ${pre_size_rec} -> ${post_size_rec}"
+
 # ─── Step 18: signal cycle — naiw-signal done → events.jsonl ───────────
 step_check "SIG-cycle" "Step 18: naiw-signal done appends valid event to events.jsonl"
 docker exec -u pi "$container" naiw-signal done --summary "hardened-smoke ok" \
@@ -505,15 +602,30 @@ if [[ "$mem_peak" =~ ^[0-9]+$ ]] && (( mem_peak > 2576980378 )); then
 fi
 step_ok "cgroup-peak" "peak evidence recorded (pids=$pids_peak mem=$mem_peak)"
 
-# ─── Step 44: drift gate (checklist ↔ script ID set must align) ────────
+# ─── Step 44: STORAGE-BIND — /home/pi sourced from tasks/<id>/storage/ ─
+# Confirms the bind-mount for /home/pi is actually in container mountinfo
+# (line containing ' /home/pi '). The bind source survives `docker rm`,
+# which is what makes recover able to resume Pi's home state.
+step_check "STORAGE-BIND" "Step 44: tasks/<id>/storage/ bind-mounted at /home/pi"
+if docker exec "$container" cat /proc/self/mountinfo | grep -qE ' /home/pi '; then
+    step_ok "STORAGE-BIND" "/home/pi appears in container mountinfo"
+else
+    step_fail "STORAGE-BIND" "/home/pi NOT in container mountinfo (expected bind-mount from tasks/smoke-test/storage)"
+    fail "STORAGE-BIND missing from mountinfo"
+fi
+
+# ─── Step 45: drift gate (checklist ↔ script ID set must align) ────────
 # Only count IDs that are actually claimed (checklist table rows) or actually
 # probed (step_check "ID" in script). Narrative mentions in headers/comments
 # don't count — that's what makes this an honest coverage check.
-step_check "" "Step 44: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
-checklist_ids="$(grep -oE '^\|[[:space:]]+(HARD-[0-9]+|PROXY-[0-9]+)' tests/smoke/HARDENED-CHECKLIST.md \
-    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
-script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+)"' tests/smoke/run-hardened-smoke.sh \
-    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+' | sort -u)"
+step_check "" "Step 45: drift gate (HARDENED-CHECKLIST.md vs run-hardened-smoke.sh ID alignment)"
+# Extract IDs from any cell in a markdown table row (leading-pipe line) so
+# IDs in either the first column (HARD-XX/PROXY-XX requirements table) or
+# the last column (REC-IMG-06/STORAGE-BIND lifecycle table) both surface.
+checklist_ids="$(grep -E '^\|' tests/smoke/HARDENED-CHECKLIST.md \
+    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND' | sort -u)"
+script_ids="$(grep -oE 'step_check[[:space:]]+"(HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND)"' tests/smoke/run-hardened-smoke.sh \
+    | grep -oE 'HARD-[0-9]+|PROXY-[0-9]+|REC-IMG-06|STORAGE-BIND' | sort -u)"
 set +e
 drift="$(diff <(echo "$checklist_ids") <(echo "$script_ids"))"
 set -e
@@ -522,6 +634,6 @@ if [[ -n "$drift" ]]; then
     echo "$drift" >&2
     fail "drift gate"
 fi
-step_ok "" "Step 44: drift gate ok — IDs aligned"
+step_ok "" "Step 45: drift gate ok — IDs aligned"
 
 # Final PASS line is printed by the cleanup trap's success branch on exit 0.

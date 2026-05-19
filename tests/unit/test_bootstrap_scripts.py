@@ -154,6 +154,37 @@ def test_new_task_creates_skeleton(tmp_path):
         assert (task_dir / sub).is_dir(), f"missing {sub}"
 
 
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="NTFS does not enforce POSIX modes; chmod 1777 is advisory only",
+)
+def test_new_task_chmods_all_bind_sources_1777(tmp_path):
+    """Every bind-mount source (work/, io/, io/.naiw/, storage/) must be
+    1777 so pi uid 1000 inside the container can write regardless of the
+    operator's host uid. work/ was previously omitted, blocking Pi from
+    writing /work on uid-mismatched hosts for generic tasks.
+    """
+    data_root = _initialised_root(tmp_path)
+    r = _run(NEW_TASK_SCRIPT, "alpha-002", data_root=data_root)
+    assert r.returncode == 0, r.stderr
+    td = data_root / "tasks" / "alpha-002"
+    for sub in ("work", "io", "io/.naiw", "storage"):
+        mode = (td / sub).stat().st_mode & 0o7777
+        assert mode == 0o1777, (
+            f"{sub} mode = {oct(mode)}, expected 0o1777"
+        )
+    # meta/ stays at default (host-only, never bind-mounted into container).
+    meta_mode = (td / "meta").stat().st_mode & 0o7777
+    assert meta_mode != 0o1777, "meta/ must NOT be world-writable"
+    # terminal.log pre-created 0666 so host + container-pi can both append.
+    tl = td / "io" / "terminal.log"
+    assert tl.is_file(), "terminal.log must be pre-created"
+    tl_mode = tl.stat().st_mode & 0o7777
+    assert tl_mode == 0o666, (
+        f"terminal.log mode = {oct(tl_mode)}, expected 0o666"
+    )
+
+
 @pytest.mark.parametrize(
     "bad_id",
     [

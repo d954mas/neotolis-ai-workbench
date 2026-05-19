@@ -1,6 +1,7 @@
 """Controller configuration: defaults + NAIW_DATA env override + config.yaml loader."""
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,10 +11,13 @@ SCHEMA_VERSION: int = 1
 DEFAULT_DOCKER_PROXY_URL: str = "tcp://naiw-docker-proxy:2375"
 # Mutable :latest tag. Operator may pin to @sha256:<digest> via config.yaml.
 DEFAULT_TASK_IMAGE: str = "ghcr.io/d954mas/naiw-task-image:latest"
+# Default 50 GiB in bytes; matches user-facing 50GiB string in config.yaml.
+# This is the per-NAIW-data namespace cap, NOT the host disk size.
+DEFAULT_MAX_DATA_SIZE_BYTES: int = 50 * 1024 * 1024 * 1024  # 53_687_091_200
 
 # Whitelist drives the typo-rejection error message — keep keys in sync with Config fields.
 ALLOWED_CONFIG_KEYS: frozenset[str] = frozenset(
-    {"schema_version", "docker_proxy_url", "task_image"}
+    {"schema_version", "docker_proxy_url", "task_image", "max_data_size"}
 )
 
 
@@ -27,6 +31,10 @@ class Config:
     # inside a container. None on direct host invocation (tests, ad-hoc CLI use)
     # — host_root then falls back to data_root.
     data_root_host: Path | None = None
+    # Per-namespace cap on ~/naiw-data/ size in bytes. `disk` warns at >80%
+    # and `start` refuses at >95%. Defaults to 50 GiB; operator overrides via
+    # config.yaml `max_data_size: 100GiB` (IEC binary units only).
+    max_data_size: int = DEFAULT_MAX_DATA_SIZE_BYTES
 
     @property
     def host_root(self) -> Path:
@@ -66,6 +74,65 @@ def _resolve_docker_proxy_url(raw: dict) -> str:
     return raw.get("docker_proxy_url", DEFAULT_DOCKER_PROXY_URL)
 
 
+_IEC_UNIT_BYTES: dict[str, int] = {
+    "KiB": 1024,
+    "MiB": 1024 * 1024,
+    "GiB": 1024 * 1024 * 1024,
+    "TiB": 1024 * 1024 * 1024 * 1024,
+}
+_IEC_PATTERN = re.compile(r"^(\d+)(KiB|MiB|GiB|TiB)$")
+_DECIMAL_TYPO_PATTERN = re.compile(r"^\d+(KB|MB|GB|TB)$")
+_FRACTIONAL_TYPO_PATTERN = re.compile(r"^\d+\.\d+(KiB|MiB|GiB|TiB)$")
+
+
+def _parse_max_data_size(raw: str) -> int:
+    """Parse <int><unit> where unit is one of KiB/MiB/GiB/TiB.
+
+    Returns the size in bytes. Integer-only — `1.5GiB` is rejected (use
+    `1536MiB` or `1500MiB` to get an exact byte count). IEC binary units
+    only — the SI-style suffixes KB/MB/GB/TB are rejected with a clear
+    hint pointing at the binary form, because mixing the two in a
+    per-namespace cap silently shifts the threshold by ~7% per
+    power-of-1024 step (1 GB = 1e9, 1 GiB = 2^30) and that drift is
+    exactly the operator surprise we want to avoid.
+    """
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"max_data_size must be a string like '50GiB', got "
+            f"{type(raw).__name__}: {raw!r}"
+        )
+    value = raw.strip()
+    m = _IEC_PATTERN.match(value)
+    if m:
+        n, unit = m.group(1), m.group(2)
+        result = int(n) * _IEC_UNIT_BYTES[unit]
+        # 0 disables both the >80% warning AND the >95% start-refusal gate
+        # — silently letting a typo nuke the cap is exactly the operator
+        # surprise we want to avoid. Operator who actually wants no cap
+        # should set a deliberately huge value (e.g. 1024TiB).
+        if result <= 0:
+            raise ValueError(
+                f"max_data_size={value!r}: must be > 0; setting 0 "
+                f"silently disables the disk-threshold gate"
+            )
+        return result
+    if _DECIMAL_TYPO_PATTERN.match(value):
+        raise ValueError(
+            f"max_data_size={value!r}: use IEC binary units "
+            f"(KiB/MiB/GiB/TiB), not decimal units (KB/MB/GB/TB)"
+        )
+    if _FRACTIONAL_TYPO_PATTERN.match(value):
+        # Distinct branch so '1.5GiB' is not misread as a wrong-unit error.
+        raise ValueError(
+            f"max_data_size={value!r}: integer-only (use a smaller unit "
+            f"for fractional values, e.g. '1536MiB' instead of '1.5GiB')"
+        )
+    raise ValueError(
+        f"max_data_size={value!r}: expected <integer><unit> where "
+        f"unit is one of KiB/MiB/GiB/TiB (e.g. '50GiB')"
+    )
+
+
 def load() -> Config:
     """Load controller config. Returns defaults when config.yaml is absent.
 
@@ -82,6 +149,7 @@ def load() -> Config:
             data_root=data_root,
             docker_proxy_url=_resolve_docker_proxy_url({}),
             data_root_host=data_root_host,
+            max_data_size=DEFAULT_MAX_DATA_SIZE_BYTES,
         )
 
     try:
@@ -129,9 +197,14 @@ def load() -> Config:
             f"got {type(task_image).__name__}: {task_image!r}"
         )
 
+    max_data_size = DEFAULT_MAX_DATA_SIZE_BYTES
+    if "max_data_size" in raw:
+        max_data_size = _parse_max_data_size(raw["max_data_size"])
+
     return Config(
         data_root=data_root,
         docker_proxy_url=docker_proxy_url,
         task_image=task_image,
         data_root_host=data_root_host,
+        max_data_size=max_data_size,
     )

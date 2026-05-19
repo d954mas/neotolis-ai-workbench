@@ -1,5 +1,15 @@
 """Tests for naiw_tasks.ids — task-id format + per-project monotonic counter."""
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import multiprocessing
 from pathlib import Path
 

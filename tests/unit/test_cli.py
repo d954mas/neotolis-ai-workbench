@@ -5,6 +5,16 @@ Patches `naiw_tasks.cli.config.load`, `naiw_tasks.cli.make_client`,
 so the CliRunner exercises wiring only — no real filesystem, no real Docker.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,7 +34,9 @@ def patched_env(monkeypatch, tmp_path):
     cfg = Config(data_root=tmp_path / "naiw-data")
     monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
     monkeypatch.setattr(cli_mod, "make_client", lambda url: MagicMock())
-    monkeypatch.setattr(cli_mod.startup_checks, "run_all", lambda c, k: None)
+    monkeypatch.setattr(
+        cli_mod.startup_checks, "run_all", lambda c, k, **kw: None
+    )
     return cfg
 
 
@@ -44,7 +56,7 @@ def test_cli_top_level_help_lists_subcommands():
 def test_cli_runs_startup_checks_before_subcommand(monkeypatch, tmp_path):
     calls: list[str] = []
 
-    def fake_run_all(cfg, client):
+    def fake_run_all(cfg, client, **kwargs):
         calls.append("startup_checks")
 
     def fake_start(*a, **kw):
@@ -67,7 +79,7 @@ def test_cli_propagates_startup_check_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_mod.config, "load", lambda: cfg)
     monkeypatch.setattr(cli_mod, "make_client", lambda url: MagicMock())
 
-    def boom(cfg, client):
+    def boom(cfg, client, **kwargs):
         raise StartupCheckFailed("nope")
 
     monkeypatch.setattr(cli_mod.startup_checks, "run_all", boom)
@@ -86,7 +98,7 @@ def test_doctor_runs_startup_checks(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli_mod.startup_checks,
         "run_all",
-        lambda cfg, client: calls.append("startup_checks"),
+        lambda cfg, client, **kw: calls.append("startup_checks"),
     )
 
     runner = CliRunner()
@@ -640,6 +652,49 @@ def test_cli_output_lines_zero_returns_exit_2(patched_env, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(cli, ["output", "task-001", "--lines", "0"])
     assert result.exit_code == 2
+
+
+# ---------- clean: graceful-degrade scope -----------------------------------
+
+
+def test_clean_degrades_on_docker_check_failed(monkeypatch, patched_env):
+    """clean must continue with client=None when Docker is unreachable."""
+    captured: dict = {}
+
+    def raising_run_all(cfg, client, **kwargs):
+        raise cli_mod.startup_checks.DockerCheckFailed("daemon unreachable")
+
+    def fake_clean_run(cfg, client, **kwargs):
+        captured["client"] = client
+        return 0
+
+    monkeypatch.setattr(cli_mod.startup_checks, "run_all", raising_run_all)
+    monkeypatch.setattr(cli_mod.clean_mod, "run", fake_clean_run)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["clean", "--older-than", "30d", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert captured["client"] is None, (
+        "DockerCheckFailed must degrade to client=None"
+    )
+
+
+def test_clean_propagates_non_docker_startup_failure(monkeypatch, patched_env):
+    """Local-safety checks (symlinked data root, Windows-FS gating) raise
+    StartupCheckFailed but NOT DockerCheckFailed. clean must propagate
+    these — they signal an unsafe config and disk-only mode would not
+    make the underlying issue safe.
+    """
+    fake_clean_run = MagicMock(return_value=0)
+
+    def raising_run_all(cfg, client, **kwargs):
+        raise StartupCheckFailed("~/naiw-data/ must not be a symlink")
+
+    monkeypatch.setattr(cli_mod.startup_checks, "run_all", raising_run_all)
+    monkeypatch.setattr(cli_mod.clean_mod, "run", fake_clean_run)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["clean", "--older-than", "30d", "--yes"])
+    assert result.exit_code == 2, result.output
+    fake_clean_run.assert_not_called()
 
 
 # ---------- source-policy guard ---------------------------------------------

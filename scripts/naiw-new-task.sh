@@ -6,7 +6,7 @@ set -euo pipefail
 if [[ "${1:-}" == "--help" || $# -eq 0 ]]; then
     cat <<'EOF'
 Usage: bash scripts/naiw-new-task.sh <task-id>
-  Creates ~/naiw-data/tasks/<task-id>/{meta,work,io,io/.naiw}/.
+  Creates ~/naiw-data/tasks/<task-id>/{meta,work,io,io/.naiw,storage}/.
   <task-id> must match ^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$ (DNS-label style;
   alphanumeric first AND last character, lowercase, 1-64 chars).
   Refuses to overwrite an existing task directory.
@@ -44,6 +44,21 @@ mkdir -p \
     "$target/meta" \
     "$target/work" \
     "$target/io" \
-    "$target/io/.naiw"
+    "$target/io/.naiw" \
+    "$target/storage"
 
-echo "naiw-new-task: created $target/{meta,work,io,io/.naiw}"
+# Sticky-writable on every bind-mount source so pi uid 1000 inside the
+# container can write regardless of the operator's host uid. work/ is the
+# /work bind-mount source for generic tasks (project tasks have it
+# managed by `git worktree add` + a separate widen step in the
+# controller, so the shell helper covers the generic case here).
+chmod 1777 "$target/storage" "$target/io" "$target/io/.naiw" "$target/work"
+
+# Pre-create terminal.log mode 0666 so both pi (uid 1000, appends via
+# tmux pipe-pane) and the host (any uid, appends recovery banner) can
+# write. Without this, host append fails with EACCES when operator uid
+# differs from pi uid.
+touch "$target/io/terminal.log"
+chmod 0666 "$target/io/terminal.log"
+
+echo "naiw-new-task: created $target/{meta,work,io,io/.naiw,storage}"

@@ -13,7 +13,9 @@ from pathlib import Path
 
 import docker
 
+from naiw_tasks import disk as disk_mod
 from naiw_tasks.docker_client import PINNED_DOCKER_API_VERSION
+from naiw_tasks.format import humanize_iec_bytes
 
 _IMAGE_PI_UID: int = 1000
 _WINDOWS_FS_ON_LINUX_RE: re.Pattern[str] = re.compile(r"^/mnt/[A-Za-z]/")
@@ -27,6 +29,15 @@ class StartupCheckFailed(SystemExit):
     def __init__(self, message: str) -> None:
         print(f"naiw-tasks: {message}", file=sys.stderr, flush=True)
         super().__init__(2)
+
+
+class DockerCheckFailed(StartupCheckFailed):
+    """Docker daemon/proxy unreachable or proxy allowlist drift.
+
+    Distinct subclass so commands that can run disk-only (clean) can
+    catch ONLY Docker reachability failures, not local safety checks
+    (symlink-of-data-root, Windows-FS-on-Linux gating).
+    """
 
 
 def check_naiw_data_not_symlink(data_root: Path) -> None:
@@ -83,7 +94,7 @@ def check_docker_reachable(
             last_exc = exc
             if attempt + 1 < attempts:
                 time.sleep(delay_s)
-    raise StartupCheckFailed(
+    raise DockerCheckFailed(
         f"cannot reach Docker via proxy at {proxy_url}; "
         f"is deploy/docker-compose.yml up? ({last_exc})"
     ) from last_exc
@@ -102,18 +113,18 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
         except urllib.error.HTTPError as exc:
             if exc.code == expected:
                 return
-            raise StartupCheckFailed(
+            raise DockerCheckFailed(
                 f"proxy allowlist drift - {label} returned {exc.code}; "
                 f"expected {expected} ({why}); cf. deploy/docker-compose.yml"
             ) from exc
         except urllib.error.URLError as exc:
-            raise StartupCheckFailed(
+            raise DockerCheckFailed(
                 f"proxy allowlist drift - {label} failed to reach the proxy "
                 f"at {proxy_url} ({exc}); expected {expected} ({why}); "
                 f"cf. deploy/docker-compose.yml"
             ) from exc
         else:
-            raise StartupCheckFailed(
+            raise DockerCheckFailed(
                 f"proxy allowlist drift - {label} returned 2xx; expected "
                 f"{expected} ({why}); cf. deploy/docker-compose.yml"
             )
@@ -136,6 +147,29 @@ def check_proxy_allowlist_drift(proxy_url: str) -> None:
         )
 
 
+def check_disk_threshold(cfg, verb: str = "start") -> None:
+    """Refuse start/recover when ~/naiw-data/ is at >95% of max_data_size.
+
+    Other commands (attach, finish, list, output, clean, disk) are NOT gated
+    - they may free disk; gating them would lock the operator out of recovery.
+
+    `verb` is "start" or "recover" - both paths emit the SAME body but the
+    lead clause adapts so the operator sees the right verb.
+    """
+    used, max_bytes, pct = disk_mod.threshold(cfg)
+    if pct > 95.0:
+        used_human = humanize_iec_bytes(used)
+        max_human = humanize_iec_bytes(max_bytes)
+        raise StartupCheckFailed(
+            f"cannot {verb} — ~/naiw-data/ is at "
+            f"{pct:.1f}% of max_data_size "
+            f"({used_human} / {max_human}).\n"
+            f"  Reclaim space first: naiw-tasks clean --older-than 30d\n"
+            f"  Or raise the limit in ~/naiw-data/config.yaml: "
+            f"max_data_size: 100GiB"
+        )
+
+
 def warn_uid_mismatch_with_image() -> None:
     getuid = getattr(os, "getuid", None)
     if getuid is None:
@@ -154,10 +188,17 @@ def warn_uid_mismatch_with_image() -> None:
         )
 
 
-def run_all(cfg, client) -> None:
+def run_all(
+    cfg,
+    client,
+    gate_disk_threshold: bool = False,
+    disk_threshold_verb: str = "start",
+) -> None:
     data_root = Path(cfg.data_root)
     check_naiw_data_not_symlink(data_root)
     check_not_on_windows_fs_on_linux(data_root)
     check_docker_reachable(client, cfg.docker_proxy_url)
     check_proxy_allowlist_drift(cfg.docker_proxy_url)
     warn_uid_mismatch_with_image()
+    if gate_disk_threshold:
+        check_disk_threshold(cfg, verb=disk_threshold_verb)
