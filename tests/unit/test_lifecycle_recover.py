@@ -373,6 +373,46 @@ def test_recover_creates_missing_storage_for_legacy_task(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_recover_409_conflict_surfaces_cleanup_hint(tmp_path, capsys):
+    """When containers.run fails with 409 (old orphan still holds the
+    name), the operator gets a runnable cleanup command — same shape as
+    start() emits for the same condition, with DOCKER_API_VERSION pinned
+    and -H pointed at the proxy URL.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    client = MagicMock()
+    # No old container visible (NotFound) so we exercise the 409 path
+    # directly on containers.run, not on the prior remove() call.
+    client.containers.get.side_effect = docker.errors.NotFound("absent")
+    # APIError.status_code is a property that reads response.status_code,
+    # so attach a mock response carrying the right code.
+    resp = MagicMock()
+    resp.status_code = 409
+    resp.url = "http://proxy/containers/create"
+    resp.reason = "Conflict"
+    err = docker.errors.APIError(
+        "Conflict. The container name '/naiw-task-t-001' is already in use",
+        response=resp,
+    )
+    client.containers.run.side_effect = err
+    with pytest.raises(lifecycle.RecoverFailed) as exc:
+        lifecycle.recover(cfg, client, "t-001")
+    msg = str(exc.value)
+    assert "naiw-task-t-001" in msg, f"hint must name the container: {msg!r}"
+    assert "already in use by an orphan" in msg, (
+        f"hint must explain the cause: {msg!r}"
+    )
+    assert "DOCKER_API_VERSION=" in msg, (
+        f"hint must pin the api version: {msg!r}"
+    )
+    assert "docker -H " in msg, (
+        f"hint must route via the proxy: {msg!r}"
+    )
+    assert "rm -f naiw-task-t-001" in msg, (
+        f"hint must be a runnable cleanup command: {msg!r}"
+    )
+
+
 def test_recover_failure_at_docker_run_does_not_bump_recovery_count(tmp_path):
     cfg, td = _seed_interrupted_task(tmp_path)
     client = MagicMock()

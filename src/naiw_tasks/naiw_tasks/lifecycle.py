@@ -780,8 +780,20 @@ def recover(cfg: Config, client, task_id: str) -> None:
     if old is not None:
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.stop(timeout=10)
-        with suppress(docker.errors.NotFound, docker.errors.APIError):
+        # Log remove() failure explicitly (not just suppress) — if the old
+        # container survives this call, containers.run() below will fail
+        # with 409 Conflict on the reused name and we want a breadcrumb in
+        # the controller log explaining why.
+        try:
             old.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        except docker.errors.APIError as exc:
+            logger.warning(
+                "recover: old container %s remove failed: %s "
+                "(may surface as 409 on new container start)",
+                container_name, exc,
+            )
 
     # Legacy task compat: storage/ was added later as the /home/pi bind
     # source; tasks created before that have no storage/ on disk.
@@ -819,6 +831,19 @@ def recover(cfg: Config, client, task_id: str) -> None:
             **hardened_kwargs(),
         )
     except docker.errors.APIError as exc:
+        # 409 Conflict means the previous container survived our best-effort
+        # remove above and is still holding the name. Mirror the operator
+        # hint that start() emits for the same condition so the operator
+        # gets a ready-to-run cleanup command — DOCKER_API_VERSION pinned
+        # (daemon negotiation is blocked by the proxy) and -H pointed at
+        # the proxy URL (a bare `docker rm` would hit the host socket).
+        if getattr(exc, "status_code", None) == 409:
+            raise RecoverFailed(
+                f"recover: container name {container_name!r} already in "
+                f"use by an orphan; clean up with: "
+                f"DOCKER_API_VERSION={PINNED_DOCKER_API_VERSION} "
+                f"docker -H {cfg.docker_proxy_url} rm -f {container_name}"
+            ) from exc
         raise RecoverFailed(
             f"recover: docker run failed: {exc}"
         ) from exc
