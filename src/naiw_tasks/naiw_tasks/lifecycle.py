@@ -870,6 +870,14 @@ def recover(cfg: Config, client, task_id: str) -> None:
     history_ts = Event.now_iso()
 
     def _to_running(d: dict) -> dict:
+        # Load-bearing: do NOT touch events_offset / terminal_log_max_size.
+        # The lazy-event tailer reads from those positions to keep continuity
+        # across the recover boundary (events emitted before the
+        # interruption stay tailed-once, terminal.log monotonic growth keeps
+        # its high-water mark). dict(d) below copies them through verbatim;
+        # if a future change adds an explicit mutation in this mutator,
+        # the recover-time event-stream regression test will catch it but
+        # the invariant lives here.
         if str(d.get("status")) != str(Status.INTERRUPTED):
             raise RecoverNotInterrupted(
                 f"task {task_id!r} status changed to "

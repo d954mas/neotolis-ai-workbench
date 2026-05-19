@@ -327,6 +327,30 @@ def test_recover_does_not_truncate_terminal_log(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_recover_preserves_tailer_continuity_fields(tmp_path):
+    """events_offset and terminal_log_max_size MUST round-trip through
+    recover unchanged so the lazy-event tailer keeps its position across
+    the boundary. If they reset, the tailer either re-emits already-seen
+    events or marks fresh events as already-tailed — both regressions.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    meta = td / "meta" / "task.json"
+    data = json.loads(meta.read_text())
+    data["events_offset"] = 4242
+    data["terminal_log_max_size"] = 999_999
+    meta.write_text(json.dumps(data))
+    client, _ = _fake_client()
+    lifecycle.recover(cfg, client, "t-001")
+    final = json.loads(meta.read_text())
+    assert final["events_offset"] == 4242, (
+        f"events_offset must survive recover; got {final['events_offset']!r}"
+    )
+    assert final["terminal_log_max_size"] == 999_999, (
+        f"terminal_log_max_size must survive recover; "
+        f"got {final['terminal_log_max_size']!r}"
+    )
+
+
 def test_recover_legacy_widen_refuses_to_follow_symlink(tmp_path):
     """If terminal.log is a symlink pointing outside io/ (e.g. a hostile Pi
     swapped it), the legacy-compat mode-widen MUST NOT follow into the
