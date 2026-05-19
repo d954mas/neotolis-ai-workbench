@@ -184,6 +184,21 @@ def capture_bundle(
             check=False,
         )
 
+    def _run_git_bytes(*args: str) -> "subprocess.CompletedProcess[bytes]":
+        """Like _run_git but keeps stdout as raw bytes.
+
+        `git diff --binary` may emit non-UTF-8 bytes inside the binary-patch
+        section (literal/delta blobs). Decoding with errors='replace' corrupts
+        them to U+FFFD and the resulting diff.patch no longer applies via
+        `git apply --binary`. Use this for any captured output that must
+        round-trip unchanged.
+        """
+        return subprocess.run(
+            ["git", "-C", str(work_path), *args],
+            capture_output=True,
+            check=False,
+        )
+
     base = task_data.get("base_commit")
 
     try:
@@ -234,14 +249,13 @@ def capture_bundle(
         )
 
     try:
-        r = _run_git("diff", "--binary", base)
-        (artifacts / "diff.patch").write_text(
-            r.stdout, encoding="utf-8"
-        )
-        if r.returncode != 0:
+        rb = _run_git_bytes("diff", "--binary", base)
+        (artifacts / "diff.patch").write_bytes(rb.stdout)
+        if rb.returncode != 0:
             logger.warning(
                 "artifact capture: git diff non-zero (%d): %s",
-                r.returncode, r.stderr.strip(),
+                rb.returncode,
+                rb.stderr.decode("utf-8", errors="replace").strip(),
             )
     except OSError as exc:
         logger.warning("artifact capture: diff.patch write: %s", exc)
