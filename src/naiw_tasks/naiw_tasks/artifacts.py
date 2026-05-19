@@ -1,10 +1,11 @@
 """Artifact-bundle helpers for finish/recover.
 
-Lives outside lifecycle.py because the recursive overwrite of
-meta/artifacts/output/ on capture-retry needs shutil.rmtree — a primitive
-that lifecycle.py is deliberately forbidden from using
+The whole capture flow lives here (not just the hard-link mirror): lifecycle.py
+is deliberately forbidden from calling shutil.rmtree
 (test_lifecycle_module_does_not_call_rmdir / test_finish_never_uses_rm_rf
-guard against accidental raw recursive-delete of git worktrees).
+guard against accidental raw recursive-delete of git worktrees), and the
+rmtree-on-retry of meta/artifacts/output/ keeps that primitive contained to
+this module.
 """
 
 import errno
@@ -12,6 +13,7 @@ import logging
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 
@@ -95,3 +97,151 @@ def replicate_output_tree(src_root: Path, dst_root: Path) -> None:
                     "for %s: %s",
                     src, exc,
                 )
+
+
+def copy_io_file(src: Path, dst: Path) -> None:
+    """Copy a single io/ regular file to dst with O_NOFOLLOW defense.
+
+    Used for terminal.log and summary.md captures where hard-link is not
+    desired — terminal.log is treated as append-only by pipe-pane even
+    after teardown by image conventions, and a copy decouples the artifact
+    from any post-finish Pi behaviour.
+    """
+    logger = logging.getLogger("naiw_tasks")
+    try:
+        st = src.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        logger.warning(
+            "artifact capture: %s not a regular file "
+            "(mode=%o); skipping",
+            src, st.st_mode,
+        )
+        return
+    try:
+        fd = os.open(str(src), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: cannot open %s: %s; skipping",
+            src, exc,
+        )
+        return
+    try:
+        with os.fdopen(fd, "rb") as fsrc:
+            dst.write_bytes(fsrc.read())
+        shutil.copystat(str(src), str(dst), follow_symlinks=False)
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: write/copystat failed for %s: %s",
+            src, exc,
+        )
+
+
+def capture_bundle(
+    task_dir: Path, task_data: dict, work_path: Path | None,
+) -> None:
+    """Bundle artifacts into meta/artifacts/. Best-effort: all failures
+    are WARN-logged and swallowed so terminal-status write still happens.
+    Repeated calls overwrite (no artifact versioning).
+    """
+    logger = logging.getLogger("naiw_tasks")
+    artifacts = task_dir / "meta" / "artifacts"
+    try:
+        artifacts.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: cannot create %s: %s; aborting capture",
+            artifacts, exc,
+        )
+        return
+
+    io_dir = task_dir / "io"
+    copy_io_file(io_dir / "terminal.log", artifacts / "terminal.log")
+    copy_io_file(io_dir / "summary.md", artifacts / "summary.md")
+    replicate_output_tree(io_dir / "output", artifacts / "output")
+
+    # Git captures — project tasks only, gated by task.json.kind (NOT by
+    # .git/ existence). A Pi-corrupted .git on a project task surfaces the
+    # git error rather than being silently mistaken for a generic task.
+    if task_data.get("kind") != "project":
+        return
+    if work_path is None or not work_path.exists():
+        logger.warning(
+            "artifact capture: project task missing work_path %r; "
+            "skipping git captures",
+            work_path,
+        )
+        return
+
+    def _run_git(*args: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            ["git", "-C", str(work_path), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    base = task_data.get("base_commit")
+
+    try:
+        r = _run_git("status", "--porcelain=v2", "--branch")
+        (artifacts / "git-status.txt").write_text(
+            r.stdout, encoding="utf-8"
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "artifact capture: git status non-zero (%d): %s",
+                r.returncode, r.stderr.strip(),
+            )
+    except OSError as exc:
+        logger.warning("artifact capture: git status write: %s", exc)
+
+    if not base:
+        logger.warning(
+            "artifact capture: no base_commit on project task; "
+            "skipping diff captures",
+        )
+        return
+
+    # `git diff <base>` (no `..HEAD`) captures committed + uncommitted
+    # changes against the working tree — Pi commonly edits without
+    # committing. Untracked files added to changed-files.txt with `??` tag.
+    try:
+        r = _run_git("diff", "--name-status", base)
+        changed = r.stdout
+        if r.returncode != 0:
+            logger.warning(
+                "artifact capture: git diff --name-status non-zero "
+                "(%d): %s", r.returncode, r.stderr.strip(),
+            )
+        r_unt = _run_git("ls-files", "--others", "--exclude-standard")
+        if r_unt.returncode == 0 and r_unt.stdout:
+            untracked = "".join(
+                f"??\t{line}\n"
+                for line in r_unt.stdout.splitlines()
+                if line
+            )
+            changed = changed + untracked
+        (artifacts / "changed-files.txt").write_text(
+            changed, encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: changed-files.txt write: %s", exc,
+        )
+
+    try:
+        r = _run_git("diff", "--binary", base)
+        (artifacts / "diff.patch").write_text(
+            r.stdout, encoding="utf-8"
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "artifact capture: git diff non-zero (%d): %s",
+                r.returncode, r.stderr.strip(),
+            )
+    except OSError as exc:
+        logger.warning("artifact capture: diff.patch write: %s", exc)

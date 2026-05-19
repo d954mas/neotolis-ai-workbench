@@ -1,4 +1,4 @@
-"""Tests for lifecycle._capture_artifacts (finish-time artifact bundle).
+"""Tests for artifacts.capture_bundle (finish-time artifact bundle).
 
 Six tests cover the contract:
 - All six artifact items land for a project task.
@@ -15,7 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from naiw_tasks.lifecycle import _capture_artifacts
+from naiw_tasks.artifacts import capture_bundle as _capture_artifacts
 
 
 def _make_git_repo(path: Path) -> str:
@@ -202,9 +202,10 @@ def test_output_capture_falls_back_to_copy_on_exdev(tmp_path, monkeypatch):
     def fail_link(src, dst):  # noqa: ARG001
         raise OSError(errno.EXDEV, "Invalid cross-device link")
 
-    # Patch os.link as seen by the lifecycle module.
-    from naiw_tasks import lifecycle as lifecycle_mod
-    monkeypatch.setattr(lifecycle_mod.os, "link", fail_link)
+    # Patch os.link as seen by the artifacts module (capture_bundle lives
+    # there; the os module is the global singleton).
+    from naiw_tasks import artifacts as artifacts_mod
+    monkeypatch.setattr(artifacts_mod.os, "link", fail_link)
     _capture_artifacts(td, {"kind": "generic"}, None)
     src = td / "io" / "output" / "a.txt"
     dst = td / "meta" / "artifacts" / "output" / "a.txt"
