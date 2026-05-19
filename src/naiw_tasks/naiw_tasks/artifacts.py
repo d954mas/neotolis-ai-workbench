@@ -277,3 +277,47 @@ def capture_bundle(
             )
     except OSError as exc:
         logger.warning("artifact capture: diff.patch write: %s", exc)
+
+    # Untracked content capture: `git diff --binary <base>` above does NOT
+    # include untracked files (git diff only sees tracked content). With
+    # finish_policy=delete_worktree the worktree is removed right after
+    # capture, so an untracked Pi-created file would be lost — only its
+    # name would survive in changed-files.txt. Mirror those files into
+    # meta/artifacts/untracked/ via copy_io_file (lstat → S_ISREG →
+    # O_NOFOLLOW) so a hostile symlink cannot exfiltrate host content.
+    # `-z` NUL-separates paths so newlines/spaces in filenames are safe.
+    try:
+        r_unt = _run_git_bytes(
+            "ls-files", "--others", "--exclude-standard", "-z",
+        )
+    except OSError as exc:
+        logger.warning(
+            "artifact capture: ls-files for untracked failed: %s", exc,
+        )
+        return
+    if r_unt.returncode != 0 or not r_unt.stdout:
+        return
+    untracked_root = artifacts / "untracked"
+    for rel_bytes in r_unt.stdout.split(b"\0"):
+        if not rel_bytes:
+            continue
+        try:
+            rel = rel_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            logger.warning(
+                "artifact capture: untracked path is not UTF-8 (%r); "
+                "skipping",
+                rel_bytes,
+            )
+            continue
+        src = work_path / rel
+        dst = untracked_root / rel
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "artifact capture: cannot mkdir %s: %s; skipping %s",
+                dst.parent, exc, rel,
+            )
+            continue
+        copy_io_file(src, dst)

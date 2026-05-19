@@ -166,6 +166,85 @@ def test_capture_includes_uncommitted_changes_and_untracked(tmp_path):
     )
 
 
+def test_untracked_file_content_preserved_in_artifacts(tmp_path):
+    """`git diff --binary <base>` does NOT include untracked files —
+    they're not tracked content. With finish_policy=delete_worktree the
+    worktree is removed right after capture, so an untracked Pi-created
+    file would be lost; only its name survives in changed-files.txt.
+    Bundle must mirror untracked content into meta/artifacts/untracked/.
+    """
+    td = _make_task_dir(tmp_path)
+    work = tmp_path / "work"
+    base = _make_git_repo(work)
+    # Pi creates several untracked files: one at root, one in a
+    # subdirectory, one binary.
+    (work / "notes.md").write_text("important Pi notes\n")
+    (work / "subdir").mkdir()
+    (work / "subdir" / "deep.txt").write_text("nested content\n")
+    (work / "blob.bin").write_bytes(b"\x00\x01\xff\xfe")
+    data = {
+        "kind": "project",
+        "base_commit": base,
+        "worktree_path": str(work),
+    }
+    _capture_artifacts(td, data, work)
+    untracked_root = td / "meta" / "artifacts" / "untracked"
+    assert (untracked_root / "notes.md").read_text() == "important Pi notes\n"
+    assert (
+        untracked_root / "subdir" / "deep.txt"
+    ).read_text() == "nested content\n"
+    assert (untracked_root / "blob.bin").read_bytes() == b"\x00\x01\xff\xfe"
+
+
+def test_untracked_capture_refuses_pi_planted_symlink(tmp_path, caplog):
+    """An untracked symlink that points outside the worktree must NOT
+    exfiltrate the target — copy_io_file's lstat → S_ISREG → O_NOFOLLOW
+    chain skips non-regular files and refuses the swap path.
+    """
+    td = _make_task_dir(tmp_path)
+    work = tmp_path / "work"
+    base = _make_git_repo(work)
+    outside = tmp_path / "host-secret.txt"
+    outside.write_bytes(b"do not exfiltrate\n")
+    (work / "evil-link").symlink_to(outside)
+    data = {
+        "kind": "project",
+        "base_commit": base,
+        "worktree_path": str(work),
+    }
+    with caplog.at_level(logging.WARNING, logger="naiw_tasks"):
+        _capture_artifacts(td, data, work)
+    dst = td / "meta" / "artifacts" / "untracked" / "evil-link"
+    # Either the symlink was refused (no file) or it landed without
+    # following — but it MUST NOT contain the outside content.
+    if dst.exists() and not dst.is_symlink():
+        assert dst.read_bytes() != b"do not exfiltrate\n", (
+            "untracked capture exfiltrated host file via symlink"
+        )
+
+
+def test_untracked_skipped_when_changed_files_lists_them(tmp_path):
+    """Sanity: changed-files.txt still lists untracked with `??` tag (no
+    regression from the new untracked/ copy), AND those same files now
+    have their content recoverable from untracked/.
+    """
+    td = _make_task_dir(tmp_path)
+    work = tmp_path / "work"
+    base = _make_git_repo(work)
+    (work / "agent-scratch.txt").write_text("agent created me\n")
+    data = {
+        "kind": "project",
+        "base_commit": base,
+        "worktree_path": str(work),
+    }
+    _capture_artifacts(td, data, work)
+    art = td / "meta" / "artifacts"
+    assert "??\tagent-scratch.txt" in (art / "changed-files.txt").read_text()
+    assert (
+        art / "untracked" / "agent-scratch.txt"
+    ).read_text() == "agent created me\n"
+
+
 def test_diff_patch_preserves_binary_bytes_round_trip(tmp_path):
     """`git diff --binary` emits literal/delta blobs that contain non-UTF-8
     bytes. A text+errors=replace decode corrupts those bytes to U+FFFD and
