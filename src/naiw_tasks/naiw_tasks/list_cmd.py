@@ -14,6 +14,7 @@ from typing import Any
 import docker.errors
 from naiw_common.events import Event
 
+from naiw_tasks import drift as drift_mod
 from naiw_tasks import events_tail, reconcile, render, store
 from naiw_tasks.config import Config
 from naiw_tasks.events_tail import Malformed
@@ -147,8 +148,15 @@ def _reconcile_one(
     by_task_id: dict[str, Any],
     apply_auto_finish: bool,
     dry_run: bool,
+    seen_drift_warnings: set[tuple[str, str]],
 ) -> tuple[reconcile.ComputedRow, str, int | None, int, int]:
-    """Process one task and return row status/container data for rendering."""
+    """Process one task and return row status/container data for rendering.
+
+    `seen_drift_warnings` is owned by `run()` and shared across all rows
+    within a single list invocation; per-invocation set guarantees one
+    WARNING line per (task_id, field) without leaking dedup state across
+    separate list calls.
+    """
     task_id = task_dict.get("id", task_dir.name)
     container = by_task_id.get(task_id)
     if container is None:
@@ -186,6 +194,39 @@ def _reconcile_one(
         new_max_size = stored_max_size
     else:
         new_max_size = current_log_size
+
+    # Hardening drift audit. Reuses container.attrs from the existing
+    # containers.list enumeration — no second proxy round-trip. Warn-only:
+    # appends `(drift)` to NOTES and logs a deduplicated WARNING per
+    # (task_id, field). attach/finish/recover are NOT gated by drift; the
+    # operator may use them to remediate.
+    if (
+        computed.status == str(Status.RUNNING)
+        and container is not None
+        and ctr_state == "running"
+    ):
+        expected_storage_bind = (
+            f"{(cfg.host_root / 'tasks' / task_id / 'storage')}"
+            f":/home/pi:rw"
+        )
+        drift_items = drift_mod.compute_drift(
+            container.attrs.get("HostConfig") or {},
+            container.attrs.get("Config") or {},
+            expected_storage_bind=expected_storage_bind,
+        )
+        if drift_items:
+            if "drift" not in notes:
+                notes.append("drift")
+            for it in drift_items:
+                key = (task_id, it.field)
+                if key in seen_drift_warnings:
+                    continue
+                seen_drift_warnings.add(key)
+                _LOG.warning(
+                    "drift: task=%s field=%s expected=%r actual=%r "
+                    "severity=%s",
+                    task_id, it.field, it.expected, it.actual, it.severity,
+                )
 
     # Plain list leaves terminal auto_finish events unread so reap can close them.
     auto_finish = bool(task_dict.get("auto_finish", False))
@@ -435,11 +476,17 @@ def run(
     all_tasks = _enumerate_tasks(cfg.data_root)
     reaped = 0
     would_reap = 0
+    # Per-invocation drift-WARNING dedup set. Owned by run() so the same
+    # (task_id, field) pair is logged at most once across all rows within
+    # a single list call; NOT a module-level global (would silently dedup
+    # across separate invocations and suppress legitimate repeat warnings).
+    seen_drift_warnings: set[tuple[str, str]] = set()
     rows: list[tuple[Path, dict, reconcile.ComputedRow, str, int | None]] = []
     for task_dir, task_dict in all_tasks:
         computed, ctr_state, exit_code, row_reaped, row_would_reap = _reconcile_one(
             cfg, client, task_dir, task_dict, by_task_id,
             request.apply_auto_finish, request.dry_run,
+            seen_drift_warnings,
         )
         reaped += row_reaped
         would_reap += row_would_reap
