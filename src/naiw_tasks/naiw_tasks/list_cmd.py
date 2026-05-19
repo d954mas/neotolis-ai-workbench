@@ -103,31 +103,25 @@ def _terminal_log_size(io_dir: Path) -> int:
         return 0
 
 
-def _select_latest_event_kind(events: list) -> str | None:
-    """Latest event by list position wins for terminal kinds.
-
-    events_tail returns valid events in file-byte order, so the final element
-    is the highest-offset (latest) event. Used as `pending_event_kind` for
-    compute_status: a `done` after `wait` flips the row to completed.
-    """
-    if not events:
-        return None
-    return events[-1].kind
-
-
 def _latest_fail_reason(events: list) -> str | None:
     """Return the latest `fail` event's payload.reason, or None.
 
-    `naiw-signal fail --reason ...` requires a non-empty reason; events_tail
-    validates that. Propagating it through teardown_and_mark keeps the
-    operator-visible failure_reason in task.json so `naiw-tasks list` does
-    not need to grep events.jsonl to explain why a task failed.
+    Scans from the end and stops at the first transition-causing kind. If
+    that kind is `fail`, returns its reason; if it is `done`/`wait`, the
+    operator's most recent intent was not failure, so no reason. Status-
+    neutral kinds (currently `log`) are transparent — they never mask a
+    prior fail's reason from this lookup.
     """
-    if not events or events[-1].kind != "fail":
-        return None
-    payload = events[-1].payload
-    reason = payload.get("reason") if isinstance(payload, dict) else None
-    return reason if isinstance(reason, str) and reason else None
+    for ev in reversed(events):
+        kind = getattr(ev, "kind", None)
+        if kind not in reconcile.TRANSITION_KINDS:
+            continue
+        if kind != "fail":
+            return None
+        payload = ev.payload
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        return reason if isinstance(reason, str) and reason else None
+    return None
 
 
 def _auto_finish_can_run(task_dict: dict) -> bool:
@@ -170,7 +164,7 @@ def _reconcile_one(
         events_path, current_offset,
     )
 
-    latest_event_kind = _select_latest_event_kind(valid_events)
+    latest_event_kind = reconcile.select_latest_transition_kind(valid_events)
     computed = reconcile.compute_status(
         task_dict=task_dict,
         ctr_state=ctr_state,

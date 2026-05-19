@@ -44,6 +44,34 @@ _KNOWN_STATUSES: frozenset[str] = frozenset(
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 
 
+# Event kinds that DRIVE status transitions in compute_status. `log` is a
+# status-neutral kind by contract (events_tail validates it and the offset
+# advances past it, but compute_status has no log branch). Keeping the
+# constant here makes the contract visible at the same module that consumes
+# it — adding a future kind to this set is a single-line change that
+# automatically lights up every selector and caller.
+TRANSITION_KINDS: frozenset[str] = frozenset({"done", "fail", "wait"})
+
+
+def select_latest_transition_kind(events) -> str | None:
+    """Pick the latest transition-causing kind, skipping status-neutral kinds.
+
+    The reader (events_tail) returns events in file-byte order, so the final
+    element is the most recent. We scan from the end and return the first
+    kind that lives in TRANSITION_KINDS — `log` and any future status-neutral
+    kind is transparently skipped.
+
+    Returns None if the batch has no transition-causing event. The caller
+    (list_cmd) feeds the result to compute_status as pending_event_kind; None
+    means "no event drove a transition this round".
+    """
+    for ev in reversed(events):
+        kind = getattr(ev, "kind", None)
+        if kind in TRANSITION_KINDS:
+            return kind
+    return None
+
+
 @dataclass(frozen=True)
 class ComputedRow:
     """One row in the rendered `naiw-tasks list` table.
