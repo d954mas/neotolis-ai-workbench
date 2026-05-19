@@ -11,6 +11,15 @@ Thresholds:
 All du calls are 'du -sb' (apparent size in bytes; no -L so symlink loops
 do not recurse). Non-zero exit is treated as partial — the row is annotated
 (partial) and the parse falls through on any stdout that's available.
+
+Linux-only. The `-b` flag is a GNU coreutils extension (apparent-size in
+bytes, equivalent to --apparent-size --block-size=1). macOS / BSD `du`
+ships the Single-Unix-Specification subset and does NOT accept `-b`. This
+module — and clean.py via disk.du_sb — will fail on BSD-userland hosts.
+NAIW only supports the Linux controller container per CLAUDE.md, so the
+constraint is in-contract. If you need to develop on a BSD host, install
+gnu-coreutils (`brew install coreutils`) and PATH `gdu` first, or run the
+tests through a Linux container.
 """
 
 import logging
