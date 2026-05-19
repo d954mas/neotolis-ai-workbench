@@ -365,3 +365,92 @@ def test_drift_module_does_not_mutate_task_json():
     src = Path(drift.__file__).read_text(encoding="utf-8")
     assert "store.update_task" not in src
     assert "store.write" not in src
+
+
+# ---------- expected_storage_bind helper ------------------------------------
+#
+# Drift's expected_storage_bind must reflect the HOST path, because
+# HostConfig.Binds[*] is what the daemon recorded at container-create
+# time and the daemon sees host paths. In the containerized-controller
+# deployment (Phase 3.5 default), the controller's view of /home/op/naiw-data
+# lives at /data inside its container — cfg.data_root_host (a.k.a.
+# cfg.host_root) carries the real host path. Using cfg.data_root or
+# task_dir.resolve() instead would compare against the controller-internal
+# path and surface a false-positive (drift) on every running task.
+#
+# The helper exists in drift.py (not in lifecycle / list_cmd / doctor)
+# so that every caller asking "what bind should this task have?" goes
+# through the same compute. If a future PR changes the bind shape
+# (e.g. adds `,nodev`), updating drift.expected_storage_bind keeps the
+# audit and the create-time bind in lockstep automatically.
+
+
+class _CfgWithHostRoot:
+    """Stub cfg exposing data_root + host_root, matching Config's surface."""
+
+    def __init__(self, data_root: Path, data_root_host: Path | None) -> None:
+        self.data_root = data_root
+        self._host = data_root_host
+
+    @property
+    def host_root(self) -> Path:
+        return self._host if self._host is not None else self.data_root
+
+
+def test_expected_storage_bind_uses_host_root_when_distinct():
+    """The bind string must use host_root, NOT data_root.
+
+    Simulates the containerized-controller deployment: data_root is the
+    in-container path (/data), data_root_host is the actual host path
+    (/home/op/naiw-data). The bind the daemon records uses the host path.
+    """
+    cfg = _CfgWithHostRoot(
+        data_root=Path("/data"),
+        data_root_host=Path("/home/op/naiw-data"),
+    )
+    bind = drift.expected_storage_bind(cfg, "demo-001")
+    assert bind.startswith("/home/op/naiw-data"), (
+        f"helper used data_root instead of host_root: {bind!r}"
+    )
+    # Container side is fixed.
+    assert bind.endswith(":/home/pi:rw"), bind
+
+
+def test_expected_storage_bind_falls_back_to_data_root():
+    """Local-Linux operator runs the controller on the host directly:
+    data_root_host is None, so host_root == data_root."""
+    cfg = _CfgWithHostRoot(
+        data_root=Path("/home/op/naiw-data"),
+        data_root_host=None,
+    )
+    bind = drift.expected_storage_bind(cfg, "demo-001")
+    assert bind == "/home/op/naiw-data/tasks/demo-001/storage:/home/pi:rw"
+
+
+def test_expected_storage_bind_shape_is_src_dst_mode():
+    """`src:dst:mode` triple — the canonical Docker bind format."""
+    cfg = _CfgWithHostRoot(
+        data_root=Path("/srv/naiw-data"),
+        data_root_host=None,
+    )
+    bind = drift.expected_storage_bind(cfg, "task-007")
+    src, dst, mode = bind.rsplit(":", 2)
+    assert src.endswith("/tasks/task-007/storage"), src
+    assert dst == "/home/pi"
+    assert mode == "rw"
+
+
+def test_expected_storage_bind_is_signature_caller_uses():
+    """The helper is what list_cmd AND doctor MUST call.
+
+    Both modules previously rolled their own bind string and diverged
+    (list_cmd used host_root, doctor used task_dir.resolve()). This test
+    locks the API shape — accepting cfg + task_id — so a future refactor
+    can't bring back the per-call duplication.
+    """
+    import inspect
+    sig = inspect.signature(drift.expected_storage_bind)
+    params = list(sig.parameters)
+    assert params == ["cfg", "task_id"], (
+        f"helper signature drift: {params}"
+    )
