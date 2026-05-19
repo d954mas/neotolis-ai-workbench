@@ -77,7 +77,12 @@ def test_clean_filters_to_terminal_states(tmp_path, monkeypatch):
     assert ids == ["t-cancelled", "t-completed", "t-failed"]
 
 
-def test_clean_prunes_worktree_before_rmtree(tmp_path, monkeypatch):
+def test_clean_prunes_worktree_after_rmtree(tmp_path, monkeypatch):
+    """`git worktree prune` removes entries whose worktree dir is missing.
+    If prune runs BEFORE rmtree, the dir is still on disk and prune is a
+    no-op — the base repo ends up with a stale entry pointing at a
+    non-existent path. Order must be: rmtree first, then prune.
+    """
     old_ts = "2020-01-01T00:00:00.000+00:00"
     tasks_dir = tmp_path / "tasks"
     tasks_dir.mkdir()
@@ -107,13 +112,53 @@ def test_clean_prunes_worktree_before_rmtree(tmp_path, monkeypatch):
     cfg = Config(data_root=tmp_path)
     rc = clean.run(cfg, client, dt.timedelta(seconds=1), skip_prompt=True)
     assert rc == 0
-    worktree_idx = next(
-        i for i, c in enumerate(call_order) if c.startswith("worktree_prune")
-    )
     rmtree_idx = next(
         i for i, c in enumerate(call_order) if c.startswith("rmtree")
     )
-    assert worktree_idx < rmtree_idx, "worktree_prune must precede rmtree"
+    worktree_idx = next(
+        i for i, c in enumerate(call_order) if c.startswith("worktree_prune")
+    )
+    assert rmtree_idx < worktree_idx, (
+        "rmtree must precede worktree_prune so prune actually removes the "
+        "now-orphan entry"
+    )
+
+
+def test_clean_skips_worktree_prune_when_rmtree_failed(tmp_path, monkeypatch):
+    """If rmtree fails, the worktree dir is still on disk — running prune
+    in that state is a no-op and obscures intent. Skip prune so a retry
+    of clean can attempt rmtree again with repo metadata still in place.
+    """
+    old_ts = "2020-01-01T00:00:00.000+00:00"
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_task(
+        tasks_dir, "t-proj", status="completed",
+        finished_at=old_ts, updated_at=old_ts,
+        kind="project",
+        project_repo_path=str(repo),
+        worktree_path=str(tasks_dir / "t-proj" / "work"),
+    )
+    prune_calls: list = []
+    monkeypatch.setattr(
+        clean.git_ops, "worktree_prune",
+        lambda p: prune_calls.append(p),
+    )
+
+    def fail_rmtree(p, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(p))
+
+    monkeypatch.setattr(shutil, "rmtree", fail_rmtree)
+    client = MagicMock()
+    client.containers.list.return_value = []
+    cfg = Config(data_root=tmp_path)
+    rc = clean.run(cfg, client, dt.timedelta(seconds=1), skip_prompt=True)
+    assert rc == 1, "rmtree failure surfaces as exit 1"
+    assert prune_calls == [], (
+        f"worktree_prune must NOT run when rmtree failed; got: {prune_calls!r}"
+    )
 
 
 def test_clean_prunes_orphan_containers(tmp_path):

@@ -301,18 +301,6 @@ def run(
 
     failures = 0
     for c in candidates:
-        if c.kind == "project" and c.project_repo_path:
-            try:
-                git_ops.worktree_prune(Path(c.project_repo_path))
-            except OSError as exc:
-                # OSError covers FileNotFoundError (git binary missing) and
-                # PermissionError (repo not readable). worktree_prune itself
-                # uses subprocess check=False, so non-zero exits don't raise.
-                _LOG.info(
-                    "clean: worktree prune failed for %s: %s "
-                    "(continuing with rmtree)",
-                    c.task_id, exc,
-                )
         try:
             shutil.rmtree(c.task_dir)
             click.echo(f"removed {c.task_id}")
@@ -327,6 +315,29 @@ def run(
                 f"{c.task_id}: {exc}",
                 err=True,
             )
+            # Skip prune when rmtree failed: the worktree dir is still on
+            # disk, so prune would be a no-op anyway, and we want a retry
+            # of clean to attempt the rmtree path again before disturbing
+            # repo metadata.
+            continue
+        if c.kind == "project" and c.project_repo_path:
+            # Prune AFTER rmtree, not before: `git worktree prune` removes
+            # entries whose worktree dir is gone. If we prune first the
+            # dir is still there and prune is a no-op; the result is a
+            # stale entry in the base repo pointing at a non-existent
+            # path. Pruning after means the operator's `git worktree list`
+            # in the base repo stays clean.
+            try:
+                git_ops.worktree_prune(Path(c.project_repo_path))
+            except OSError as exc:
+                # OSError covers FileNotFoundError (git binary missing) and
+                # PermissionError (repo not readable). worktree_prune itself
+                # uses subprocess check=False, so non-zero exits don't raise.
+                _LOG.info(
+                    "clean: worktree prune failed for %s: %s "
+                    "(rmtree already succeeded; stale repo metadata possible)",
+                    c.task_id, exc,
+                )
 
     # Orphan prune AFTER per-task removal so just-removed tasks become
     # orphans for this same invocation. Re-enumerate to capture both.
