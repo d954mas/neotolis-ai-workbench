@@ -60,6 +60,22 @@ def test_config_load_max_data_size_rejects_si_typo(tmp_naiw_data):
     assert "use IEC binary units" in str(exc.value)
 
 
+def test_max_data_size_fractional_rejected_with_hint():
+    """`1.5GiB` looks plausible but the parser is integer-only. Rejecting
+    with a hint pointing at the smaller-unit workaround beats the generic
+    "expected <integer><unit>" error, which is ambiguous between "wrong
+    unit" and "wrong number shape"."""
+    with pytest.raises(ValueError) as exc:
+        _parse_max_data_size("1.5GiB")
+    msg = str(exc.value)
+    assert "integer-only" in msg, f"hint must say integer-only: {msg!r}"
+    assert "1536MiB" in msg, f"hint must suggest the workaround: {msg!r}"
+    # Non-IEC fractional still hits the generic catch-all (no fractional
+    # support at all, regardless of unit).
+    with pytest.raises(ValueError):
+        _parse_max_data_size("1.5GB")
+
+
 def test_max_data_size_zero_is_rejected():
     """max_data_size=0KiB would silently disable both the >80% warning and
     the >95% start-refusal gate. Reject at parse time so a config typo

@@ -82,16 +82,19 @@ _IEC_UNIT_BYTES: dict[str, int] = {
 }
 _IEC_PATTERN = re.compile(r"^(\d+)(KiB|MiB|GiB|TiB)$")
 _DECIMAL_TYPO_PATTERN = re.compile(r"^\d+(KB|MB|GB|TB)$")
+_FRACTIONAL_TYPO_PATTERN = re.compile(r"^\d+\.\d+(KiB|MiB|GiB|TiB)$")
 
 
 def _parse_max_data_size(raw: str) -> int:
     """Parse <int><unit> where unit is one of KiB/MiB/GiB/TiB.
 
-    Returns the size in bytes. IEC binary units only — the SI-style suffixes
-    KB/MB/GB/TB are rejected with a clear hint pointing at the binary form,
-    because mixing the two in a per-namespace cap silently shifts the
-    threshold by ~7% per power-of-1024 step (1 GB = 1e9, 1 GiB = 2^30) and
-    that drift is exactly the operator surprise we want to avoid.
+    Returns the size in bytes. Integer-only — `1.5GiB` is rejected (use
+    `1536MiB` or `1500MiB` to get an exact byte count). IEC binary units
+    only — the SI-style suffixes KB/MB/GB/TB are rejected with a clear
+    hint pointing at the binary form, because mixing the two in a
+    per-namespace cap silently shifts the threshold by ~7% per
+    power-of-1024 step (1 GB = 1e9, 1 GiB = 2^30) and that drift is
+    exactly the operator surprise we want to avoid.
     """
     if not isinstance(raw, str):
         raise ValueError(
@@ -117,6 +120,16 @@ def _parse_max_data_size(raw: str) -> int:
         raise ValueError(
             f"max_data_size={value!r}: use IEC binary units "
             f"(KiB/MiB/GiB/TiB), not decimal units (KB/MB/GB/TB)"
+        )
+    if _FRACTIONAL_TYPO_PATTERN.match(value):
+        # Distinct error so the operator immediately sees WHY '1.5GiB'
+        # was rejected — without this, the generic "expected
+        # <integer><unit>" message is ambiguous between "wrong unit" and
+        # "wrong number shape" and the operator may swap units thinking
+        # that fixes it.
+        raise ValueError(
+            f"max_data_size={value!r}: integer-only (use a smaller unit "
+            f"for fractional values, e.g. '1536MiB' instead of '1.5GiB')"
         )
     raise ValueError(
         f"max_data_size={value!r}: expected <integer><unit> where "
