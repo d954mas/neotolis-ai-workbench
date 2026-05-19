@@ -1,7 +1,8 @@
 """Event schema for /io/.naiw/events.jsonl.
 
 Schema 1 is the current strict contract: ISO timestamp string, known kind,
-object payload, and non-empty payload.reason for fail/wait.
+object payload, and non-empty payload.reason for fail/wait or
+payload.message for log.
 """
 
 from collections.abc import Mapping
@@ -11,7 +12,7 @@ from typing import Any, Literal
 
 SCHEMA_VERSION: int = 1
 
-Kind = Literal["done", "fail", "wait"]
+Kind = Literal["done", "fail", "wait", "log"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,19 @@ class Event:
         if not reason:
             raise ValueError("wait: reason is required")
         return cls(ts=cls.now_iso(), kind="wait", payload={"reason": reason})
+
+    @classmethod
+    def log(cls, message: str) -> "Event":
+        """`log` event. `message` is required and non-empty. Status-neutral.
+
+        Status-neutral: the controller's events_tail accepts log events and
+        advances offset, but the reconcile truth table does NOT transition
+        task.json.status on log events. This is the foundation for future
+        operator-visible streaming via `naiw-tasks output --follow`.
+        """
+        if not message:
+            raise ValueError("log: message is required")
+        return cls(ts=cls.now_iso(), kind="log", payload={"message": message})
 
     def as_dict(self) -> dict[str, Any]:
         """Materialise for JSON serialisation."""
