@@ -952,19 +952,23 @@ def teardown_and_mark(
             raise SystemExit(1)
 
         # Artifact capture runs BEFORE worktree teardown so git diff/status
-        # can still read work/. Failures are best-effort and never block the
-        # terminal-status write — the helper swallows its own errors; the
-        # outer guard is defense in depth.
+        # can still read work/. capture_bundle is best-effort and swallows
+        # its own OSError. The outer guard catches non-OSError bugs
+        # (TypeError / AttributeError / KeyError / RuntimeError) that would
+        # otherwise abort the terminal-status write below — losing the audit
+        # trail is worse than losing the artifact bundle. logger.exception
+        # captures the traceback so the bug can be found and fixed; SystemExit
+        # / KeyboardInterrupt fall through (they are not Exception subclasses).
         worktree_path_value = data.get("worktree_path")
         capture_work_path = (
             Path(worktree_path_value) if worktree_path_value else None
         )
         try:
             artifacts_mod.capture_bundle(task_dir, data, capture_work_path)
-        except Exception as exc:  # pragma: no cover
-            logging.getLogger("naiw_tasks").warning(
-                "artifact capture: unexpected error (suppressed): %s",
-                exc,
+        except Exception:
+            logging.getLogger("naiw_tasks").exception(
+                "artifact capture: unexpected error (suppressed to "
+                "preserve terminal-status write)",
             )
 
         # Worktree teardown — project tasks only. delete_worktree => git
