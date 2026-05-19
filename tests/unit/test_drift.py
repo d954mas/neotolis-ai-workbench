@@ -14,9 +14,9 @@ import dataclasses
 from pathlib import Path
 
 import pytest
+from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS
 
 from naiw_tasks import drift
-from naiw_tasks.docker_client import HARDENED_HOST_CONFIG_KWARGS
 
 EXPECTED_STORAGE_BIND = "/abs/path/tasks/test-1/storage:/home/pi:rw"
 
@@ -118,9 +118,10 @@ def test_expected_host_config_diff_keys():
 def test_expected_host_config_diff_derives_from_constant():
     """The constants must agree with HARDENED_HOST_CONFIG_KWARGS — if the
     operator bumps the hardening floor, the audit follows automatically."""
-    assert drift.EXPECTED_HOST_CONFIG_DIFF["HostConfig.PidsLimit"] == HARDENED_HOST_CONFIG_KWARGS["pids_limit"]
-    assert drift.EXPECTED_HOST_CONFIG_DIFF["HostConfig.NanoCpus"] == HARDENED_HOST_CONFIG_KWARGS["nano_cpus"]
-    assert drift.EXPECTED_HOST_CONFIG_DIFF["HostConfig.NetworkMode"] == HARDENED_HOST_CONFIG_KWARGS["network"]
+    diff = drift.EXPECTED_HOST_CONFIG_DIFF
+    assert diff["HostConfig.PidsLimit"] == HARDENED_HOST_CONFIG_KWARGS["pids_limit"]
+    assert diff["HostConfig.NanoCpus"] == HARDENED_HOST_CONFIG_KWARGS["nano_cpus"]
+    assert diff["HostConfig.NetworkMode"] == HARDENED_HOST_CONFIG_KWARGS["network"]
 
 
 # ---------- parametrised single-field mutations -----------------------------
