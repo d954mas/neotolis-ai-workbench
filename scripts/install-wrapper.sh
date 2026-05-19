@@ -4,19 +4,50 @@ set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$here/.." && pwd)"
 
-WRAPPER_PATH="${HOME}/.local/bin/naiw-tasks"
+DEFAULT_BIN_DIR="${HOME}/.local/bin"
 COMPOSE_FILE_SYSTEM="/etc/naiw/docker-compose.yml"
 TASK_IMAGE_REF="ghcr.io/d954mas/naiw-task-image:latest"
 
-if [[ "${1:-}" == "--help" ]]; then
-    cat <<EOF
-Usage: scripts/install-wrapper.sh
-  Installs ${WRAPPER_PATH} as a docker-compose wrapper.
-  Creates naiw-task-net if missing.
-  Requires ${COMPOSE_FILE_SYSTEM} to exist.
+# --prefix <dir> installs the wrapper into <dir>/naiw-tasks AND skips the
+# image-pull step (tests build images locally; pulling would race the CI
+# job-level build steps and surface as a flaky failure). The default path
+# (~/.local/bin) preserves the operator install contract.
+BIN_DIR="$DEFAULT_BIN_DIR"
+SKIP_PULL=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help)
+            cat <<EOF
+Usage: scripts/install-wrapper.sh [--prefix DIR]
+  Installs DIR/naiw-tasks (default: ${DEFAULT_BIN_DIR}/naiw-tasks) as a
+  docker-compose wrapper. Creates naiw-task-net if missing. Requires
+  ${COMPOSE_FILE_SYSTEM} to exist (or pass --prefix to skip the system
+  compose check — tests stage their own compose file).
+Options:
+  --prefix DIR  Install wrapper into DIR (test/CI hook). Also skips
+                'docker compose pull' so tests can use locally-built images.
 EOF
-    exit 0
-fi
+            exit 0
+            ;;
+        --prefix)
+            if [[ $# -lt 2 ]]; then
+                echo "[install] ERROR: --prefix requires a directory argument" >&2
+                exit 2
+            fi
+            BIN_DIR="$2"
+            SKIP_PULL=1
+            shift 2
+            ;;
+        *)
+            echo "[install] ERROR: unknown argument: $1" >&2
+            echo "[install] usage: scripts/install-wrapper.sh [--prefix DIR]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+WRAPPER_PATH="${BIN_DIR}/naiw-tasks"
 
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
     echo "[install] ERROR: do not run install-wrapper.sh as root" >&2
@@ -24,7 +55,7 @@ if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
     exit 2
 fi
 
-if [[ ! -f "$COMPOSE_FILE_SYSTEM" ]]; then
+if [[ "$SKIP_PULL" -eq 0 && ! -f "$COMPOSE_FILE_SYSTEM" ]]; then
     echo "[install] ERROR: compose file not found at $COMPOSE_FILE_SYSTEM" >&2
     echo "[install] Install it first:" >&2
     echo "[install]   sudo install -d /etc/naiw" >&2
@@ -46,7 +77,7 @@ if ! docker network inspect naiw-task-net >/dev/null 2>&1; then
     docker network create naiw-task-net >/dev/null
 fi
 
-mkdir -p "${HOME}/.local/bin"
+mkdir -p "$BIN_DIR"
 
 cat >"$WRAPPER_PATH" <<'WRAPPER'
 #!/usr/bin/env bash
@@ -113,21 +144,25 @@ WRAPPER
 chmod 0755 "$WRAPPER_PATH"
 echo "[install] wrote $WRAPPER_PATH"
 
-echo "[install] pulling controller + proxy images via docker compose"
-if ! docker compose -f "$COMPOSE_FILE_SYSTEM" pull; then
-    echo "[install] WARN: docker compose pull failed" >&2
-    echo "[install]   If GHCR is private, run 'docker login ghcr.io' and retry." >&2
+if [[ "$SKIP_PULL" -eq 0 ]]; then
+    echo "[install] pulling controller + proxy images via docker compose"
+    if ! docker compose -f "$COMPOSE_FILE_SYSTEM" pull; then
+        echo "[install] WARN: docker compose pull failed" >&2
+        echo "[install]   If GHCR is private, run 'docker login ghcr.io' and retry." >&2
+    fi
+
+    echo "[install] pulling task image $TASK_IMAGE_REF"
+    if ! docker pull "$TASK_IMAGE_REF"; then
+        echo "[install] WARN: failed to pull $TASK_IMAGE_REF" >&2
+        echo "[install]   The task image must be present before 'naiw-tasks start'." >&2
+        echo "[install]   Retry once GHCR is reachable: docker pull $TASK_IMAGE_REF" >&2
+    fi
+else
+    echo "[install] --prefix mode: skipping image pull (use locally built images)"
 fi
 
-echo "[install] pulling task image $TASK_IMAGE_REF"
-if ! docker pull "$TASK_IMAGE_REF"; then
-    echo "[install] WARN: failed to pull $TASK_IMAGE_REF" >&2
-    echo "[install]   The task image must be present before 'naiw-tasks start'." >&2
-    echo "[install]   Retry once GHCR is reachable: docker pull $TASK_IMAGE_REF" >&2
-fi
-
-echo "[install] OK - ensure ${HOME}/.local/bin is on \$PATH"
-if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
-    echo "[install] WARN: ${HOME}/.local/bin is not on \$PATH" >&2
-    echo "[install]   add 'export PATH=\"\$HOME/.local/bin:\$PATH\"' to your shell rc" >&2
+echo "[install] OK - ensure ${BIN_DIR} is on \$PATH"
+if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+    echo "[install] WARN: ${BIN_DIR} is not on \$PATH" >&2
+    echo "[install]   add 'export PATH=\"${BIN_DIR}:\$PATH\"' to your shell rc" >&2
 fi
