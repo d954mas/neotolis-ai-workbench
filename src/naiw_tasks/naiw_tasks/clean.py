@@ -2,7 +2,8 @@
 
 Invariants:
   - Only terminal statuses (completed/failed/cancelled) are candidates.
-  - For project tasks, `git worktree prune` runs BEFORE shutil.rmtree.
+  - For project tasks, `git worktree prune` runs AFTER shutil.rmtree so
+    the now-orphan entry actually gets removed from the base repo.
   - Always prompts unless --yes; default-on-Enter is N (cancel).
   - Orphan re-enumeration after per-task removal catches cascades.
 """
