@@ -122,11 +122,7 @@ def _parse_max_data_size(raw: str) -> int:
             f"(KiB/MiB/GiB/TiB), not decimal units (KB/MB/GB/TB)"
         )
     if _FRACTIONAL_TYPO_PATTERN.match(value):
-        # Distinct error so the operator immediately sees WHY '1.5GiB'
-        # was rejected — without this, the generic "expected
-        # <integer><unit>" message is ambiguous between "wrong unit" and
-        # "wrong number shape" and the operator may swap units thinking
-        # that fixes it.
+        # Distinct branch so '1.5GiB' is not misread as a wrong-unit error.
         raise ValueError(
             f"max_data_size={value!r}: integer-only (use a smaller unit "
             f"for fractional values, e.g. '1536MiB' instead of '1.5GiB')"

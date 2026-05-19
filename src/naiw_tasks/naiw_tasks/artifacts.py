@@ -1,11 +1,8 @@
 """Artifact-bundle helpers for finish/recover.
 
-The whole capture flow lives here (not just the hard-link mirror): lifecycle.py
-is deliberately forbidden from calling shutil.rmtree
-(test_lifecycle_module_does_not_call_rmdir / test_finish_never_uses_rm_rf
-guard against accidental raw recursive-delete of git worktrees), and the
-rmtree-on-retry of meta/artifacts/output/ keeps that primitive contained to
-this module.
+Whole capture flow lives here so the shutil.rmtree on retry stays
+contained to one module (lifecycle.py is guarded against raw recursive
+deletes — see test_lifecycle_module_does_not_call_rmdir).
 """
 
 import errno

@@ -749,28 +749,18 @@ def recover(cfg: Config, client, task_id: str) -> None:
     # Display-only count; authoritative bump happens in the final mutator.
     banner_count = int(initial.get("recovery_count", 0)) + 1
 
-    # Legacy compat: tasks started before terminal.log was pre-created
-    # mode 0666 may have a pi-owned 0644 file. Widen to 0666 so the
-    # host-side banner append below does not fail on operator uid != 1000.
-    # Best-effort: only owner can chmod, so if the operator doesn't own it
-    # this no-ops and _append_recovery_banner falls back to its WARN path.
-    #
-    # O_NOFOLLOW + fchmod (not Path.chmod) so a hostile Pi swapping
-    # terminal.log for a symlink to /etc/shadow cannot let the chmod
-    # retarget the symlink's destination. Linux has no lchmod, so
-    # os.chmod(..., follow_symlinks=False) raises NotImplementedError and
-    # would defeat the legacy widen entirely. Open with O_NOFOLLOW (returns
-    # ELOOP on a symlink final component) then fchmod the resulting fd.
-    # Defense in depth — io/ is sticky-1777 and Pi cannot unlink files it
-    # does not own, so the swap is also blocked one layer up.
+    # Legacy compat: pre-Phase-5 tasks may have pi-owned 0644 terminal.log;
+    # widen to 0666 so the host banner append below works on uid != 1000.
+    # O_NOFOLLOW + fchmod (NOT Path.chmod, which follows symlinks; NOT
+    # os.chmod(follow_symlinks=False), which Linux can't do — no lchmod —
+    # and raises NotImplementedError, defeating the widen). io/ is
+    # sticky-1777 so Pi can't swap the file out anyway; this is defense
+    # in depth on the path-resolution side.
     terminal_log = task_dir / "io" / "terminal.log"
     try:
         fd = os.open(str(terminal_log), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
-        # ENOENT: nothing to widen. ELOOP: refused symlink (correct).
-        # EACCES: not our file. Either way, banner write below will WARN
-        # and degrade gracefully if it can't append.
-        pass
+        pass  # ENOENT/ELOOP/EACCES → banner write will WARN and degrade.
     else:
         try:
             with suppress(OSError):
@@ -778,19 +768,13 @@ def recover(cfg: Config, client, task_id: str) -> None:
         finally:
             os.close(fd)
 
-    # Stop+remove the old container BEFORE writing the banner so any
-    # late tmux pipe-pane writes from the dying container land BEFORE
-    # the banner — the banner is then the visual seam between the
-    # interrupted session and the recovered one. Reordering matters
-    # only for the readability of terminal.log; both orders preserve
-    # the append-only invariant.
+    # Stop+remove old container BEFORE banner so late pipe-pane writes
+    # from the dying container do not land after the seam.
     if old is not None:
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.stop(timeout=10)
-        # Log remove() failure explicitly (not just suppress) — if the old
-        # container survives this call, containers.run() below will fail
-        # with 409 Conflict on the reused name and we want a breadcrumb in
-        # the controller log explaining why.
+        # Log remove() failure explicitly — a survivor will surface as
+        # 409 on containers.run below.
         try:
             old.remove(force=True)
         except docker.errors.NotFound:
@@ -802,7 +786,7 @@ def recover(cfg: Config, client, task_id: str) -> None:
                 container_name, exc,
             )
 
-    # Banner lands BEFORE container start so it appears even if start fails.
+    # Banner before start so it lands even if containers.run fails.
     _append_recovery_banner(
         task_dir / "io", banner_count, git_state
     )
@@ -876,14 +860,9 @@ def recover(cfg: Config, client, task_id: str) -> None:
     history_ts = Event.now_iso()
 
     def _to_running(d: dict) -> dict:
-        # Load-bearing: do NOT touch events_offset / terminal_log_max_size.
-        # The lazy-event tailer reads from those positions to keep continuity
-        # across the recover boundary (events emitted before the
-        # interruption stay tailed-once, terminal.log monotonic growth keeps
-        # its high-water mark). dict(d) below copies them through verbatim;
-        # if a future change adds an explicit mutation in this mutator,
-        # the recover-time event-stream regression test will catch it but
-        # the invariant lives here.
+        # Invariant: do NOT mutate events_offset / terminal_log_max_size.
+        # dict(d) copies them; the tailer relies on continuity across the
+        # recover boundary.
         if str(d.get("status")) != str(Status.INTERRUPTED):
             raise RecoverNotInterrupted(
                 f"task {task_id!r} status changed to "
@@ -1015,14 +994,10 @@ def teardown_and_mark(
             )
             raise SystemExit(1)
 
-        # Artifact capture runs BEFORE worktree teardown so git diff/status
-        # can still read work/. capture_bundle is best-effort and swallows
-        # its own OSError. The outer guard catches non-OSError bugs
-        # (TypeError / AttributeError / KeyError / RuntimeError) that would
-        # otherwise abort the terminal-status write below — losing the audit
-        # trail is worse than losing the artifact bundle. logger.exception
-        # captures the traceback so the bug can be found and fixed; SystemExit
-        # / KeyboardInterrupt fall through (they are not Exception subclasses).
+        # Capture BEFORE worktree teardown so git diff/status can read work/.
+        # capture_bundle handles its own OSError; the outer catch guards
+        # non-OSError bugs so they cannot abort the terminal-status write
+        # below (SystemExit / KeyboardInterrupt still propagate).
         worktree_path_value = data.get("worktree_path")
         capture_work_path = (
             Path(worktree_path_value) if worktree_path_value else None

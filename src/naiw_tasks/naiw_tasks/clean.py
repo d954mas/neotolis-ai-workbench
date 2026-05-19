@@ -81,15 +81,9 @@ def _humanize_age(age: dt.timedelta) -> str:
 
 
 def _dir_size_bytes(p: Path) -> int:
-    """Apparent size of a task dir, in bytes. Used only for the preview
-    line in the clean prompt (`tX  finished_at=... 1.2GiB`).
-
-    Delegates to disk.du_sb for consistency with `naiw-tasks disk` — that
-    way the size printed by `disk` for tasks/ as a whole and the per-task
-    size printed by `clean` agree on apparent-size semantics. partial=True
-    (du returned non-zero) is treated as 0 here: the preview line is
-    informational, the real risk is `disk` understating the total, which
-    is already handled with a loud NOTE.
+    """Apparent size of a task dir, in bytes. Delegates to disk.du_sb so
+    `clean`'s per-task preview and `disk`'s tasks/ row use the same
+    semantics. partial → 0 (loud NOTE comes from `disk`).
     """
     size, _partial = disk_mod.du_sb(p)
     return size
@@ -319,18 +313,12 @@ def run(
                 f"{c.task_id}: {exc}",
                 err=True,
             )
-            # Skip prune when rmtree failed: the worktree dir is still on
-            # disk, so prune would be a no-op anyway, and we want a retry
-            # of clean to attempt the rmtree path again before disturbing
-            # repo metadata.
+            # rmtree failed → worktree dir is still on disk → prune
+            # would be a no-op. Skip so a retry sees consistent state.
             continue
         if c.kind == "project" and c.project_repo_path:
-            # Prune AFTER rmtree, not before: `git worktree prune` removes
-            # entries whose worktree dir is gone. If we prune first the
-            # dir is still there and prune is a no-op; the result is a
-            # stale entry in the base repo pointing at a non-existent
-            # path. Pruning after means the operator's `git worktree list`
-            # in the base repo stays clean.
+            # Prune AFTER rmtree: prune removes entries whose worktree dir
+            # is gone, so the order matters.
             try:
                 git_ops.worktree_prune(Path(c.project_repo_path))
             except OSError as exc:
