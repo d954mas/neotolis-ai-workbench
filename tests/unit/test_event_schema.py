@@ -2,9 +2,10 @@
 
 import json
 import re
+from typing import get_args
 
 import pytest
-from naiw_common.events import SCHEMA_VERSION, Event
+from naiw_common.events import SCHEMA_VERSION, Event, Kind
 
 PIPE_BUF_LIMIT = 4096
 ISO_MS_Z_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
@@ -82,8 +83,38 @@ def test_kind_discriminator_round_trips():
         ("done", Event.done()),
         ("fail", Event.fail(reason="x")),
         ("wait", Event.wait(reason="y")),
+        ("log", Event.log(message="z")),
     ]:
         d = json.loads(json.dumps(ev.as_dict()))
         assert d["kind"] == kind
         assert d["schema_version"] == 1
         assert "ts" in d and "payload" in d
+
+
+def test_event_log_classmethod_returns_kind_log():
+    assert Event.log("hello").kind == "log"
+
+
+def test_event_log_message_in_payload():
+    assert Event.log("hello").payload == {"message": "hello"}
+
+
+def test_event_log_empty_message_raises():
+    with pytest.raises(ValueError):
+        Event.log("")
+    with pytest.raises((ValueError, TypeError)):
+        Event.log(None)  # type: ignore[arg-type]
+
+
+def test_event_log_as_dict_shape():
+    d = Event.log("hi").as_dict()
+    assert set(d.keys()) == {"ts", "kind", "payload", "schema_version"}
+    assert d["kind"] == "log"
+    assert d["payload"] == {"message": "hi"}
+    assert d["schema_version"] == 1
+    assert ISO_MS_Z_PATTERN.match(d["ts"])
+
+
+def test_kind_literal_includes_log():
+    assert "log" in get_args(Kind)
+    assert set(get_args(Kind)) == {"done", "fail", "wait", "log"}

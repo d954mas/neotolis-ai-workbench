@@ -90,6 +90,7 @@ def test_cli_propagates_startup_check_failure(monkeypatch, tmp_path):
 
 
 def test_doctor_runs_startup_checks(monkeypatch, tmp_path):
+    """`doctor` (no args) must still run startup_checks before the audit."""
     calls: list[str] = []
 
     cfg = Config(data_root=tmp_path / "naiw-data")
@@ -100,11 +101,15 @@ def test_doctor_runs_startup_checks(monkeypatch, tmp_path):
         "run_all",
         lambda cfg, client, **kw: calls.append("startup_checks"),
     )
+    monkeypatch.setattr(
+        cli_mod.doctor_mod,
+        "run_global",
+        lambda cfg, client: 0,
+    )
 
     runner = CliRunner()
     result = runner.invoke(cli, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "doctor OK" in result.output
     assert calls == ["startup_checks"]
 
 

@@ -74,10 +74,32 @@ def test_wait_with_reason(runner, journal):
 def test_help_lists_subcommands(runner):
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for sub in ("done", "fail", "wait"):
+    for sub in ("done", "fail", "wait", "log"):
         assert sub in result.output
 
 
 def test_unknown_subcommand_fails(runner):
     result = runner.invoke(cli, ["nope"])
     assert result.exit_code != 0
+
+
+def test_log_subcommand_positional_message(runner, journal):
+    result = runner.invoke(cli, ["log", "hello"])
+    assert result.exit_code == 0, result.output
+    events = _read_events(journal)
+    assert len(events) == 1
+    assert events[0]["kind"] == "log"
+    assert events[0]["payload"] == {"message": "hello"}
+    assert events[0]["schema_version"] == 1
+
+
+def test_log_subcommand_missing_argument(runner, journal):
+    result = runner.invoke(cli, ["log"])
+    assert result.exit_code != 0
+    assert not journal.exists() or journal.read_text() == ""
+
+
+def test_log_subcommand_empty_string_arg(runner, journal):
+    result = runner.invoke(cli, ["log", ""])
+    assert result.exit_code != 0
+    assert not journal.exists() or journal.read_text() == ""

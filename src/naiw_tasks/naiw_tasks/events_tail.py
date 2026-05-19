@@ -19,7 +19,7 @@ from pathlib import Path
 
 from naiw_common.events import SCHEMA_VERSION, Event
 
-_VALID_KINDS: frozenset[str] = frozenset({"done", "fail", "wait"})
+_VALID_KINDS: frozenset[str] = frozenset({"done", "fail", "wait", "log"})
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,10 @@ def _validate_event(obj: dict, raw_line: str) -> Event | Malformed:
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason:
             return Malformed(raw_line=raw_line, reason=f"bad reason: {reason!r}")
+    elif kind == "log":
+        message = payload.get("message")
+        if not isinstance(message, str) or not message:
+            return Malformed(raw_line=raw_line, reason=f"bad message: {message!r}")
 
     return Event(ts=ts, kind=kind, payload=payload, schema_version=sv)
 

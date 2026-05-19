@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "naiw_tasks"
-version = "0.1.0"
+version = "1.0.0"
 description = "NAIW controller — start/attach/finish hardened per-task Docker sessions."
 requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }

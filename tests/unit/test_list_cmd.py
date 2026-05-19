@@ -1779,6 +1779,266 @@ def test_data08_marker_persists_until_size_returns_above_prior_max(
     assert data["terminal_log_max_size"] == 1600
 
 
+# ---------- hardening drift audit (SC-1) ------------------------------------
+
+
+def _hardened_container(
+    task_id: str,
+    state: str = "running",
+    data_root=None,
+    **host_config_overrides,
+):
+    """Build a container mock with full hardened HostConfig + Config attrs.
+
+    Mirrors the moby inspect response shape: Tmpfs is a dict, Memory is bytes,
+    NetworkMode is a string, Tty/OpenStdin live under top-level Config.
+    Pass `host_config_overrides` to mutate one field for drift tests.
+    """
+    if data_root is None:
+        storage_bind = f"/abs/tasks/{task_id}/storage:/home/pi:rw"
+    else:
+        # Match list_cmd path math exactly — controller uses cfg.host_root
+        # (== cfg.data_root in tests) without resolving symlinks.
+        storage_bind = (
+            f"{data_root / 'tasks' / task_id / 'storage'}"
+            f":/home/pi:rw"
+        )
+    host_config = {
+        "Privileged": False,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges"],
+        "ReadonlyRootfs": True,
+        "Tmpfs": {
+            "/tmp": "rw,size=512m,mode=1777",
+            "/run": "rw,size=64m,mode=755",
+        },
+        "PidsLimit": 512,
+        "Memory": 4 * 1024 * 1024 * 1024,
+        "MemorySwap": 4 * 1024 * 1024 * 1024,
+        "NanoCpus": 2_000_000_000,
+        "NetworkMode": "naiw-task-net",
+        "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+        "Init": True,
+        "Binds": [storage_bind],
+    }
+    host_config.update(host_config_overrides)
+    c = MagicMock()
+    c.labels = {"naiw.managed": "1", "naiw.task-id": task_id}
+    c.attrs = {
+        "State": {"Status": state},
+        "HostConfig": host_config,
+        "Config": {"Tty": True, "OpenStdin": True},
+    }
+    return c
+
+
+def test_drift_marker_appears(tmp_naiw_data, capsys):
+    """Running task whose container has a drifted PidsLimit surfaces (drift)
+    in NOTES alongside any existing markers."""
+    _make_task(tmp_naiw_data, "alpha-001", status="running")
+    # PidsLimit=0 (unlimited) is drift vs. expected 512.
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(drift)" in out
+
+
+def test_drift_warning_deduplicated(tmp_naiw_data, capsys, caplog):
+    """WARNING dedup per (task_id, field) within a single list invocation.
+
+    A single list call MUST emit exactly one WARNING line per drifted field
+    even if multiple fields drift on the same task, and each field-occurrence
+    should appear at most once.
+    """
+    import logging as _logging
+
+    _make_task(tmp_naiw_data, "alpha-001", status="running")
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    with caplog.at_level(_logging.WARNING, logger="naiw_tasks"):
+        _run_list(
+            _cfg(tmp_naiw_data), client,
+            limit=10, statuses=[], project_filter=None,
+            show_all=False, include_completed=False, as_json=False,
+            limit_was_explicit=False,
+        )
+
+    drift_records = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "drift" in r.getMessage().lower()
+        and "PidsLimit" in r.getMessage()
+    ]
+    assert len(drift_records) == 1, (
+        f"expected exactly one PidsLimit drift WARNING, got "
+        f"{[r.getMessage() for r in drift_records]}"
+    )
+
+
+def test_no_drift_marker_on_happy_path(tmp_naiw_data, capsys):
+    """Full hardened attrs → NOTES does NOT contain (drift)."""
+    _make_task(tmp_naiw_data, "alpha-001", status="running")
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data,
+    )
+    client = _mock_client([container])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(drift)" not in out
+
+
+def test_drift_marker_coexists_with_existing_markers(tmp_naiw_data, capsys):
+    """(drift) coexists with (log shrunk) on the same row. The drift gate is
+    `reconciled state == running` so we pair it with another marker that
+    fires under the same gate. Test does NOT couple to the joining character.
+    """
+    # Pre-seed terminal_log_max_size > current size → (log shrunk) marker
+    # fires alongside the drift marker on the same row.
+    task_dir = _make_task(
+        tmp_naiw_data, "alpha-001",
+        status="running", terminal_log_max_size=10_000,
+    )
+    (task_dir / "io" / "terminal.log").write_bytes(b"x" * 100)
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    # Both markers visible on the row (joining character is planner discretion).
+    assert "(drift)" in out
+    assert "(log shrunk)" in out
+
+
+def test_drift_not_audited_for_non_running_rows(tmp_naiw_data, capsys):
+    """Drift audit MUST only fire for reconciled state == running. A task
+    with status=interrupted (even if a container is present) must not
+    surface (drift)."""
+    _make_task(tmp_naiw_data, "alpha-001", status="interrupted")
+    # Container exists with drifted PidsLimit, but reconciled status is
+    # interrupted (interrupted is sticky — never auto-flips).
+    container = _hardened_container(
+        "alpha-001", state="exited", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=True, include_completed=True, as_json=False,
+        limit_was_explicit=False,
+    )
+    out = _capture(capsys)
+    assert "(drift)" not in out
+
+
+def test_drift_warning_message_includes_task_id_and_field(
+    tmp_naiw_data, capsys, caplog,
+):
+    """WARNING log line MUST include task_id and field so the operator can
+    grep controller.log to find drifted tasks."""
+    import logging as _logging
+
+    _make_task(tmp_naiw_data, "alpha-001", status="running")
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    with caplog.at_level(_logging.WARNING, logger="naiw_tasks"):
+        _run_list(
+            _cfg(tmp_naiw_data), client,
+            limit=10, statuses=[], project_filter=None,
+            show_all=False, include_completed=False, as_json=False,
+            limit_was_explicit=False,
+        )
+
+    drift_msgs = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == "WARNING" and "drift" in r.getMessage().lower()
+    ]
+    joined = " ".join(drift_msgs)
+    assert "alpha-001" in joined
+    assert "PidsLimit" in joined
+
+
+def test_drift_does_not_call_containers_get(tmp_naiw_data, capsys):
+    """Drift audit MUST reuse existing container.attrs — no second proxy
+    round-trip via containers.get()."""
+    _make_task(tmp_naiw_data, "alpha-001", status="running")
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    # containers.list was called once; containers.get must NOT be called by
+    # the drift path. (Other code paths may call .get() in their own context;
+    # we assert that the drift integration adds zero new .get() calls relative
+    # to the no-drift happy-path baseline.)
+    # The drifted scenario shares the same call count as the happy path:
+    happy = _mock_client([_hardened_container(
+        "happy-001", state="running", data_root=tmp_naiw_data,
+    )])
+    _make_task(tmp_naiw_data, "happy-001", status="running")
+    _run_list(
+        _cfg(tmp_naiw_data), happy,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    assert client.containers.get.call_count == happy.containers.get.call_count
+
+
+def test_drift_does_not_mutate_task_json(tmp_naiw_data, capsys):
+    """Drift is read-only per CONTEXT.md D-A2. task.json status MUST NOT flip
+    on a drifted-but-otherwise-healthy running row."""
+    task_dir = _make_task(tmp_naiw_data, "alpha-001", status="running")
+    container = _hardened_container(
+        "alpha-001", state="running", data_root=tmp_naiw_data, PidsLimit=0,
+    )
+    client = _mock_client([container])
+
+    _run_list(
+        _cfg(tmp_naiw_data), client,
+        limit=10, statuses=[], project_filter=None,
+        show_all=False, include_completed=False, as_json=False,
+        limit_was_explicit=False,
+    )
+    data = json.loads(
+        (task_dir / "meta" / "task.json").read_text(encoding="utf-8")
+    )
+    assert data["status"] == "running"
+
+
 # ---------- module hygiene --------------------------------------------------
 
 
