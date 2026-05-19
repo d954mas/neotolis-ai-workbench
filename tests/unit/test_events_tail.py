@@ -19,7 +19,12 @@ from naiw_tasks.events_tail import Malformed, tail_events
 
 def _valid_event_bytes(kind: str = "done", ts: str = "2026-05-16T10:00:00.000Z") -> bytes:
     """Build one newline-terminated event line that the reader will accept."""
-    payload = {"reason": "x"} if kind in ("fail", "wait") else {}
+    if kind in ("fail", "wait"):
+        payload: dict = {"reason": "x"}
+    elif kind == "log":
+        payload = {"message": "x"}
+    else:
+        payload = {}
     obj = {"ts": ts, "kind": kind, "payload": payload, "schema_version": 1}
     return (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
 
@@ -378,3 +383,63 @@ def test_events_tail_returns_malformed_dataclass():
     m = Malformed(raw_line="x", reason="y")
     assert m.raw_line == "x"
     assert m.reason == "y"
+
+
+# ---------- log kind acceptance (regression guard for the runtime whitelist) -
+
+
+def test_log_kind_accepted(tmp_path: Path):
+    """The runtime whitelist MUST accept 'log' — otherwise every Pi-emitted log
+    event would be classified malformed and silently routed to events-error.log.
+    """
+    events_path = tmp_path / "events.jsonl"
+    line = (
+        b'{"ts":"2026-05-19T10:00:00.000Z","kind":"log",'
+        b'"payload":{"message":"hello"},"schema_version":1}\n'
+    )
+    events_path.write_bytes(line)
+
+    new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert new_offset == len(line)
+    assert len(events) == 1
+    assert events[0].kind == "log"
+    assert events[0].payload == {"message": "hello"}
+    assert malformed == []
+
+
+def test_log_kind_missing_message_classified_malformed(tmp_path: Path):
+    events_path = tmp_path / "events.jsonl"
+    bad = (
+        b'{"ts":"2026-05-19T10:00:00.000Z","kind":"log",'
+        b'"payload":{},"schema_version":1}\n'
+    )
+    events_path.write_bytes(bad)
+
+    new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert new_offset == len(bad)
+    assert events == []
+    assert len(malformed) == 1
+    assert "message" in malformed[0].reason
+
+
+def test_log_kind_does_not_routed_to_events_error(tmp_path: Path):
+    """Regression guard: a well-formed log event MUST NOT be classified
+    malformed. Without the runtime-whitelist expansion, this test fails — the
+    line would be routed to events-error.log on the controller side.
+    """
+    events_path = tmp_path / "events.jsonl"
+    line = (
+        b'{"ts":"2026-05-19T10:00:00.000Z","kind":"log",'
+        b'"payload":{"message":"streamed status update"},"schema_version":1}\n'
+    )
+    events_path.write_bytes(line)
+
+    _new_offset, events, malformed = tail_events(events_path, offset=0)
+
+    assert malformed == [], (
+        "log events must NOT be routed to events-error.log; "
+        "the events_tail runtime whitelist must include 'log'"
+    )
+    assert len(events) == 1 and events[0].kind == "log"
