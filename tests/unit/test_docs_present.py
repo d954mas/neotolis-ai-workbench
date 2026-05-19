@@ -1,19 +1,17 @@
 """File-presence + JSON-ruleset smoke for Phase 6 docs.
 
-These tests assert that the four canonical Phase 6 documentation files
-exist at the expected paths, that ``SECURITY.md`` has at least seven
-top-level sections (the "Looks Done But Isn't" checklist), and that the
-embedded GitHub Ruleset JSON in ``docs/github-bot.md`` parses cleanly
-and carries the load-bearing ``file_path_restriction`` rule.
-
-``CHANGELOG.md`` is created by a later plan in the same phase; its
-presence test is xfail-strict-False so this file can land first.
+These tests assert that the canonical Phase 6 documentation files exist
+at the expected paths, that ``SECURITY.md`` has at least seven top-level
+sections (the "Looks Done But Isn't" checklist), that the embedded
+GitHub Ruleset JSON in ``docs/github-bot.md`` parses cleanly and
+carries the load-bearing ``file_path_restriction`` rule, and that the
+repo-root ``CHANGELOG.md`` ships the ``## [1.0.0]`` milestone entry
+with the required Keep-a-Changelog ``### Added`` and ``### Security``
+sections.
 """
 import json
 import re
 from pathlib import Path
-
-import pytest
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 
@@ -81,8 +79,17 @@ def test_github_bot_doc_has_valid_json_ruleset() -> None:
     )
 
 
-@pytest.mark.xfail(strict=False, reason="CHANGELOG.md created by a later plan")
-def test_changelog_v1_0_0_pending() -> None:
+def test_changelog_v1_0_0_present() -> None:
     path = _REPO / "CHANGELOG.md"
     assert path.is_file()
     assert "## [1.0.0]" in path.read_text(encoding="utf-8")
+
+
+def test_changelog_v1_0_0_has_security_section() -> None:
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "### Security" in text
+
+
+def test_changelog_v1_0_0_has_added_section() -> None:
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "### Added" in text
