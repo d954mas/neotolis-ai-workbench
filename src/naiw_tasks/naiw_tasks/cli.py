@@ -14,13 +14,18 @@ Exit codes
 """
 
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 
 import click
+import docker.errors
+from naiw_common.events import SCHEMA_VERSION as SIGNAL_SCHEMA
 
 from naiw_tasks import attach as attach_mod
 from naiw_tasks import clean as clean_mod
 from naiw_tasks import config, lifecycle, startup_checks
 from naiw_tasks import disk as disk_mod
+from naiw_tasks import doctor as doctor_mod
 from naiw_tasks import list_cmd as list_cmd_module
 from naiw_tasks import output_cmd as output_cmd_module
 from naiw_tasks.docker_client import make_client
@@ -31,6 +36,54 @@ from naiw_tasks.ids import (
 )
 
 
+def _resolve_controller_version() -> str:
+    try:
+        return pkg_version("naiw_tasks")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
+# Custom eager-option callback (rather than the stock Click helper) because
+# that helper cannot interleave a try/except around make_client + images.get
+# for the Docker-unreachable fallback path ("<unresolved>" on line 2). The
+# operator must be able to run `naiw-tasks --version` on a fresh host
+# before the proxy is up; that contract requires our own callback.
+def _version_callback(
+    ctx: click.Context, param: click.Parameter, value: bool
+) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    try:
+        cfg = config.load()
+    except ValueError:
+        # config.yaml broken — still print version; line 2 falls back.
+        class _Stub:
+            task_image = "<unloaded>"
+            docker_proxy_url = ""
+
+        cfg = _Stub()  # type: ignore[assignment]
+    digest_prefix = "<unresolved>"
+    try:
+        client = make_client(cfg.docker_proxy_url)
+        image_id = client.images.get(cfg.task_image).id
+        # docker-py 7.1 returns the full "sha256:<64hex>" id form.
+        digest_hex = image_id.split(":", 1)[-1]
+        digest_prefix = digest_hex[:12]
+    except docker.errors.DockerException:
+        pass
+    except Exception:
+        # Defensive — --version must never crash with a traceback.
+        pass
+    controller_ver = _resolve_controller_version()
+    # task.json schema_version is 1 (locked at controller v1 schema).
+    click.echo(
+        f"naiw-tasks {controller_ver} (schema_version=1)\n"
+        f"naiw-task-image: {digest_prefix}  (configured: {cfg.task_image})\n"
+        f"naiw-signal schema v{SIGNAL_SCHEMA}"
+    )
+    ctx.exit()
+
+
 @click.group(
     help=(
         "naiw-tasks - controller for hardened per-task Docker sessions.\n\n"
@@ -38,6 +91,14 @@ from naiw_tasks.ids import (
         "config.yaml parse/schema error, or click usage error; "
         "3=invalid task id or project alias."
     )
+)
+@click.option(
+    "--version",
+    is_flag=True,
+    callback=_version_callback,
+    expose_value=False,
+    is_eager=True,
+    help="Show controller / task-image / signal versions and exit.",
 )
 @click.pass_context
 def cli(ctx: click.Context) -> None:
@@ -158,11 +219,22 @@ def attach_cmd(ctx: click.Context, task_id: str) -> None:
 
 
 @cli.command()
+@click.argument("task_id", required=False)
 @click.pass_context
-def doctor(ctx: click.Context) -> None:
-    """Verify config, proxy reachability, and proxy allowlist."""
-    _client_for(ctx)
-    click.echo("naiw-tasks: doctor OK")
+def doctor(ctx: click.Context, task_id: str | None) -> None:
+    """Run consolidated health-check (startup_checks + disk + drift).
+
+    No argument: audit everything. With TASK_ID: drift diff for that task only.
+    Exit codes: 0 clean, 1 drift or disk warning, 2 startup check failed,
+    3 invalid/unknown task id.
+    """
+    client = _client_for(ctx)
+    cfg = ctx.obj["cfg"]
+    if task_id is None:
+        rc = doctor_mod.run_global(cfg, client)
+    else:
+        rc = doctor_mod.run_per_task(cfg, client, task_id)
+    sys.exit(rc)
 
 
 _LIST_STATUSES: tuple[str, ...] = (

@@ -128,7 +128,10 @@ doctor_out="$(docker compose "${COMPOSE_ARGS[@]}" run --rm \
     -e "NAIW_DATA=/naiw-data" \
     -v "$tmp_data:/naiw-data" \
     naiw-controller doctor 2>&1)"
-if [[ "$doctor_out" != *"doctor OK"* ]]; then
+# doctor now prints sectioned output: `[startup_checks]\n  OK\n[disk]\n...`.
+# The startup_checks line proves the proxy / controller / data_root chain is
+# wired correctly — the same fact the old `doctor OK` placeholder asserted.
+if [[ "$doctor_out" != *"[startup_checks]"* ]] || [[ "$doctor_out" != *"OK"* ]]; then
     echo "[${LIB_LOG_PREFIX}]     FAIL: doctor output unexpected" >&2
     echo "[${LIB_LOG_PREFIX}]     got: $doctor_out" >&2
     exit 1
