@@ -467,7 +467,7 @@ docker stop --time 10 "$container" >/dev/null
 
 # Host-side recovery banner write (matches lifecycle._append_recovery_banner).
 {
-    printf '\n===== RECOVERED #1 AT %sZ =====\n' \
+    printf '\n===== RECOVERY ATTEMPT #1 AT %sZ =====\n' \
         "$(date -u '+%Y-%m-%dT%H:%M:%S.000')"
 } >> "${log_path}"
 
@@ -514,7 +514,7 @@ if grep -q 'ghp_TESTTOKEN' "${log_path}"; then
     step_fail "REC-IMG-06" "raw token ghp_TESTTOKEN leaked into terminal.log post-recover"
     fail "REC-IMG-06 raw token leaked"
 fi
-if ! grep -q 'RECOVERED #1' "${log_path}"; then
+if ! grep -q 'RECOVERY ATTEMPT #1' "${log_path}"; then
     step_fail "REC-IMG-06" "recovery banner missing from terminal.log"
     fail "REC-IMG-06 banner missing"
 fi

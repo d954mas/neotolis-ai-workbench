@@ -156,7 +156,7 @@ def test_recovery_banner_appended_with_canonical_shape(tmp_path):
     assert log.startswith(b"prior content\n"), "prior content was clobbered"
     text = log.decode("utf-8")
     assert re.search(
-        r"\n===== RECOVERED #1 AT "
+        r"\n===== RECOVERY ATTEMPT #1 AT "
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z =====\n$",
         text,
     ), f"banner shape wrong: {text!r}"

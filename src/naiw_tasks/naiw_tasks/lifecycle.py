@@ -654,8 +654,14 @@ def _append_recovery_banner(
             exc,
         )
         return
+    # "RECOVERY ATTEMPT", not "RECOVERED": banner lands before the new
+    # container starts. On a containers.run failure, status stays
+    # interrupted but the banner is already in terminal.log — past tense
+    # would lie. The new container's tmux output following the banner is
+    # the operator's signal that the attempt succeeded.
     banner = (
-        f"\n===== RECOVERED #{recovery_count} AT {Event.now_iso()} =====\n"
+        f"\n===== RECOVERY ATTEMPT #{recovery_count} "
+        f"AT {Event.now_iso()} =====\n"
     )
     if git_state:
         banner += (
