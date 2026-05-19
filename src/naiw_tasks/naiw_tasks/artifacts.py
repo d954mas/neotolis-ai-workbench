@@ -14,6 +14,7 @@ import os
 import shutil
 import stat
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -60,9 +61,17 @@ def replicate_output_tree(src_root: Path, dst_root: Path) -> None:
                     src, st.st_mode,
                 )
                 continue
+            # follow_symlinks=False: Python's os.link defaults to True and
+            # calls linkat(AT_SYMLINK_FOLLOW), so a Pi swap of src to a
+            # symlink between lstat and link would hardlink the symlink's
+            # target (e.g. /etc/shadow). With False, the link goes to the
+            # symlink inode itself — still wrong for an artifact bundle,
+            # so re-check dst with lstat and fall through to copy if it
+            # came out as a symlink.
+            linked = False
             try:
-                os.link(str(src), str(dst))
-                continue
+                os.link(str(src), str(dst), follow_symlinks=False)
+                linked = True
             except OSError as exc:
                 if exc.errno not in (
                     errno.EXDEV, errno.EPERM, errno.EMLINK,
@@ -73,6 +82,18 @@ def replicate_output_tree(src_root: Path, dst_root: Path) -> None:
                         src, exc,
                     )
                     continue
+            if linked:
+                try:
+                    dst_st = dst.lstat()
+                except OSError:
+                    continue
+                if not stat.S_ISLNK(dst_st.st_mode):
+                    continue
+                # Pi raced; rip the symlink out of the bundle and copy
+                # via the O_NOFOLLOW path below, which will refuse the
+                # swap with ELOOP and leave dst absent.
+                with suppress(OSError):
+                    dst.unlink()
             # O_NOFOLLOW fd defends against a TOCTOU swap (Pi replacing
             # the regular file with a symlink between lstat and open) —
             # raises ELOOP instead of resolving to the symlink target.

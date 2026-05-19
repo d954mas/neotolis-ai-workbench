@@ -249,6 +249,42 @@ def test_capture_refuses_pi_planted_symlink(tmp_path, caplog):
     ), [r.getMessage() for r in caplog.records]
 
 
+def test_hardlink_refuses_symlink_swap_after_lstat(tmp_path, monkeypatch):
+    """TOCTOU window: src passes lstat as a regular file, then Pi races to
+    replace it with a symlink before os.link runs. With follow_symlinks=True
+    (Python default), linkat(AT_SYMLINK_FOLLOW) would hardlink the symlink's
+    target — exfiltrating any host-readable file Pi can point at. Contract:
+    the swap must either be refused outright or the bundle must NOT contain
+    a hardlink/copy of the target's bytes.
+    """
+    td = _make_task_dir(tmp_path)
+    outside = tmp_path / "host-secret.txt"
+    outside.write_bytes(b"do not exfiltrate\n")
+    src = td / "io" / "output" / "a.txt"
+    # Simulate the race by patching os.link to perform the swap right
+    # before delegating to the real implementation.
+    from naiw_tasks import artifacts as artifacts_mod
+    real_link = os.link
+
+    def racing_link(src_path, dst_path, *, follow_symlinks=True):
+        # Mid-call: Pi unlinks the regular file and drops a symlink.
+        if str(src_path) == str(src):
+            os.unlink(src_path)
+            os.symlink(str(outside), src_path)
+        return real_link(
+            src_path, dst_path, follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(artifacts_mod.os, "link", racing_link)
+    _capture_artifacts(td, {"kind": "generic"}, None)
+    dst = td / "meta" / "artifacts" / "output" / "a.txt"
+    if dst.exists() and not dst.is_symlink():
+        # Hardlink survived — must NOT be tied to outside's inode.
+        assert dst.read_bytes() != b"do not exfiltrate\n", (
+            "TOCTOU: hardlink followed symlink and exfiltrated host file"
+        )
+
+
 def test_output_capture_uses_hardlink_when_same_filesystem(tmp_path):
     td = _make_task_dir(tmp_path)
     _capture_artifacts(td, {"kind": "generic"}, None)
@@ -261,7 +297,7 @@ def test_output_capture_uses_hardlink_when_same_filesystem(tmp_path):
 def test_output_capture_falls_back_to_copy_on_exdev(tmp_path, monkeypatch):
     td = _make_task_dir(tmp_path)
 
-    def fail_link(src, dst):  # noqa: ARG001
+    def fail_link(src, dst, *, follow_symlinks=True):  # noqa: ARG001
         raise OSError(errno.EXDEV, "Invalid cross-device link")
 
     # Patch os.link as seen by the artifacts module (capture_bundle lives
