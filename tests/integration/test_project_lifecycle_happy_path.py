@@ -18,31 +18,6 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-def _seed_project(data_root: Path, alias: str = "demo") -> str:
-    """Seed a tiny git repo under workspace/repos/<alias>/ with one commit.
-
-    Also writes projects.yaml so the controller's projects.load() resolves
-    the alias to the on-disk path.
-    """
-    repo = data_root / "workspace" / "repos" / alias
-    repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-    (repo / "README.md").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "seed"],
-        cwd=repo, check=True, capture_output=True,
-    )
-    py = data_root / "projects.yaml"
-    py.write_text(
-        f"projects:\n  {alias}:\n    path: workspace/repos/{alias}\n",
-        encoding="utf-8",
-    )
-    return alias
-
-
 def _read_task_json(task_dir: Path) -> dict:
     return json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
 
@@ -56,10 +31,10 @@ def _find_task_dir(data_root: Path, alias: str) -> Path:
     return candidates[0]
 
 
-def test_project_lifecycle_happy_path(compose_stack, run_naiw_tasks):
+def test_project_lifecycle_happy_path(compose_stack, run_naiw_tasks, seed_project):
     data_root = compose_stack["data_root"]
     env = compose_stack["env"]
-    alias = _seed_project(data_root)
+    alias = seed_project("demo")
 
     result = run_naiw_tasks("start", alias)
     assert result.returncode == 0, f"start failed: stderr={result.stderr!r}"

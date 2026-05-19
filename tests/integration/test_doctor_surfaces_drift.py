@@ -28,32 +28,14 @@ pytestmark = pytest.mark.integration
 EXPECTED_NOTES_MARKER = "(drift)"
 
 
-def _seed_project(data_root: Path, alias: str = "drift") -> str:
-    repo = data_root / "workspace" / "repos" / alias
-    repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-    (repo / "README.md").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "seed"], cwd=repo, check=True, capture_output=True,
-    )
-    (data_root / "projects.yaml").write_text(
-        f"projects:\n  {alias}:\n    path: workspace/repos/{alias}\n",
-        encoding="utf-8",
-    )
-    return alias
-
-
 def _read_task_json(task_dir: Path) -> dict:
     return json.loads((task_dir / "meta" / "task.json").read_text(encoding="utf-8"))
 
 
-def test_doctor_surfaces_drift(compose_stack, run_naiw_tasks):
+def test_doctor_surfaces_drift(compose_stack, run_naiw_tasks, seed_project):
     data_root = compose_stack["data_root"]
     env = compose_stack["env"]
-    alias = _seed_project(data_root)
+    alias = seed_project("drift")
 
     result = run_naiw_tasks("start", alias)
     assert result.returncode == 0, f"start failed: stderr={result.stderr!r}"

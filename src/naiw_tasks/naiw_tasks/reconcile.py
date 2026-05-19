@@ -72,6 +72,31 @@ def select_latest_transition_kind(events) -> str | None:
     return None
 
 
+def latest_fail_reason(events) -> str | None:
+    """Return the `reason` of the latest transition-causing event if it is a fail.
+
+    Sibling of ``select_latest_transition_kind``: scans newest-to-oldest,
+    skips status-neutral kinds (`log`), and reports the reason ONLY when
+    the most-recent transition-causing event is a fail. If the most recent
+    transition is `done` or `wait`, returns None — the operator's latest
+    intent was not failure, so no reason applies.
+
+    list_cmd propagates this through teardown_and_mark into
+    ``task.json.failure_reason`` so the row is operator-debuggable without
+    grepping events.jsonl.
+    """
+    for ev in reversed(events):
+        kind = getattr(ev, "kind", None)
+        if kind not in TRANSITION_KINDS:
+            continue
+        if kind != "fail":
+            return None
+        payload = getattr(ev, "payload", None)
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        return reason if isinstance(reason, str) and reason else None
+    return None
+
+
 @dataclass(frozen=True)
 class ComputedRow:
     """One row in the rendered `naiw-tasks list` table.

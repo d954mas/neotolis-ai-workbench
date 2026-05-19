@@ -103,27 +103,6 @@ def _terminal_log_size(io_dir: Path) -> int:
         return 0
 
 
-def _latest_fail_reason(events: list) -> str | None:
-    """Return the latest `fail` event's payload.reason, or None.
-
-    Scans from the end and stops at the first transition-causing kind. If
-    that kind is `fail`, returns its reason; if it is `done`/`wait`, the
-    operator's most recent intent was not failure, so no reason. Status-
-    neutral kinds (currently `log`) are transparent — they never mask a
-    prior fail's reason from this lookup.
-    """
-    for ev in reversed(events):
-        kind = getattr(ev, "kind", None)
-        if kind not in reconcile.TRANSITION_KINDS:
-            continue
-        if kind != "fail":
-            return None
-        payload = ev.payload
-        reason = payload.get("reason") if isinstance(payload, dict) else None
-        return reason if isinstance(reason, str) and reason else None
-    return None
-
-
 def _auto_finish_can_run(task_dict: dict) -> bool:
     status = task_dict.get("status")
     if status not in _TERMINAL_STATUSES:
@@ -252,7 +231,7 @@ def _reconcile_one(
     # auto_finish=false tasks lose the diagnostic the moment offset advances
     # past the fail event.
     fail_reason = (
-        _latest_fail_reason(valid_events)
+        reconcile.latest_fail_reason(valid_events)
         if latest_event_kind == "fail"
         else None
     )

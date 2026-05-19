@@ -180,3 +180,52 @@ def run_naiw_tasks(compose_stack):
         )
 
     return _run
+
+
+@pytest.fixture
+def seed_project(compose_stack):
+    """Factory fixture: seed a tiny single-commit git repo + projects.yaml entry.
+
+    Returns a callable ``seed(alias)`` that:
+      - creates ``workspace/repos/<alias>/`` with one ``README.md`` commit;
+      - writes (or rewrites) ``projects.yaml`` so the controller's project
+        resolver finds the alias.
+
+    Centralising the seed shape here keeps the 5+ live-Docker scenarios
+    talking to the same baseline state — a future change to the project
+    bootstrap (e.g. a default branch rename) lands in one place rather
+    than 5+ copies that silently drift apart.
+    """
+    data_root = compose_stack["data_root"]
+
+    def _seed(alias: str) -> str:
+        repo = data_root / "workspace" / "repos" / alias
+        repo.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=repo, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=repo, check=True,
+        )
+        (repo / "README.md").write_text("seed\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "."],
+            cwd=repo, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "seed"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        (data_root / "projects.yaml").write_text(
+            f"projects:\n  {alias}:\n    path: workspace/repos/{alias}\n",
+            encoding="utf-8",
+        )
+        return alias
+
+    return _seed

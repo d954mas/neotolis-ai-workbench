@@ -11,6 +11,7 @@ hardening floor (e.g. bumps pids_limit), every still-running task created
 before the bump surfaces as `(drift)` on the next `naiw-tasks list`.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,10 +102,12 @@ def expected_storage_bind(cfg, task_id: str) -> str:
     Windows shell (development/local-test), the recorded ``HostConfig.Binds``
     entry uses ``/`` because the daemon is the canonical writer. Normalising
     via ``str(...).replace(os.sep, "/")`` plus a string ``f"..."`` (NOT
-    ``pathlib`` arithmetic) keeps the result POSIX on every host.
+    ``pathlib`` arithmetic) keeps the result POSIX on every host. The
+    trailing ``.rstrip("/")`` defends against a config that records the
+    host root with a trailing separator — without it, the bind would carry
+    a double slash and exact-string drift comparison would false-positive.
     """
-    import os
-    host_root = str(cfg.host_root).replace(os.sep, "/")
+    host_root = str(cfg.host_root).replace(os.sep, "/").rstrip("/")
     return f"{host_root}/tasks/{task_id}/storage:/home/pi:rw"
 
 

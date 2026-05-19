@@ -440,6 +440,24 @@ def test_expected_storage_bind_shape_is_src_dst_mode():
     assert mode == "rw"
 
 
+def test_expected_storage_bind_strips_trailing_slash():
+    """Defends against a config recording host_root with trailing /.
+
+    Without rstrip, the bind would be `/home/op/naiw-data//tasks/X/...`
+    and exact-string drift comparison would false-positive on every task
+    (Docker normalises double-slashes silently in the bind it records).
+    """
+    cfg = _CfgWithHostRoot(
+        data_root=Path("/home/op/naiw-data/"),
+        data_root_host=Path("/home/op/naiw-data/"),
+    )
+    bind = drift.expected_storage_bind(cfg, "demo-001")
+    assert "//" not in bind.split(":/home/pi", 1)[0], (
+        f"double slash leaked through: {bind!r}"
+    )
+    assert bind == "/home/op/naiw-data/tasks/demo-001/storage:/home/pi:rw"
+
+
 def test_expected_storage_bind_is_signature_caller_uses():
     """The helper is what list_cmd AND doctor MUST call.
 

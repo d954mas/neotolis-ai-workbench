@@ -296,6 +296,108 @@ def test_transition_kinds_constant_excludes_log():
     assert TRANSITION_KINDS == frozenset({"done", "fail", "wait"})
 
 
+# ---------- latest_fail_reason ----------------------------------------------
+#
+# Symmetric to select_latest_transition_kind: a log event landing after a
+# fail must not mask the fail's reason. These tests lock the contract that
+# the helper scans newest-to-oldest, skips log, and returns the reason
+# ONLY when the most-recent transition kind is fail.
+
+
+class _EvWithPayload:
+    """Stand-in for Event when we need both .kind and .payload."""
+
+    def __init__(self, kind: str, payload: object = None) -> None:
+        self.kind = kind
+        self.payload = payload
+
+
+def test_latest_fail_reason_empty_returns_none():
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason([]) is None
+
+
+def test_latest_fail_reason_only_log_returns_none():
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [_EvWithPayload("log", {"message": "x"})]
+    ) is None
+
+
+def test_latest_fail_reason_fail_then_log_returns_fail_reason():
+    """The exact bug scenario the symmetric fix closes: a log event after
+    a fail used to mask the reason because the old helper read events[-1]
+    blindly.
+    """
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [
+            _EvWithPayload("fail", {"reason": "oom"}),
+            _EvWithPayload("log", {"message": "bye"}),
+        ]
+    ) == "oom"
+
+
+def test_latest_fail_reason_done_then_log_returns_none():
+    """Most recent transition is done, not fail — no reason applies."""
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [
+            _EvWithPayload("done", {"summary": "ok"}),
+            _EvWithPayload("log", {"message": "wrap"}),
+        ]
+    ) is None
+
+
+def test_latest_fail_reason_done_then_fail_returns_fail_reason():
+    """Latest transition wins: operator changed mind from done to fail."""
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [
+            _EvWithPayload("done", {"summary": "ok"}),
+            _EvWithPayload("fail", {"reason": "regret"}),
+        ]
+    ) == "regret"
+
+
+def test_latest_fail_reason_fail_then_done_returns_none():
+    """Latest transition is done — the prior fail is superseded."""
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [
+            _EvWithPayload("fail", {"reason": "first try"}),
+            _EvWithPayload("done", {"summary": "recovered"}),
+        ]
+    ) is None
+
+
+def test_latest_fail_reason_skips_log_interleaved():
+    """log events scattered through the batch are transparent."""
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [
+            _EvWithPayload("log", {"message": "starting"}),
+            _EvWithPayload("fail", {"reason": "kaput"}),
+            _EvWithPayload("log", {"message": "ending"}),
+        ]
+    ) == "kaput"
+
+
+def test_latest_fail_reason_missing_payload_returns_none():
+    """Defensive: events_tail validates fail.payload.reason, but the helper
+    must not crash on a malformed in-memory event either."""
+    from naiw_tasks.reconcile import latest_fail_reason
+    assert latest_fail_reason(
+        [_EvWithPayload("fail", payload=None)]
+    ) is None
+    assert latest_fail_reason(
+        [_EvWithPayload("fail", payload={"reason": ""})]
+    ) is None
+    assert latest_fail_reason(
+        [_EvWithPayload("fail", payload={"other": "x"})]
+    ) is None
+
+
 # ---------- module hygiene ---------------------------------------------------
 
 
