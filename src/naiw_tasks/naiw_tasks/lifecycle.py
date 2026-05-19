@@ -748,10 +748,29 @@ def recover(cfg: Config, client, task_id: str) -> None:
     # host-side banner append below does not fail on operator uid != 1000.
     # Best-effort: only owner can chmod, so if the operator doesn't own it
     # this no-ops and _append_recovery_banner falls back to its WARN path.
+    #
+    # O_NOFOLLOW + fchmod (not Path.chmod) so a hostile Pi swapping
+    # terminal.log for a symlink to /etc/shadow cannot let the chmod
+    # retarget the symlink's destination. Linux has no lchmod, so
+    # os.chmod(..., follow_symlinks=False) raises NotImplementedError and
+    # would defeat the legacy widen entirely. Open with O_NOFOLLOW (returns
+    # ELOOP on a symlink final component) then fchmod the resulting fd.
+    # Defense in depth — io/ is sticky-1777 and Pi cannot unlink files it
+    # does not own, so the swap is also blocked one layer up.
     terminal_log = task_dir / "io" / "terminal.log"
-    if terminal_log.exists():
-        with suppress(OSError):
-            terminal_log.chmod(0o666)
+    try:
+        fd = os.open(str(terminal_log), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        # ENOENT: nothing to widen. ELOOP: refused symlink (correct).
+        # EACCES: not our file. Either way, banner write below will WARN
+        # and degrade gracefully if it can't append.
+        pass
+    else:
+        try:
+            with suppress(OSError):
+                os.fchmod(fd, 0o666)
+        finally:
+            os.close(fd)
 
     # Banner lands BEFORE container start so it appears even if start fails.
     _append_recovery_banner(

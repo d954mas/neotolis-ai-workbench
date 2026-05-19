@@ -327,6 +327,32 @@ def test_recover_does_not_truncate_terminal_log(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_recover_legacy_widen_refuses_to_follow_symlink(tmp_path):
+    """If terminal.log is a symlink pointing outside io/ (e.g. a hostile Pi
+    swapped it), the legacy-compat mode-widen MUST NOT follow into the
+    target. The widen is host-side `os.fchmod` on an O_NOFOLLOW-opened fd,
+    which raises ELOOP on a symlink final component and skips.
+    """
+    cfg, td = _seed_interrupted_task(tmp_path)
+    # External file the symlink will point at — must keep its strict mode.
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"untouchable")
+    outside.chmod(0o400)
+    log = td / "io" / "terminal.log"
+    log.unlink()
+    log.symlink_to(outside)
+    client, _ = _fake_client()
+    # recover may succeed or fail; the contract here is that `outside` is
+    # left at 0o400 regardless of what recover does internally.
+    with contextlib.suppress(Exception):
+        lifecycle.recover(cfg, client, "t-001")
+    mode = outside.stat().st_mode & 0o777
+    assert mode == 0o400, (
+        f"legacy widen followed symlink and chmod'd target; "
+        f"expected 0o400, got {oct(mode)}"
+    )
+
+
 def test_recover_creates_missing_storage_for_legacy_task(tmp_path):
     cfg, td = _seed_interrupted_task(tmp_path, with_storage=False)
     assert not (td / "storage").exists(), "precondition: no storage/"
