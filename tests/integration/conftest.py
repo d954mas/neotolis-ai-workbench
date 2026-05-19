@@ -54,10 +54,10 @@ def pytest_runtest_setup(item):
 def _wait_for_proxy(env: dict[str, str], timeout_s: int = 60) -> None:
     """Poll `docker compose exec naiw-docker-proxy true` until success.
 
-    Compose deliberately omits a healthcheck (Phase 1 01-07). The `exec -T
-    true` probe returns 0 once the proxy container is up and the proxy
-    process is accepting Unix-socket connections — a stricter contract
-    than a plain TCP probe because it traverses the private network.
+    Compose deliberately omits a healthcheck. The `exec -T true` probe
+    returns 0 once the proxy container is up and the proxy process is
+    accepting Unix-socket connections — a stricter contract than a plain
+    TCP probe because it traverses the private network.
     """
     deadline = time.monotonic() + timeout_s
     last_err = ""
