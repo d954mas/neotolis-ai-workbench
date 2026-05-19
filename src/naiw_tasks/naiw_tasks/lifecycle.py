@@ -772,11 +772,12 @@ def recover(cfg: Config, client, task_id: str) -> None:
         finally:
             os.close(fd)
 
-    # Banner lands BEFORE container start so it appears even if start fails.
-    _append_recovery_banner(
-        task_dir / "io", banner_count, git_state
-    )
-
+    # Stop+remove the old container BEFORE writing the banner so any
+    # late tmux pipe-pane writes from the dying container land BEFORE
+    # the banner — the banner is then the visual seam between the
+    # interrupted session and the recovered one. Reordering matters
+    # only for the readability of terminal.log; both orders preserve
+    # the append-only invariant.
     if old is not None:
         with suppress(docker.errors.NotFound, docker.errors.APIError):
             old.stop(timeout=10)
@@ -794,6 +795,11 @@ def recover(cfg: Config, client, task_id: str) -> None:
                 "(may surface as 409 on new container start)",
                 container_name, exc,
             )
+
+    # Banner lands BEFORE container start so it appears even if start fails.
+    _append_recovery_banner(
+        task_dir / "io", banner_count, git_state
+    )
 
     # Legacy task compat: storage/ was added later as the /home/pi bind
     # source; tasks created before that have no storage/ on disk.
