@@ -5,6 +5,16 @@ validates task id shape at the function boundary so direct callers cannot
 bypass the regex check.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import os
 import re
 from pathlib import Path

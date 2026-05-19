@@ -1,5 +1,15 @@
 """Tests for lifecycle.recover and recover-race serialization."""
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import contextlib
 import json
 import re

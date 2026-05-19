@@ -1,5 +1,15 @@
 """Tests for clean.py (`naiw-tasks clean` subcommand + orphan prune)."""
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import datetime as dt
 import json
 import shutil

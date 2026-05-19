@@ -1,11 +1,20 @@
 """Tests for naiw_tasks.store — flock + atomic os.replace task.json read/write."""
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import json
 import multiprocessing
 import os
 from pathlib import Path
 
-import pytest
 from naiw_tasks.model import FinishPolicy, Status, Task, TaskKind
 from naiw_tasks.store import (
     UnsupportedSchemaError,

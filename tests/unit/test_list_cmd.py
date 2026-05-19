@@ -15,13 +15,22 @@ list-only auto_finish pending rows, reap teardown, and DATA-08 monotonic-growth
 lstat + shrink marker behaviour.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import json
 import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import docker.errors
-import pytest
 from naiw_tasks.config import Config
 
 from naiw_tasks import list_cmd, store

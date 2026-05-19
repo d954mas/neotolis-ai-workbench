@@ -5,6 +5,16 @@ Patches `naiw_tasks.cli.config.load`, `naiw_tasks.cli.make_client`,
 so the CliRunner exercises wiring only — no real filesystem, no real Docker.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 from pathlib import Path
 from unittest.mock import MagicMock
 

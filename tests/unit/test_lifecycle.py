@@ -4,6 +4,16 @@ Mocks the docker client and uses mock_subprocess_run from conftest for git;
 the real filesystem under tmp_naiw_data exercises store/ids/path_validation.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import json
 import multiprocessing
 import os

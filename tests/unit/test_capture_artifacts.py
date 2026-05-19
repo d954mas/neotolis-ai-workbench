@@ -9,6 +9,16 @@ Six tests cover the contract:
 - Capture failures (e.g., bad base_commit) log WARN and do NOT raise.
 """
 
+import sys
+
+import pytest
+
+if sys.platform != "linux":
+    pytest.skip(
+        "Linux-only (fcntl / O_NOFOLLOW)",
+        allow_module_level=True,
+    )
+
 import errno
 import logging
 import os
