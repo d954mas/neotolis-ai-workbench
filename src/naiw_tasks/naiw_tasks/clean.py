@@ -9,7 +9,6 @@ Invariants:
 
 import datetime as dt
 import logging
-import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from pathlib import Path
 import click
 import docker.errors
 
+from naiw_tasks import disk as disk_mod
 from naiw_tasks import git_ops, store
 from naiw_tasks.config import Config
 from naiw_tasks.format import humanize_iec_bytes
@@ -80,15 +80,18 @@ def _humanize_age(age: dt.timedelta) -> str:
 
 
 def _dir_size_bytes(p: Path) -> int:
-    total = 0
-    for root, _dirs, files in os.walk(p, followlinks=False):
-        for f in files:
-            fp = Path(root) / f
-            try:
-                total += fp.lstat().st_size
-            except OSError:
-                continue
-    return total
+    """Apparent size of a task dir, in bytes. Used only for the preview
+    line in the clean prompt (`tX  finished_at=... 1.2GiB`).
+
+    Delegates to disk.du_sb for consistency with `naiw-tasks disk` — that
+    way the size printed by `disk` for tasks/ as a whole and the per-task
+    size printed by `clean` agree on apparent-size semantics. partial=True
+    (du returned non-zero) is treated as 0 here: the preview line is
+    informational, the real risk is `disk` understating the total, which
+    is already handled with a loud NOTE.
+    """
+    size, _partial = disk_mod.du_sb(p)
+    return size
 
 
 def _now() -> dt.datetime:

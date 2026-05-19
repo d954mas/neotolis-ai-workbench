@@ -43,7 +43,7 @@ class _Row:
     partial: bool
 
 
-def _du_sb(path: Path) -> tuple[int, bool]:
+def du_sb(path: Path) -> tuple[int, bool]:
     """Return (bytes, partial). partial=True on non-zero exit OR no stdout."""
     if not path.exists():
         return (0, False)
@@ -76,7 +76,7 @@ def _compute_rows(cfg: Config) -> tuple[list[_Row], int]:
     total = 0
     for name in _SUBDIR_ORDER:
         p = cfg.data_root / name
-        size, partial = _du_sb(p)
+        size, partial = du_sb(p)
         rows.append(_Row(name=name, bytes_=size, partial=partial))
         total += size
     return rows, total
