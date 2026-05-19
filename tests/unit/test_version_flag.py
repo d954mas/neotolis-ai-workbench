@@ -16,21 +16,14 @@ if sys.platform != "linux":
         allow_module_level=True,
     )
 
-import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# Wave-1 parallel safety: see test_doctor.py for the same shim.
-if "naiw_tasks.drift" not in sys.modules:
-    _stub = types.ModuleType("naiw_tasks.drift")
-    _stub.compute_drift = lambda *a, **kw: []  # type: ignore[attr-defined]
-    sys.modules["naiw_tasks.drift"] = _stub
-
-import docker.errors  # noqa: E402
-import naiw_tasks.cli as cli_mod  # noqa: E402
-from click.testing import CliRunner  # noqa: E402
-from naiw_tasks.cli import cli  # noqa: E402
-from naiw_tasks.config import Config  # noqa: E402
+import docker.errors
+import naiw_tasks.cli as cli_mod
+from click.testing import CliRunner
+from naiw_tasks.cli import cli
+from naiw_tasks.config import Config
 
 
 @pytest.fixture

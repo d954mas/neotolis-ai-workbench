@@ -199,14 +199,10 @@ def _reconcile_one(
         and container is not None
         and ctr_state == "running"
     ):
-        expected_storage_bind = (
-            f"{(cfg.host_root / 'tasks' / task_id / 'storage')}"
-            f":/home/pi:rw"
-        )
         drift_items = drift_mod.compute_drift(
             container.attrs.get("HostConfig") or {},
             container.attrs.get("Config") or {},
-            expected_storage_bind=expected_storage_bind,
+            expected_storage_bind=drift_mod.expected_storage_bind(cfg, task_id),
         )
         if drift_items:
             if "drift" not in notes:

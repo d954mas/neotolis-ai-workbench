@@ -80,6 +80,34 @@ def _severity(field: str) -> str:
     return "security" if field in _SECURITY_FIELDS else "resource"
 
 
+def expected_storage_bind(cfg, task_id: str) -> str:
+    """Return the storage bind string the daemon should have recorded.
+
+    Format: ``"<host-src>:/home/pi:rw"`` — the canonical Docker bind triple.
+
+    Uses ``cfg.host_root`` (not ``cfg.data_root``). In the containerized-
+    controller deployment the controller sees the data root at one path
+    (e.g. ``/data``) while the host sees it at another (e.g.
+    ``/home/op/naiw-data``); ``HostConfig.Binds`` records the HOST path,
+    so comparing against ``cfg.data_root`` would surface a false-positive
+    ``(drift)`` on every running task.
+
+    Centralising this in drift.py keeps the audit and the create-time bind
+    (lifecycle._build_volumes) referring to the same shape. Callers are
+    ``list_cmd._reconcile_one`` and ``doctor.run_global`` / ``run_per_task``.
+
+    POSIX separators always. Docker bind sources are read literally by the
+    daemon, which runs on Linux; even if the controller is invoked from a
+    Windows shell (development/local-test), the recorded ``HostConfig.Binds``
+    entry uses ``/`` because the daemon is the canonical writer. Normalising
+    via ``str(...).replace(os.sep, "/")`` plus a string ``f"..."`` (NOT
+    ``pathlib`` arithmetic) keeps the result POSIX on every host.
+    """
+    import os
+    host_root = str(cfg.host_root).replace(os.sep, "/")
+    return f"{host_root}/tasks/{task_id}/storage:/home/pi:rw"
+
+
 def compute_drift(
     host_config: dict,
     config: dict,

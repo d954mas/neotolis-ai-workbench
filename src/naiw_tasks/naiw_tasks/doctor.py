@@ -13,16 +13,12 @@ Exit codes (operator-facing):
   1  drift detected OR disk used > 80% of max_data_size (informational)
   2  startup-check failed (precedence over drift — startup safety wins)
   3  invalid or unknown task id (per-task form only)
-
-The drift module is imported LAZILY inside each function body so that
-`import naiw_tasks.doctor` succeeds even when the peer module (`drift.py`)
-has not been merged yet. Wave-1 parallel-safety guarantee for the
-sibling plan that ships `naiw_tasks.drift`.
 """
 
 import click
 
 from naiw_tasks import disk as disk_mod
+from naiw_tasks import drift as drift_mod
 from naiw_tasks import startup_checks
 from naiw_tasks.config import Config
 from naiw_tasks.format import humanize_iec_bytes
@@ -51,9 +47,6 @@ def run_global(cfg: Config, client) -> int:
     on failure) BEFORE we attempt any further work, because a broken
     proxy/data-root would make the disk + drift sections meaningless.
     """
-    # Deferred import — see module docstring for wave-1 rationale.
-    from naiw_tasks import drift as drift_mod
-
     click.echo("[startup_checks]")
     try:
         startup_checks.run_all(cfg, client, gate_disk_threshold=False)
@@ -107,20 +100,13 @@ def run_global(cfg: Config, client) -> int:
                 continue
             host_config = attrs.get("HostConfig", {}) or {}
             ctr_config = attrs.get("Config", {}) or {}
-            expected_storage_bind = (
-                f"{str((task_dir / 'storage').resolve())}:/home/pi:rw"
+            items = drift_mod.compute_drift(
+                host_config,
+                ctr_config,
+                expected_storage_bind=drift_mod.expected_storage_bind(
+                    cfg, task.get("id") or task_dir.name,
+                ),
             )
-            try:
-                items = drift_mod.compute_drift(
-                    host_config,
-                    ctr_config,
-                    expected_storage_bind=expected_storage_bind,
-                )
-            except TypeError:
-                # Defensive — if the peer module ships a slightly different
-                # signature during wave-1 development, skip the row rather
-                # than crash the global audit.
-                items = []
             if items:
                 any_drift = True
                 click.echo(f"  {task.get('id')}:")
@@ -145,9 +131,6 @@ def run_per_task(cfg: Config, client, task_id: str) -> int:
 
     Exit codes: 0 clean, 1 drift OR container unavailable, 3 invalid id.
     """
-    # Deferred import — see module docstring for wave-1 rationale.
-    from naiw_tasks import drift as drift_mod
-
     try:
         validate_task_id(task_id)
     except ValueError as exc:
@@ -170,17 +153,11 @@ def run_per_task(cfg: Config, client, task_id: str) -> int:
     attrs = getattr(container, "attrs", {}) or {}
     host_config = attrs.get("HostConfig", {}) or {}
     ctr_config = attrs.get("Config", {}) or {}
-    expected_storage_bind = (
-        f"{str((task_dir / 'storage').resolve())}:/home/pi:rw"
+    items = drift_mod.compute_drift(
+        host_config,
+        ctr_config,
+        expected_storage_bind=drift_mod.expected_storage_bind(cfg, task_id),
     )
-    try:
-        items = drift_mod.compute_drift(
-            host_config,
-            ctr_config,
-            expected_storage_bind=expected_storage_bind,
-        )
-    except TypeError:
-        items = []
     if not items:
         click.echo(f"{task_id}: no drift")
         return 0

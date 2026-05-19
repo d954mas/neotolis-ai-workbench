@@ -1,8 +1,7 @@
 """Tests for naiw_tasks.doctor — consolidated health-check umbrella.
 
-Covers the two public entry points (run_global, run_per_task), the four
-exit codes (0/1/2/3), and the module-level lazy-import contract for the
-wave-1 parallel-safety guarantee with the drift module.
+Covers the two public entry points (run_global, run_per_task) and the four
+exit codes (0/1/2/3).
 """
 
 import sys
@@ -15,27 +14,16 @@ if sys.platform != "linux":
         allow_module_level=True,
     )
 
-import importlib
 import json
-import types
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# Wave-1 parallel safety: 06-01 (drift.py) may not have landed in this branch
-# yet. Inject a stub so `from naiw_tasks import drift` resolves at the lazy
-# import sites in doctor.py. When 06-01 lands, the real module replaces the
-# stub at import time (sys.modules entry is overwritten by the import system).
-if "naiw_tasks.drift" not in sys.modules:
-    _stub = types.ModuleType("naiw_tasks.drift")
-    _stub.compute_drift = lambda *a, **kw: []  # type: ignore[attr-defined]
-    sys.modules["naiw_tasks.drift"] = _stub
+from naiw_tasks.config import Config
+from naiw_tasks.model import SCHEMA_VERSION, Status  # noqa: F401
 
-from naiw_tasks.config import Config  # noqa: E402
-from naiw_tasks.model import SCHEMA_VERSION, Status  # noqa: E402, F401
-
-from naiw_tasks import doctor as doctor_mod  # noqa: E402
-from naiw_tasks import drift as drift_mod  # noqa: E402, F401
+from naiw_tasks import doctor as doctor_mod
+from naiw_tasks import drift as drift_mod  # noqa: F401
 
 # ---------- helpers ----------------------------------------------------------
 
@@ -298,39 +286,3 @@ def test_run_per_task_container_missing(monkeypatch, tmp_path, capsys):
     assert "alpha-001" in err
 
 
-# ---------- Wave-1 parallel-safety contract ---------------------------------
-
-
-def test_doctor_module_imports_without_drift(monkeypatch):
-    """`import naiw_tasks.doctor` must succeed even if naiw_tasks.drift is
-    unavailable. Honors the wave-1 parallel-safety contract: drift is
-    imported LAZILY inside function bodies, never at module top-level.
-    """
-    # Snapshot then evict cached modules so importlib.reload follows the
-    # forced ImportError path. We restore exactly what we evicted so other
-    # tests in this run keep working.
-    saved_drift = sys.modules.pop("naiw_tasks.drift", None)
-    saved_doctor = sys.modules.pop("naiw_tasks.doctor", None)
-
-    class _RaiseOnImport:
-        def find_spec(self, name, path=None, target=None):  # noqa: D401
-            if name == "naiw_tasks.drift":
-                raise ImportError("forced absence of naiw_tasks.drift")
-            return None
-
-    finder = _RaiseOnImport()
-    sys.meta_path.insert(0, finder)
-    try:
-        # Module-level import succeeds — proves no top-level `from … import drift`.
-        reloaded = importlib.import_module("naiw_tasks.doctor")
-        assert hasattr(reloaded, "run_global")
-        assert hasattr(reloaded, "run_per_task")
-    finally:
-        sys.meta_path.remove(finder)
-        sys.modules.pop("naiw_tasks.doctor", None)
-        if saved_doctor is not None:
-            sys.modules["naiw_tasks.doctor"] = saved_doctor
-        if saved_drift is not None:
-            sys.modules["naiw_tasks.drift"] = saved_drift
-        # Force a fresh import so subsequent tests see the canonical module.
-        importlib.import_module("naiw_tasks.doctor")
